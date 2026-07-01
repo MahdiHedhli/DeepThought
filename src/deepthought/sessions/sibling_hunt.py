@@ -616,10 +616,12 @@ class SiblingHuntSession(BaseSession):
                 f"{t.project_id} ({t.reason})" for t in blocked
             )
             parts.append(
-                f"BLOCKED/FAILED target(s) (no findings or coverage recorded): "
-                f"{blocked_ids} — the worker could not read its input (e.g. a "
-                f"malformed or unreadable SARIF) or hit an isolated per-target error. "
-                f"See the paged detail / reason; other targets were unaffected."
+                f"BLOCKED/FAILED target(s): {blocked_ids} — the worker could not read "
+                f"its input (e.g. a malformed or unreadable SARIF) or hit an isolated "
+                f"per-target error. A partial store-write failure may have persisted "
+                f"some variants (those are reported above); otherwise no findings or "
+                f"coverage were recorded. See the paged detail / reason; other targets "
+                f"were unaffected."
             )
         if refused:
             gated_off = ", ".join(
