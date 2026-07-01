@@ -21,7 +21,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
 from deepthought.export.osv import finding_to_osv, validate_osv
 from deepthought.protocol import HermesUltraCodeGate, run_session
@@ -393,10 +392,12 @@ def test_one_target_worker_failure_does_not_abort_the_whole_hunt(state_dir, monk
 
     real_worker = sh._run_marvin_worker
 
-    def _flaky(store_, session_id, target, signature, sarif_path, root, id_start):
+    def _flaky(session_id, target, signature, sarif_path, root, id_start):
+        # A NON-(OSError/ValidationError) exception (ValueError) must still be
+        # isolated to this target — the per-target guard catches any Exception.
         if target.id == "src-proj":
-            raise ValidationError.from_exception_data("Envelope", [])
-        return real_worker(store_, session_id, target, signature, sarif_path, root, id_start)
+            raise ValueError("boom in the source worker")
+        return real_worker(session_id, target, signature, sarif_path, root, id_start)
 
     monkeypatch.setattr(sh, "_run_marvin_worker", _flaky)
 
@@ -421,6 +422,68 @@ def test_one_target_worker_failure_does_not_abort_the_whole_hunt(state_dir, monk
     assert len(sib_variants) == 2        # the healthy sibling still ran
     reasons = " ".join(o.reason or "" for o in session.target_outcomes)
     assert "worker failed" in reasons
+    # The failure is SURFACED in the teach-back (not silently swallowed).
+    surfaced = (record.body + record.next_steps()).upper()
+    assert "BLOCKED" in surfaced or "FAILED" in surfaced
+
+
+def test_nonexistent_sarif_surfaces_a_blocked_target_not_silent_zero(state_dir):
+    """A missing/unreadable SARIF is a BLOCKED scan (load_sarif wraps OSError ->
+    SarifError), surfaced distinctly in the teach-back — never a silent 'no
+    variants found'."""
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    record = _run(
+        store, project_id="src-proj", finding_id="F-0007",
+        sarif_path=str(Path(state_dir) / "does-not-exist.sarif"),
+    )
+
+    # The source target proceeded at its gate but its worker was blocked; the
+    # teach-back must say so rather than report a clean empty hunt.
+    surfaced = (record.body + record.next_steps()).upper()
+    assert "BLOCKED" in surfaced or "FAILED" in surfaced
+    # No variant candidates were written (only the pre-seeded verified source
+    # finding remains).
+    variants = [
+        f for f in store.list_findings(project="src-proj")
+        if f.status is FindingStatus.candidate
+    ]
+    assert variants == []
+
+
+def test_siblings_are_gated_by_the_harness_gate_not_a_hardcoded_default(state_dir):
+    """AUTHORITY EDGE: a sibling is gated by the SAME gate the harness ran the
+    source through (injected as self.harness_gate), not a hardcoded DefaultGate —
+    so a stricter deployment gate governs every sibling too."""
+    from deepthought.protocol.gate import DefaultGate
+
+    evaluated: list[str | None] = []
+
+    class _SpyGate(DefaultGate):
+        def evaluate(self, ctx):
+            evaluated.append(ctx.project_id)
+            return super().evaluate(ctx)
+
+    store = FileStore(state_dir)
+    _seed_source(store)
+    _register_sibling(store, "sib-proj")
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(
+        store,
+        _SpyGate(),
+        SiblingHuntSession(
+            project_id="src-proj", finding_id="F-0007",
+            sibling_project_ids=["sib-proj"], sarif_path=SIBLINGS,
+        ),
+    )
+    # The harness gate (the passed instance) evaluated BOTH the source and the
+    # sibling. If the sibling used a separate hardcoded gate, the spy would not have
+    # seen 'sib-proj'.
+    assert "src-proj" in evaluated
+    assert "sib-proj" in evaluated
 
 
 def test_locus_derivation_tolerates_none_references():
@@ -586,11 +649,12 @@ def test_authority_invariant_never_widens_scope_or_creates_projects(state_dir, m
     assert cov_projects <= {"src-proj", "sib-proj"}
 
 
-def test_rejected_target_envelope_does_not_reuse_ids_or_lose_findings(state_dir, monkeypatch):
-    # FIX 2: a target whose worker envelope is REJECTED at ingest must not cause a
-    # later target to reuse ids or overwrite stranded findings. Ids are allocated
-    # authoritatively from persisted Store state (re-read per target), so the
-    # worker persisting its findings before returning is enough to keep ids fresh.
+def test_rejected_target_envelope_persists_nothing_and_ids_stay_fresh(state_dir, monkeypatch):
+    # MUTATE-ONLY-ON-ACCEPT: a target whose worker envelope is REJECTED at ingest
+    # persists NOTHING (the worker builds but does not save; the orchestrator saves
+    # only after a successful ingest). So the rejected source strands no findings,
+    # and the later sibling — allocating ids fresh from persisted Store state — gets
+    # clean, non-colliding ids.
     store = FileStore(state_dir)
     _seed_source(store)
     _register_sibling(store, "sib-proj")
@@ -598,17 +662,17 @@ def test_rejected_target_envelope_does_not_reuse_ids_or_lose_findings(state_dir,
     import deepthought.sessions.sibling_hunt as sh
 
     real_worker = sh._run_marvin_worker
-    seen = {"targets": []}
 
-    def flaky_worker(store, session_id, target, signature, sarif_path, root, id_start):
-        seen["targets"].append(target.id)
-        env = real_worker(store, session_id, target, signature, sarif_path, root, id_start)
-        # For the SOURCE target, corrupt the returned envelope into a malformed
-        # dict so the Conductor REJECTS it at ingest — AFTER the worker persisted
-        # its findings to the Store.
+    def flaky_worker(session_id, target, signature, sarif_path, root, id_start):
+        envelope, findings, detail_body = real_worker(
+            session_id, target, signature, sarif_path, root, id_start
+        )
+        # For the SOURCE target, corrupt the envelope into a malformed dict so the
+        # Conductor REJECTS it at ingest. The worker persisted nothing, so nothing
+        # is stranded.
         if target.id == "src-proj":
-            return {"garbage": "not a valid envelope", "outcome": "???"}
-        return env
+            return {"garbage": "not a valid envelope", "outcome": "???"}, findings, detail_body
+        return envelope, findings, detail_body
 
     monkeypatch.setattr(sh, "_run_marvin_worker", flaky_worker)
 
@@ -622,10 +686,7 @@ def test_rejected_target_envelope_does_not_reuse_ids_or_lose_findings(state_dir,
     )
     run_session(store, GATE, session)
 
-    # The source worker persisted its 2 variant findings (F-0008, F-0009) even
-    # though its envelope was rejected. The sibling's worker re-reads the Store for
-    # id allocation, so it MUST get fresh ids past those — never reusing them and
-    # never overwriting the stranded source findings.
+    # The rejected source target persisted NO findings (mutate-only-on-accept).
     src_variants = [
         f for f in store.list_findings(project="src-proj")
         if f.status is FindingStatus.candidate
@@ -634,12 +695,12 @@ def test_rejected_target_envelope_does_not_reuse_ids_or_lose_findings(state_dir,
         f for f in store.list_findings(project="sib-proj")
         if f.status is FindingStatus.candidate
     ]
-    assert len(src_variants) == 2  # stranded source findings not overwritten
-    assert len(sib_variants) == 2
-    all_ids = [f.id for f in src_variants + sib_variants]
-    # Every id is distinct: no reuse across the rejected + accepted targets.
+    assert src_variants == []       # rejected -> nothing stranded
+    assert len(sib_variants) == 2   # the healthy sibling still ran
+    # Every sibling id is distinct.
+    all_ids = [f.id for f in sib_variants]
     assert len(all_ids) == len(set(all_ids))
-    # The rejected source target proceeded-but-was-rejected at ingest.
+    # The source is recorded proceeded-but-rejected at ingest.
     src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
     assert src_out.proceeded and "rejected" in (src_out.reason or "")
 

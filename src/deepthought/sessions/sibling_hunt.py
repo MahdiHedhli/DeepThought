@@ -51,8 +51,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pydantic import ValidationError
-
 from ..ingest.sarif import (
     SarifError,
     load_sarif,
@@ -87,10 +85,11 @@ _ENVELOPE_VERSION = "1.0"
 _WORKER_ID = "marvin-sibling-hunt"
 
 # The gate the session uses to re-gate each NAMED sibling target independently.
-# It is the same three-outcome DefaultGate the harness runs the source through
-# (HermesUltraCode delegates to it); re-gating siblings here keeps every target's
-# authorization decision on the identical contract. It is never used to widen
-# authority — only to REFUSE/HOLD a sibling that does not pass its own gate.
+# FALLBACK gate for gating siblings only when the session is run OUTSIDE the
+# harness (``harness_gate`` unset). Inside a normal ``run_session`` the sibling is
+# gated with ``self.harness_gate`` — the SAME gate the harness applied to the
+# source — so a stricter deployment gate governs every sibling. It is never used to
+# widen authority, only to REFUSE/HOLD a sibling that does not pass its own gate.
 _SIBLING_GATE = DefaultGate()
 
 
@@ -131,41 +130,37 @@ def _same_class(
 
 
 def _run_marvin_worker(
-    store: Store,
     session_id: str,
     target: Project,
     signature: Signature,
     sarif_path: str | None,
     root: Path | None,
     id_start: int,
-) -> Envelope | dict:
+) -> tuple[Envelope | dict, list, str]:
     """One stub Marvin per target. Reads SARIF, keeps same-class in-scope
-    siblings, writes variant findings, pages detail, returns ONE envelope.
+    siblings, and BUILDS (without persisting) the variant findings, one typed
+    envelope, and the paged detail body.
 
-    Finding ids are allocated from ``id_start``, which the orchestrator computes
-    fresh from persisted Store state right before dispatching this worker. Because
-    this worker persists its findings before returning, the NEXT target's
-    allocation already reflects them — so ids are never reused across targets, on
-    success OR rejection, regardless of what this worker returns. All variant
-    detail is paged to the Store; nothing is inlined into the return value beyond
-    the typed envelope. The worker mutates the Store only AFTER the envelope
-    validates, so an over-cap field can never strand persisted findings.
+    Returns ``(envelope, findings, detail_body)``. The worker PERSISTS NOTHING:
+    the orchestrator writes the findings and the detail to the Store only AFTER
+    the envelope passes ``Conductor.ingest`` (mutate-only-on-accept), so a rejected
+    envelope strands nothing in the Store. Finding ids are allocated from
+    ``id_start`` (the orchestrator computes it fresh from persisted Store state per
+    target); because a rejected target persists no findings, the ids it would have
+    used stay free for the next target with no reuse or overwrite. Nothing is
+    inlined into orchestrator state beyond the typed envelope.
     """
     contained_scope = _coverage_areas(target, root)
     findings: list = []
     primitives: list[Primitive] = []
     detail_name = "sibling-hunt.txt"
+    detail_ref = f"detail/{session_id}/{target.id}-{detail_name}"
 
     if sarif_path:
         try:
             sarif = load_sarif(sarif_path)
         except SarifError as exc:
-            detail_ref = store.write_detail(
-                session_id,
-                f"{target.id}-{detail_name}",
-                f"SIBLING HUNT worker for {target.id}: SARIF load failed: {exc}\n",
-            )
-            return Envelope(
+            blocked = Envelope(
                 envelope_version=_ENVELOPE_VERSION,
                 session_ref=session_id,
                 worker_id=_WORKER_ID,
@@ -180,6 +175,11 @@ def _run_marvin_worker(
                     "scope_ok": True,
                     "authorization_ref": _attestation_ref(target),
                 },
+            )
+            return (
+                blocked,
+                [],
+                f"SIBLING HUNT worker for {target.id}: SARIF load failed: {exc}\n",
             )
 
         # Reuse the DISCOVER/SARIF path with the TARGET's own scope/root
@@ -200,7 +200,6 @@ def _run_marvin_worker(
         )
 
     outcome = "resolved" if findings else "empty"
-    detail_ref = f"detail/{session_id}/{target.id}-{detail_name}"
 
     envelope = Envelope(
         envelope_version=_ENVELOPE_VERSION,
@@ -231,16 +230,8 @@ def _run_marvin_worker(
             "authorization_ref": _attestation_ref(target),
         },
     )
-
-    # The envelope validated. Only NOW mutate the Store.
-    for finding in findings:
-        store.save_finding(finding)
-    store.write_detail(
-        session_id,
-        f"{target.id}-{detail_name}",
-        _detail_body(target, signature, sarif_path, findings, primitives),
-    )
-    return envelope
+    detail_body = _detail_body(target, signature, sarif_path, findings, primitives)
+    return envelope, findings, detail_body
 
 
 def _hints(signature: Signature, findings: list) -> list[str]:
@@ -415,13 +406,14 @@ class SiblingHuntSession(BaseSession):
         """Gate a NAMED sibling INDEPENDENTLY, then hunt only on proceed.
 
         The sibling is gated with its OWN ``GateContext.from_project`` through the
-        same three-outcome gate: no basis -> refuse, empty scope -> hold. A
-        non-proceed sibling produces NO worker, NO findings, and NO coverage — it
-        is recorded in the outcome and nothing is written for it.
+        SAME gate the harness applied to the source (``self.harness_gate``, injected
+        by ``run_session``) — so a stricter deployment gate governs every sibling,
+        never a hardcoded default. Same three outcomes: no basis -> refuse, empty
+        scope -> hold. A non-proceed sibling produces NO worker, NO findings, and NO
+        coverage — it is recorded in the outcome and nothing is written for it.
         """
-        decision = _SIBLING_GATE.evaluate(
-            GateContext.from_project(sibling, self.type)
-        )
+        gate = self.harness_gate or _SIBLING_GATE
+        decision = gate.evaluate(GateContext.from_project(sibling, self.type))
         if not decision.proceeds:
             self.target_outcomes.append(
                 TargetOutcome(
@@ -458,21 +450,29 @@ class SiblingHuntSession(BaseSession):
         ``local_path``, never the source's checkout root.
         """
         assert gated  # only ever called for a proceed-at-gate target
-        root = _resolve_checkout((self.root if is_source else None) or target.local_path)
-        # Allocate finding ids authoritatively from persisted Store state, re-read
-        # per target. The previous worker persisted its findings before returning,
-        # so this already reflects them — ids are never reused across targets.
-        id_start = _next_finding_index(store)
         try:
-            envelope = _run_marvin_worker(
-                store, session_id, target, signature, self.sarif_path, root, id_start
+            # ALL fallible per-target work is inside this guard so one target's
+            # failure (a bad checkout path -> OSError, a Store read error, or an
+            # over-cap field the Envelope rejects -> ValidationError) is isolated
+            # to that target and never aborts the whole multi-target hunt. --root
+            # applies to the source only; a named sibling uses its own local_path.
+            root = _resolve_checkout(
+                (self.root if is_source else None) or target.local_path
             )
-        except (ValidationError, SarifError, OSError) as exc:
-            # PER-TARGET ISOLATION. One target's data-driven worker failure (e.g. a
-            # SARIF result that yields an over-cap field the Envelope rejects) must
-            # NOT abort the whole multi-target hunt and deny service to the other
-            # authorized targets. Record it as blocked and move on; id allocation
-            # re-reads the Store per target, so nothing is reused.
+            # Allocate finding ids authoritatively from persisted Store state,
+            # re-read per target. A rejected target persists nothing (below), so its
+            # ids stay free and are never reused or overwritten across targets.
+            id_start = _next_finding_index(store)
+            envelope, findings, detail_body = _run_marvin_worker(
+                session_id, target, signature, self.sarif_path, root, id_start
+            )
+        except Exception as exc:
+            # PER-TARGET ISOLATION (broad by design): ANY failure processing one
+            # target — a bad checkout path, a Store read error, an over-cap field
+            # the Envelope rejects, etc. — is contained to that target and never
+            # aborts the multi-target hunt. It is recorded and surfaced distinctly
+            # in the teach-back (never silently swallowed). BaseException
+            # (KeyboardInterrupt/SystemExit) still propagates.
             self.target_outcomes.append(
                 TargetOutcome(
                     project_id=target.id,
@@ -485,10 +485,9 @@ class SiblingHuntSession(BaseSession):
 
         result = self.conductor.ingest(envelope)
         if not result.ok:
-            # The worker persisted its findings before returning; id allocation
-            # re-reads the Store per target, so nothing is reused even though this
-            # envelope is rejected. A rejected envelope contributes no ledger entry
-            # and no coverage.
+            # MUTATE-ONLY-ON-ACCEPT. The worker persisted nothing; a rejected
+            # envelope therefore strands NO findings and writes no detail, ledger,
+            # or coverage. The ids it would have used stay free for the next target.
             self.target_outcomes.append(
                 TargetOutcome(
                     project_id=target.id,
@@ -500,6 +499,11 @@ class SiblingHuntSession(BaseSession):
             return
 
         validated = result.envelope
+        # Accepted: ONLY NOW mutate the Store — persist the variant findings and
+        # page the detail, from the worker's built (now validated) output.
+        for finding in findings:
+            store.save_finding(finding)
+        store.write_detail(session_id, f"{target.id}-sibling-hunt.txt", detail_body)
         self.envelopes.append(validated)
         coverage_refs = self._write_read_coverage(
             store, target, session_id, validated, root
@@ -564,10 +568,13 @@ class SiblingHuntSession(BaseSession):
         all_findings = [fid for t in proceeded for fid in t.findings]
         all_coverage = [cref for t in proceeded for cref in t.coverage]
         n_variants = len(all_findings)
-        # A proceed-at-gate target whose worker was BLOCKED (e.g. its SARIF failed
-        # to load) is NOT a clean empty run — surface it distinctly, mirroring
-        # DISCOVER, so the operator does not read a block as "no variants found".
-        blocked = [t for t in proceeded if t.reason == "blocked"]
+        # A proceed-at-gate target that did NOT complete cleanly — its worker was
+        # BLOCKED (e.g. its SARIF failed to load) or FAILED (an isolated per-target
+        # error caught by _hunt_target) — is not a clean empty run. Anything whose
+        # recorded reason is not the clean "resolved"/"empty" envelope outcome is
+        # surfaced distinctly so the operator never reads a block/failure as "no
+        # variants found".
+        blocked = [t for t in proceeded if t.reason not in ("resolved", "empty")]
 
         parts = [
             f"SIBLING HUNT on {source.id!r} (READ-ONLY): derived a "
@@ -579,11 +586,14 @@ class SiblingHuntSession(BaseSession):
             f"No code executed; scope unchanged."
         ]
         if blocked:
-            blocked_ids = ", ".join(t.project_id for t in blocked)
+            blocked_ids = ", ".join(
+                f"{t.project_id} ({t.reason})" for t in blocked
+            )
             parts.append(
-                f"BLOCKED target(s) (no findings or coverage recorded): {blocked_ids} "
-                f"— the worker could not read its input (e.g. a malformed or "
-                f"unsupported SARIF). See the paged detail for the block reason."
+                f"BLOCKED/FAILED target(s) (no findings or coverage recorded): "
+                f"{blocked_ids} — the worker could not read its input (e.g. a "
+                f"malformed or unreadable SARIF) or hit an isolated per-target error. "
+                f"See the paged detail / reason; other targets were unaffected."
             )
         if refused:
             gated_off = ", ".join(
@@ -596,13 +606,14 @@ class SiblingHuntSession(BaseSession):
         summary = " ".join(parts)
 
         if blocked and not n_variants:
-            # SARIF was supplied but a target's worker was blocked — point at the
-            # paged detail for the reason, not at "provide SARIF".
+            # SARIF was supplied but a target's worker was blocked/failed — point at
+            # the paged detail / reason, not at "provide SARIF".
             next_steps = (
-                f"A SIBLING HUNT worker was BLOCKED. Inspect the paged detail "
-                f"(detail/<session>/<target>-sibling-hunt.txt in the state store) "
-                f"for the block reason (e.g. a malformed or unsupported SARIF), fix "
-                f"it, and re-run SIBLING HUNT on {source.id!r}."
+                f"A SIBLING HUNT worker was BLOCKED or FAILED for a target. Inspect "
+                f"the recorded reason and the paged detail "
+                f"(detail/<session>/<target>-sibling-hunt.txt in the state store) — "
+                f"e.g. a malformed/unreadable SARIF or an isolated per-target error — "
+                f"fix it, and re-run SIBLING HUNT on {source.id!r}."
             )
         elif n_variants:
             next_steps = (

@@ -197,7 +197,7 @@ def signature_from_finding(
         # _match_capability path the SARIF ingest uses). The summary is a
         # length-capped, SARIF-derived field; it is used only as a table key,
         # never interpreted. The body is never consulted.
-        capability = _match_capability(finding.summary, [])
+        capability = _match_capability(finding.summary or "", [])
     if capability is None or capability not in CAPABILITY_TAXONOMY:
         return None
 
