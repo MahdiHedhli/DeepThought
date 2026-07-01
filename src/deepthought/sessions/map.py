@@ -154,11 +154,30 @@ class MapSession(BaseSession):
         """Count files under a contained area, READ-ONLY. Zero if it is missing.
 
         Walks with :meth:`pathlib.Path.rglob`; it lists directory entries only
-        and never opens or executes any target file.
+        and never opens or executes any target file. Robust to the untrusted
+        filesystem: a scope entry that names a single file counts as one, and an
+        unreadable directory or a special file (``PermissionError``/``OSError``)
+        is skipped rather than crashing the session.
         """
-        if not area_root.exists():
+        try:
+            if area_root.is_file():
+                return 1  # a scope entry may name a file, not only a directory
+            if not area_root.is_dir():
+                return 0  # missing, or a special/unreadable entry
+        except OSError:
             return 0
-        return sum(1 for p in area_root.rglob("*") if p.is_file())
+
+        count = 0
+        try:
+            for p in area_root.rglob("*"):
+                try:
+                    if p.is_file():
+                        count += 1
+                except OSError:
+                    continue  # unreadable entry — skip, do not crash
+        except OSError:
+            pass  # unreadable subtree — count what we could reach
+        return count
 
     @staticmethod
     def _area_body(area: str, files_found: int) -> str:

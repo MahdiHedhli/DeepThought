@@ -284,13 +284,14 @@ def sarif_to_findings(sarif: dict, *, project: str, id_start: int = 1) -> list[F
         rule_id = result.get("ruleId")
         rule_id = rule_id if isinstance(rule_id, str) else None
 
-        # OSV summaries are single-line. SARIF message.text may be multi-line
-        # (untrusted), so take only its first line into the summary; the full
-        # message still goes into the body below.
+        # OSV summaries are single-line. Both message.text AND ruleId are
+        # untrusted SARIF data and may contain newlines, so first-line each
+        # before building the summary; the full message still goes into the body.
         first_line = message.splitlines()[0] if message.splitlines() else message
         summary = first_line
         if rule_id:
-            summary = f"{rule_id}: {first_line}"
+            rule_line = rule_id.splitlines()[0] if rule_id.splitlines() else rule_id
+            summary = f"{rule_line}: {first_line}"
         summary = summary[:_SUMMARY_MAX]
 
         references: list[Reference] = []

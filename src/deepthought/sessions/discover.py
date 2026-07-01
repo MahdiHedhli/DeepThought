@@ -325,10 +325,16 @@ class DiscoverSession(BaseSession):
         n_primitives = len(envelope.primitives)
 
         # --- teach back coverage (FR-6: DISCOVER writes findings AND coverage) ---
-        # DISCOVER reasoned over the in-scope areas by READING static signals and
-        # SARIF, so it records Coverage(method='read') for each. Writes go through
-        # the Store; nothing outside the scope allowlist is ever covered.
-        coverage_refs = self._write_read_coverage(store, project, session_id)
+        # Only record read coverage when the worker actually read an input. In
+        # 002 DISCOVER reads SARIF; with no SARIF (or a SARIF that failed to
+        # load, outcome 'blocked') nothing was surveyed, so recording the areas
+        # as read would corrupt the coverage signal operators rely on before
+        # VERIFY. Nothing outside the scope allowlist is ever covered.
+        inputs_read = self.sarif_path is not None and envelope.outcome.value != "blocked"
+        if inputs_read:
+            coverage_refs = self._write_read_coverage(store, project, session_id)
+        else:
+            coverage_refs = []
 
         primitive_word = "primitive" if n_primitives == 1 else "primitives"
         finding_word = "finding" if n_findings == 1 else "findings"

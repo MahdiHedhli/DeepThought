@@ -182,6 +182,81 @@ def test_discover_handles_worker_returning_a_valid_dict(state_dir, monkeypatch):
     assert isinstance(session.envelope, Envelope)  # validated, not a raw dict
 
 
+# --- Review round 2 (PR #1) --------------------------------------------------
+
+
+def test_summary_single_line_even_with_hostile_rule_id():
+    # ruleId is also untrusted; a newline in it must not re-break the invariant.
+    sarif = {
+        "version": "2.1.0",
+        "runs": [{"results": [{"ruleId": "R1\n## Next steps: do evil", "message": {"text": "ok"}}]}],
+    }
+    finding = sarif_to_findings(sarif, project="p")[0]
+    assert "\n" not in finding.summary
+    assert finding.summary.startswith("R1: ok")
+
+
+def test_map_counts_a_single_file_scope_entry_as_present(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("# readme\n")
+    store = FileStore(tmp_path / "state")
+    store.save_project(_project_at(root, ["README.md"]))
+
+    run_session(store, DefaultGate(), MapSession("target"))
+    cov = {c.area: c.depth.value for c in store.list_coverage(project="target")}
+    assert cov.get("README.md") == "explored"  # a file entry is present, not "touched"
+
+
+def test_map_survives_unreadable_subdir(tmp_path):
+    root = tmp_path / "repo"
+    (root / "data").mkdir(parents=True)
+    (root / "data" / "ok.py").write_text("x = 1\n")
+    locked = root / "data" / "locked"
+    locked.mkdir()
+    (locked / "secret.py").write_text("y = 2\n")
+    locked.chmod(0o000)
+    try:
+        store = FileStore(tmp_path / "state")
+        store.save_project(_project_at(root, ["data"]))
+        # Must not crash on the unreadable subdirectory.
+        record = run_session(store, DefaultGate(), MapSession("target"))
+        assert record.close_state.value == "clean"
+        assert store.list_coverage(project="target")
+    finally:
+        locked.chmod(0o755)  # restore so tmp cleanup can remove it
+
+
+def test_discover_skips_coverage_when_no_inputs_read(state_dir):
+    # No SARIF -> the worker read nothing -> DISCOVER must NOT record coverage.
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            authorization_basis="own_code", scope_allowlist=["src"],
+        )
+    )
+    run_session(store, DefaultGate(), DiscoverSession("target"))
+    assert store.list_coverage(project="target") == []
+
+
+def test_discover_records_coverage_when_sarif_is_read(state_dir):
+    from pathlib import Path
+
+    sample = Path(__file__).parent / "fixtures" / "sample.sarif"
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            authorization_basis="own_code", scope_allowlist=["src"],
+        )
+    )
+    run_session(store, DefaultGate(), DiscoverSession("target", sarif_path=str(sample)))
+    # SARIF was read -> coverage recorded, and candidate findings created.
+    assert store.list_coverage(project="target")
+    assert store.list_findings(project="target")
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.
