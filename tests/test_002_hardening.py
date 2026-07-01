@@ -773,3 +773,13 @@ def test_discover_blocked_worker_reports_honestly(state_dir, monkeypatch):
     assert "BLOCKED" in record.body
     assert "discover.txt" in record.next_steps()
     assert store.list_coverage(project="target") == []
+
+
+def test_scope_dot_matches_whole_checkout():
+    # A "." scope entry (whole repo) puts every relative path in scope instead of
+    # raising and rejecting everything.
+    s = _sarif_rule("py/sql-injection", uri="app/db.py")
+    assert len(sarif_to_findings(s, project="p", scope=["."])) == 1
+    # ...but traversal/absolute are still refused even with "." in scope.
+    assert sarif_to_findings(_sarif_rule("py/sql-injection", uri="../secret.py"), project="p", scope=["."]) == []
+    assert sarif_to_findings(_sarif_rule("py/sql-injection", uri="/etc/passwd"), project="p", scope=["."]) == []

@@ -316,6 +316,12 @@ def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
         if not isinstance(area, str) or not area.strip():
             continue
         ap = PurePosixPath(area.strip())  # padded scope entries must still match
+        if not ap.parts:
+            # "." (or ".") means the whole checkout — everything relative is in
+            # scope. (norm.relative_to(PurePosixPath(".")) would raise, so this
+            # must be handled explicitly.) Traversal/absolute were already
+            # refused above, so "." never widens beyond the tree.
+            return True
         if norm == ap:
             return True
         try:
