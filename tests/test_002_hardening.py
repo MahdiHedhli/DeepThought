@@ -730,3 +730,16 @@ def test_shared_scope_module_containment():
     assert area_in_scope("src/pkg", root)
     assert resolve_within(root, "../up") is None
     assert resolve_within(root, "/etc") is None
+
+
+def test_map_refuses_backslash_scope_entry(tmp_path):
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("x = 1\n")
+    store = FileStore(tmp_path / "state")
+    # A backslash entry is a valid POSIX filename, so it must be refused
+    # syntactically, not treated as an in-tree file.
+    store.save_project(_project_at(root, ["..\\secret", "src"]))
+    run_session(store, DefaultGate(), MapSession("target"))
+    covered = {c.area for c in store.list_coverage(project="target")}
+    assert covered == {"src"}
