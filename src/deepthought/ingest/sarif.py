@@ -291,8 +291,13 @@ def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
     An absolute URI or a ``..`` traversal escapes the allowlist and is refused —
     DISCOVER never reports a finding for a path outside the authorized scope.
     """
-    if scope is None or uri is None:
-        return True
+    if scope is None:
+        return True  # no scope filter
+    if uri is None:
+        # A locationless result names no path. Keep it only if the project has a
+        # usable in-scope area; an EMPTY contained scope (e.g. every area escaped
+        # the root) means nothing is in scope, so a locationless result is out.
+        return any(isinstance(a, str) and a.strip() for a in scope)
     # Percent-decode first: a SARIF uri like "app/%2e%2e/secret.py" decodes to
     # "app/../secret.py", so the traversal check below must see the decoded form
     # (otherwise PurePosixPath treats "%2e%2e" as an ordinary in-scope segment).

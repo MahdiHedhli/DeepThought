@@ -170,3 +170,31 @@ def test_migration_does_not_delete_unrelated_area(state_dir):
     areas = {c.area for c in store.list_coverage(project="p")}
     assert areas == {"ext-soap", "ext/soap"}
     assert store.get_coverage("p", "ext-soap").body == "unrelated"
+
+
+def test_save_coverage_survives_legacy_unlink_failure(state_dir, monkeypatch):
+    import pathlib
+
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    legacy = state_dir / "coverage" / "p" / "ext-soap.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        Coverage(project="p", area="ext/soap", method="read", depth="touched",
+                 last_session="S", body="old").to_markdown()
+    )
+    orig_unlink = pathlib.Path.unlink
+
+    def boom(self, *a, **k):
+        if self.name == "ext-soap.md":
+            raise OSError("locked")
+        return orig_unlink(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", boom)
+    # The primary write must still succeed even though the legacy cleanup fails.
+    store.save_coverage(
+        Coverage(project="p", area="ext/soap", method="read", depth="explored",
+                 last_session="S2", body="new")
+    )
+    assert store.get_coverage("p", "ext/soap").depth.value == "explored"

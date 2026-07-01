@@ -233,7 +233,11 @@ class FileStore(Store):
             except Exception:
                 existing = None
             if existing is not None and existing.area == coverage.area:
-                legacy.unlink()
+                try:
+                    legacy.unlink()
+                except OSError:
+                    pass  # cleanup only — a locked/undeletable legacy file must
+                    # not fail the primary write that already succeeded.
         return coverage
 
     def get_coverage(self, project: str, area: str) -> Coverage | None:

@@ -820,3 +820,13 @@ def test_discover_symlink_escaping_area_drops_findings(tmp_path):
     # are both refused (root-aware containment), consistently.
     assert store.list_findings(project="target") == []
     assert store.list_coverage(project="target") == []
+
+
+def test_locationless_result_dropped_when_scope_empty():
+    # A result with no physicalLocation: kept when there's a usable in-scope area
+    # (or no filter), but dropped when the contained scope is empty.
+    sarif = {"version": "2.1.0", "runs": [{"results": [{"ruleId": "R1", "message": {"text": "x"}}]}]}
+    assert sarif_to_findings(sarif, project="p", scope=[]) == []
+    assert sarif_to_findings(sarif, project="p", scope=["  "]) == []
+    assert len(sarif_to_findings(sarif, project="p", scope=["app"])) == 1
+    assert len(sarif_to_findings(sarif, project="p", scope=None)) == 1
