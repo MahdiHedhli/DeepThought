@@ -793,6 +793,25 @@ def test_worker_returning_duplicate_ids_in_a_batch_persists_only_one(state_dir, 
     assert src_out.findings.count("F-8000") == 1
 
 
+def test_locus_uses_the_last_appended_location_not_message_text():
+    """INPUT FIREWALL: sarif_to_findings appends the real **Location:** AFTER the
+    untrusted message text, so the LAST match wins. A message body that embeds its
+    own **Location:** (an earlier match) cannot steer the signature's locus."""
+    from deepthought.sibling.signature import signature_from_finding
+
+    finding = make_finding(
+        id="F-1", project="p", status="verified", summary="py/sql-injection",
+        body=(
+            "attacker message with **Location:** `evil/fake.py:1` embedded\n\n"
+            "**Location:** `app/real.py:9`"
+        ),
+        evidence_ref=None,
+    )
+    sig = signature_from_finding(finding)
+    assert sig is not None
+    assert sig.locus_pattern == "app/real.py:9"   # the last, structured match
+
+
 def test_same_class_drops_primitives_binding_to_filtered_findings():
     """_same_class keeps a primitive only if it is same-class AND binds to a KEPT
     finding — never a finding id that no returned finding provides (no dangling

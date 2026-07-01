@@ -136,10 +136,15 @@ def _locus_pattern(finding: Finding) -> str | None:
     only structured location the body carries) or, failing that, a
     ``references[]`` url stem. This is a match hint — never a path that is
     resolved, opened, or executed. The rest of the body is never read.
+
+    ``sarif_to_findings`` APPENDS the real, structured location AFTER the untrusted
+    SARIF message text, so the LAST match is the trustworthy one — an attacker whose
+    message body embeds its own ``**Location:**`` (an earlier match) cannot steer
+    the signature's locus.
     """
-    match = _LOCATION_RE.search(finding.body or "")
-    if match:
-        locus = match.group(1).strip()
+    matches = _LOCATION_RE.findall(finding.body or "")
+    if matches:
+        locus = matches[-1].strip()
         if locus:
             return locus[:256]
     for ref in finding.references or []:

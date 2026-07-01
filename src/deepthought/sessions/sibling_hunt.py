@@ -141,26 +141,15 @@ def _same_class(
 _FINDING_LOCATION_RE = re.compile(r"\*\*Location:\*\*\s+`([^`]+)`")
 
 
-def _drop_source_instance(findings: list, primitives: list, source_locus: str):
-    """On the SOURCE project, drop the SOURCE finding's OWN instance.
+def _finding_locus(finding) -> str | None:
+    """The finding's STRUCTURED location — the LAST ``**Location:**`` match.
 
-    Reusing the SARIF that produced/verified the source finding surfaces the source
-    location as an in-scope, same-capability result — but the already-verified source
-    bug is NOT a sibling of itself. Drop the finding whose rendered ``**Location:**``
-    equals the signature's ``locus_pattern`` (the source's location), plus any
-    primitive bound to it. A genuine sibling at a DIFFERENT location is kept.
+    ``sarif_to_findings`` appends the real location AFTER the untrusted SARIF message
+    text, so the LAST match is the trustworthy one; an attacker whose message body
+    embeds its own ``**Location:**`` (an earlier match) cannot steer it.
     """
-    dropped: set[str] = set()
-    kept_findings = []
-    for f in findings:
-        match = _FINDING_LOCATION_RE.search(f.body or "")
-        loc = match.group(1).strip() if match else None
-        if loc is not None and loc == source_locus:
-            dropped.add(f.id)
-            continue
-        kept_findings.append(f)
-    kept_primitives = [p for p in primitives if p.finding_ref not in dropped]
-    return kept_findings, kept_primitives
+    matches = _FINDING_LOCATION_RE.findall(finding.body or "")
+    return matches[-1].strip() if matches else None
 
 
 def _finding_location_in_scope(
@@ -175,10 +164,9 @@ def _finding_location_in_scope(
     of an (otherwise authorized) project. A finding that claims no location names no
     path and is kept — it cannot report an out-of-scope file.
     """
-    match = _FINDING_LOCATION_RE.search(finding.body or "")
-    if not match:
+    locus = _finding_locus(finding)
+    if locus is None:
         return True
-    locus = match.group(1).strip()
     # Strip a trailing ``:line`` / ``:line:col`` so we scope-check the file path.
     path = re.sub(r":\d+(?::\d+)?$", "", locus)
     return _in_scope(path, scope, root)
@@ -253,14 +241,6 @@ def _run_marvin_worker(
         findings, primitives = _same_class(
             raw_findings, raw_primitives, signature.capability
         )
-        # On the SOURCE project, exclude the SOURCE finding's own instance — a
-        # reused SARIF would otherwise re-save the already-verified source bug (same
-        # capability + same location) as a fresh candidate. It is not a sibling of
-        # itself. Siblings live at OTHER locations (or in sibling projects).
-        if target.id == signature.source_project and signature.locus_pattern:
-            findings, primitives = _drop_source_instance(
-                findings, primitives, signature.locus_pattern
-            )
 
     outcome = "resolved" if findings else "empty"
 
@@ -584,7 +564,17 @@ class SiblingHuntSession(BaseSession):
                 ):
                     seen.add(f.id)
                     kept.append(f)
-            kept_ids = seen
+
+            # On the SOURCE project, exclude the SOURCE finding's OWN instance — a
+            # reused SARIF would otherwise re-save the already-verified source bug
+            # (same capability + same location) as a fresh candidate. It is not a
+            # sibling of itself. Keyed on is_source (not a truncatable id compare);
+            # siblings live at OTHER locations, or in sibling projects.
+            if is_source and signature.locus_pattern:
+                kept = [
+                    f for f in kept if _finding_locus(f) != signature.locus_pattern
+                ]
+            kept_ids = {f.id for f in kept}
 
             # Ingest a FILTERED envelope so the LEDGER holds only primitives binding
             # to a KEPT finding — a dropped finding leaves NO dangling ledger
