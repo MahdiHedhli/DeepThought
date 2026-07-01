@@ -51,7 +51,9 @@ def _slug(value: str) -> str:
     """
     quoted = quote(value, safe="") or "_"
     if len(quoted) > _SLUG_MAX:
-        digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:16]
+        # Non-cryptographic use (filename dedup); usedforsecurity=False keeps it
+        # available under FIPS, where SHA-1 for security is blocked.
+        digest = hashlib.sha1(value.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
         quoted = f"{quoted[: _SLUG_MAX - len(digest) - 1]}-{digest}"
     return quoted
 

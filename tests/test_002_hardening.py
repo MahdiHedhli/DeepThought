@@ -889,3 +889,30 @@ def test_discover_refuses_symlinked_uri_component(tmp_path):
     assert len(findings) == 1
     assert "app/real.py" in findings[0].body
     assert all("secret.py" not in f.body for f in findings)
+
+
+def test_tag_fallback_honors_table_precedence_not_tag_order():
+    # No ruleId match; tags [cwe-73 (write), file-read (read)] -> file-read wins
+    # because the heuristic TABLE ranks it before the cwe-73 fallback, regardless
+    # of the tags' own order.
+    def sarif(tags):
+        return {
+            "version": "2.1.0",
+            "runs": [
+                {
+                    "tool": {"driver": {"rules": [{"id": "x/generic", "properties": {"tags": tags}}]}},
+                    "results": [
+                        {
+                            "ruleId": "x/generic",
+                            "message": {"text": "m"},
+                            "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app/a.py"}, "region": {"startLine": 1}}}],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    s = sarif(["external/cwe/cwe-73", "file-read"])
+    f = sarif_to_findings(s, project="p")
+    p = sarif_to_primitives(s, finding_ids=[x.id for x in f])
+    assert p and p[0].kind == "read:arbitrary-file"
