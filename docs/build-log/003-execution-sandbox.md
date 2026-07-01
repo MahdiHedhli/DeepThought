@@ -1,13 +1,26 @@
 # Build Session Log — Feature 003, Execution Sandbox (VERIFY)
 
-> **STATUS: BUILT on branch `003-execution-sandbox`; NOT merged.** SAFE build —
-> the sandbox is delivered as a typed, isolation-tested interface; **no target
-> code executes**. `DockerSandbox.run()` is guarded OFF by default and raises
-> `SandboxExecutionDisabled` (the HARD STOP). **280 tests green; all three smokes
-> (`smoke.sh`, `smoke_002.sh`, `smoke_003.sh`) pass.** Next: open the 003 PR, run
-> the external review loop to a clean pass, then **HARD STOP** — wiring VERIFY to
-> execute real target code needs Mahdi's sandbox sign-off before the flag is ever
-> flipped.
+> **STATUS: MERGED to `main` 2026-07-01 (squash commit `440485a`), PR #2.** SAFE
+> build — the sandbox is a typed, isolation-tested interface; **no target code
+> executes**. `DockerSandbox.run()` is guarded OFF and raises
+> `SandboxExecutionDisabled` (the HARD STOP). **310 tests green; all three smokes
+> (`smoke.sh`, `smoke_002.sh`, `smoke_003.sh`) pass on `main`.**
+>
+> **Review: clean by codex + an independent Antigravity/Gemini adversarial review**
+> (the `agy` CLI, substituting for the quota-blocked `gemini-code-assist` bot). The
+> loop ran ~6 GitHub-bot rounds (findings 11→5→2→1→1→2, all fixed test-first) plus
+> a 2-round `agy` adversarial pass that caught **6 further real defects both bots
+> missed**: the isolation flags were tunable booleans (now `Literal`-locked); a
+> named `--user` could alias to UID 0 (now numeric-only); `cpus=inf` crashed the
+> argv renderer (now finite); the CLI didn't catch `SandboxError`; the image
+> `ENTRYPOINT` could run instead of the repro (now forced via `--entrypoint`); an
+> empty `command[0]` cleared the entrypoint (now rejected); the `--user` gate
+> rendered the raw string (now normalized). Both reviewers were CLEAN on the merged
+> commit `495a2ef`.
+>
+> Next: **HARD STOP** — wiring VERIFY to execute real target code needs Mahdi's
+> sandbox sign-off before `execution_enabled` is ever flipped. The safe next
+> feature (004) proceeds per the gate-first/test-first pattern.
 
 **Feature:** 003-execution-sandbox
 **Branch:** `003-execution-sandbox`
