@@ -17,10 +17,13 @@ The 003 hard stop is a CLI invariant, asserted here:
   executing backend is wired in 003, so the flag exits non-zero with a clear
   message and runs nothing. (Enabling execution is a distinct, later, signed-off
   change.)
-- **A Noop *reproducing* result promotes through the guard.** The dev/test flag
-  ``--noop-reproduced`` feeds a reproducing canned result through the *same*
-  ``NoopSandbox`` seam (still zero execution), so the candidate reaches
-  ``verified`` via ``store.transition_finding`` — the path the 003 smoke drives.
+- **``--noop-reproduced`` is still a non-mutating dry-run.** In this slice (no
+  signed-off backend) the CLI never writes verification state from a synthetic
+  Noop verdict — that would corrupt a real finding. ``--noop-reproduced`` only
+  changes the verdict the dry-run REPORTS; the candidate stays a candidate, with
+  no evidence_ref and no transition_log entry. The promote-through-guard path is
+  exercised at the session level (``tests/test_verify_session.py``), not by the
+  CLI on real state.
 - Unknown project / unknown finding exit non-zero with a message, matching the
   existing ``status``/``map``/``discover`` handling.
 
@@ -142,10 +145,13 @@ def test_verify_dry_run_never_calls_docker_run(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
 
 
-# --- Noop reproducing result: promotion through the Store guard --------------
+# --- Noop reproducing result: STILL a non-mutating dry-run -------------------
 
 
-def test_verify_noop_reproduced_promotes_candidate_to_verified(tmp_path):
+def test_verify_noop_reproduced_is_still_a_dry_run_and_does_not_promote(tmp_path):
+    """--noop-reproduced only changes the REPORTED verdict; in this slice the CLI
+    never promotes a real finding from a synthetic Noop verdict. The candidate
+    stays a candidate with no evidence_ref and an empty transition_log."""
     state, store = _seeded_state(tmp_path)
 
     result = runner.invoke(
@@ -156,10 +162,12 @@ def test_verify_noop_reproduced_promotes_candidate_to_verified(tmp_path):
 
     assert result.exit_code == 0, result.output
     finding = store.get_finding("F-0007")
-    # Promoted THROUGH the guard: a resolving evidence_ref and status verified.
-    assert finding.status is FindingStatus.verified
-    assert finding.evidence_ref
-    assert store.detail_exists(finding.evidence_ref)
+    assert finding.status is FindingStatus.candidate   # NOT promoted
+    assert not finding.evidence_ref
+    assert finding.transition_log == []
+    # The output is explicit that nothing executed and nothing changed.
+    assert "no execution" in result.output.lower()
+    assert "unchanged" in result.output.lower()
 
 
 def test_verify_noop_reproduced_leaves_check_green(tmp_path):
@@ -178,8 +186,8 @@ def test_verify_noop_reproduced_leaves_check_green(tmp_path):
 
 
 def test_verify_noop_reproduced_still_no_execution(tmp_path, monkeypatch):
-    """Even the reproducing path runs nothing: it is the NoopSandbox seam, never a
-    subprocess and never DockerSandbox.run()."""
+    """Even the reproducing report runs nothing: it is the NoopSandbox seam, never a
+    subprocess and never DockerSandbox.run(); and it mutates nothing."""
     from deepthought.sandbox import docker as docker_mod
 
     def _boom(*a, **k):  # pragma: no cover - must never run
@@ -196,7 +204,7 @@ def test_verify_noop_reproduced_still_no_execution(tmp_path, monkeypatch):
          "--project", "php-src", "--finding", "F-0007", "--noop-reproduced"],
     )
     assert result.exit_code == 0, result.output
-    assert store.get_finding("F-0007").status is FindingStatus.verified
+    assert store.get_finding("F-0007").status is FindingStatus.candidate
 
 
 # --- the hard stop: --i-have-sandbox-signoff does not execute in this slice ---

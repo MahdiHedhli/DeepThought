@@ -13,11 +13,16 @@
 #   2. DISCOVER      — reason over the bundled SARIF fixture; seed candidate(s).
 #   3. VERIFY (dry)  — default NoopSandbox dry-run: prints "no execution — sandbox
 #                      sign-off pending" and leaves the candidate a candidate.
-#   4. VERIFY (repro)— --noop-reproduced feeds a REPRODUCED verdict through the
-#                      SAME NoopSandbox seam (still executes nothing), promoting
-#                      the candidate to verified THROUGH the Store lifecycle guard
-#                      on a resolving evidence_ref.
-#   5. check         — stays green on the produced state.
+#   4. VERIFY (repro)— --noop-reproduced only changes the REPORTED verdict; the CLI
+#                      still executes nothing AND mutates nothing (a synthetic Noop
+#                      verdict must never write real verification state). Candidate
+#                      stays a candidate.
+#   5. Promote (API) — the internal VerifySession promote-through-guard path, driven
+#                      directly (NOT the CLI): a NoopSandbox reproducing verdict
+#                      pages resolving evidence and promotes candidate -> verified
+#                      through store.transition_finding. Still executes nothing; this
+#                      is the path a signed-off backend will drive.
+#   6. check         — stays green on the produced state.
 #
 # Uses a throwaway state dir. Exits 0 on success.
 #
@@ -98,34 +103,69 @@ assert not f.evidence_ref, "dry-run set an evidence_ref; it must not"
 print("dry-run left the finding a candidate with no evidence_ref — correct")
 PY
 
-say "4. VERIFY (--noop-reproduced) — canned REPRODUCED verdict through the Noop seam"
-# Still executes NOTHING: --noop-reproduced only flips the verdict the NoopSandbox
-# RETURNS. The candidate is promoted to verified THROUGH store.transition_finding
-# on a resolving, paged evidence_ref.
+say "4. VERIFY (--noop-reproduced) — still a DRY-RUN: reports reproduced, mutates nothing"
+# In this slice the CLI NEVER writes verification state from a synthetic Noop
+# verdict. --noop-reproduced only changes the REPORTED verdict; the candidate must
+# stay a candidate with no evidence_ref.
 "$DT" playbook verify --project "$PROJECT" --finding "$FINDING" --noop-reproduced
 "$PY" - "$STATE" "$FINDING" <<'PY'
 import sys
-from pathlib import Path
 from deepthought.store import FileStore
 store = FileStore(sys.argv[1])
 f = store.get_finding(sys.argv[2])
+assert f.status.value == "candidate", f"--noop-reproduced mutated status to {f.status.value!r}"
+assert not f.evidence_ref, "--noop-reproduced set an evidence_ref; it must not"
+assert not f.transition_log, "--noop-reproduced wrote a transition_log entry; it must not"
+print("--noop-reproduced left the finding a candidate — the CLI mutates nothing here")
+PY
+
+say "5. Promote via the SESSION API (not the CLI) — the promote-through-guard path"
+# This is the INTERNAL path a signed-off backend will drive: a VerifySession with a
+# NoopSandbox reproducing verdict pages resolving evidence and promotes the
+# candidate to verified THROUGH store.transition_finding. It executes NOTHING (Noop
+# seam) — it demonstrates the guard, not real execution. This is what the unit
+# tests exercise; here we drive it end to end for the smoke.
+"$PY" - "$STATE" "$FINDING" <<'PY'
+import sys
+from pathlib import Path
+from deepthought.protocol import HermesUltraCodeGate, run_session
+from deepthought.sandbox import NoopSandbox, SandboxPolicy, SandboxResult, SandboxSpec
+from deepthought.sessions import VerifySession
+from deepthought.store import FileStore
+
+state, finding_id = sys.argv[1], sys.argv[2]
+store = FileStore(state)
+spec = SandboxSpec(
+    image="ghcr.io/deepthought/repro-runner@sha256:" + "0" * 64,
+    command=["/repro/run", "--input", "/work/case"],
+    repro_ref="detail/seed/repro-01.bin",
+    policy=SandboxPolicy(),
+)
+result = SandboxResult(exit_code=0, timed_out=False, wall_seconds=0.0, reproduced=True)
+# dry_run defaults to False here: the REAL promote-through-guard path. NoopSandbox
+# still executes nothing.
+session = VerifySession("deepthought", finding_id, spec=spec, sandbox=NoopSandbox(result))
+record = run_session(store, HermesUltraCodeGate(), session)
+
+f = store.get_finding(finding_id)
 assert f.status.value == "verified", f"expected verified, got {f.status.value!r}"
-assert f.evidence_ref, "verified finding has no evidence_ref"
-assert store.detail_exists(f.evidence_ref), "evidence_ref does not resolve"
-# The paged evidence artifact carries the TYPED verdict, not raw target output.
-body = (Path(sys.argv[1]) / f.evidence_ref).read_text(encoding="utf-8")
+assert f.evidence_ref and store.detail_exists(f.evidence_ref), "evidence_ref missing/unresolved"
+body = (Path(state) / f.evidence_ref).read_text(encoding="utf-8")
 assert "reproduced: True" in body, "paged evidence missing the typed verdict"
+assert session.sandbox.recorded, "the sandbox seam was never exercised"
 print(f"promoted candidate -> verified via the lifecycle guard; evidence at {f.evidence_ref}")
 PY
 "$DT" playbook findings --project "$PROJECT"
 
-say "5. check — must be OK (verified finding carries a resolving evidence_ref)"
+say "6. check — must be OK (verified finding carries a resolving evidence_ref)"
 "$DT" check
 
-say "6. Acceptance summary"
+say "7. Acceptance summary"
 echo "NO target code executed: the sandbox seam was a NoopSandbox (records, runs nothing)."
 echo "NO Docker daemon required; NO subprocess spawned; NOTHING transmitted."
-echo "VERIFY promoted ${FINDING}: candidate -> verified THROUGH the Store lifecycle guard."
+echo "CLI 'playbook verify' mutates NOTHING in this slice (dry-run only, both verdicts)."
+echo "Promotion candidate -> verified is the internal session/guard path (signed-off"
+echo "backend will drive it); demonstrated here via the session API on ${FINDING}."
 echo "check              : OK"
 
 say "smoke_003 complete — state at $STATE"

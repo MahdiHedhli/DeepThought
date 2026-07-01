@@ -250,12 +250,15 @@ def playbook_verify(
         finding_id=finding,
         spec=_dry_run_spec(),
         sandbox=sandbox,
-        # The plain dry-run mutates the finding NOWHERE — it must not pollute a
-        # real candidate's lifecycle or audit history with a canned, no-execution
-        # verdict. --noop-reproduced is the explicit dev path that demonstrates
-        # promotion through the guard (the 003 smoke drives it), so it runs the
-        # real (mutating) VERIFY.
-        dry_run=not noop_reproduced,
+        # ALWAYS a dry-run in this slice: no signed-off executing backend exists,
+        # so the CLI must never write verification state (evidence / promotion /
+        # audit entry) from a synthetic Noop verdict — that would corrupt a real
+        # finding's results and audit trail. --noop-reproduced only changes the
+        # verdict the dry-run REPORTS; it never promotes. A finding is verified
+        # only when a signed-off sandbox actually reproduces it. The
+        # promote-through-guard path is exercised at the session level (tests +
+        # the 003 smoke), never by a user-facing CLI command on real state.
+        dry_run=True,
     )
     try:
         record = run_session(_store(state), HermesUltraCodeGate(), session)
@@ -264,9 +267,17 @@ def playbook_verify(
         raise typer.Exit(code=2)
 
     _echo_session(record)
-    if not noop_reproduced:
-        # Make the dry-run's meaning unmistakable in the operator's output.
-        typer.echo("")
+    # Make the dry-run's meaning unmistakable in the operator's output — for BOTH
+    # verdicts. Nothing executed and nothing was mutated in either case.
+    typer.echo("")
+    if noop_reproduced:
+        typer.echo(
+            "no execution — sandbox sign-off pending. --noop-reproduced only sets "
+            "the verdict the NoopSandbox REPORTS; no container was built, no target "
+            "code ran, and the finding is UNCHANGED. A finding is promoted to "
+            "verified only when a signed-off sandbox actually reproduces it."
+        )
+    else:
         typer.echo(
             "no execution — sandbox sign-off pending. This was a NoopSandbox "
             "dry-run: no container was built, no target code ran, nothing was "
