@@ -212,17 +212,31 @@ class FileStore(Store):
     def _coverage_path(self, project: str, area: str) -> Path:
         return self.root / "coverage" / project / f"{_slug(area)}.md"
 
+    def _legacy_coverage_path(self, project: str, area: str) -> Path:
+        # The pre-percent-encoding slug (``/``/``\`` -> ``-``). Kept only so a
+        # store written by the old code upgrades cleanly instead of duplicating.
+        legacy = area.replace("/", "-").replace("\\", "-").strip("-")
+        return self.root / "coverage" / project / f"{legacy}.md"
+
     def save_coverage(self, coverage: Coverage) -> Coverage:
-        self._write(
-            self._coverage_path(coverage.project, coverage.area),
-            coverage.to_markdown(),
-        )
+        path = self._coverage_path(coverage.project, coverage.area)
+        self._write(path, coverage.to_markdown())
+        # Migrate: drop a stale record this area wrote under the old slug, so an
+        # upgraded store does not keep two files (and two list entries) for it.
+        legacy = self._legacy_coverage_path(coverage.project, coverage.area)
+        if legacy != path and legacy.exists():
+            legacy.unlink()
         return coverage
 
     def get_coverage(self, project: str, area: str) -> Coverage | None:
         path = self._coverage_path(project, area)
         if not path.exists():
-            return None
+            # Fall back to the old slug so a direct lookup still resolves on a
+            # not-yet-migrated store.
+            legacy = self._legacy_coverage_path(project, area)
+            if not legacy.exists():
+                return None
+            path = legacy
         return Coverage.from_markdown(self._read(path))
 
     def list_coverage(self, project: str | None = None) -> list[Coverage]:

@@ -367,19 +367,29 @@ class DiscoverSession(BaseSession):
         else:
             coverage_refs = []
 
-        primitive_word = "primitive" if n_primitives == 1 else "primitives"
-        finding_word = "finding" if n_findings == 1 else "findings"
-        summary = (
-            f"DISCOVER on {project.id!r} (READ-ONLY): worker returned "
-            f"{n_findings} candidate {finding_word} and {n_primitives} suspected "
-            f"{primitive_word}. Ingested the envelope only; {len(conductor.ledger)} "
-            f"primitive(s) now in the ledger; recorded read coverage for "
-            f"{len(coverage_refs)} in-scope area(s). No code executed; scope unchanged."
-        )
+        outcome = envelope.outcome.value
+        if outcome == "blocked":
+            # A blocked worker (e.g. SARIF failed to load) is NOT an empty success
+            # — say so plainly so the operator does not read it as a clean run.
+            summary = (
+                f"DISCOVER on {project.id!r} (READ-ONLY): worker was BLOCKED — no "
+                f"findings or primitives ingested, no coverage recorded. No code "
+                f"executed; scope unchanged."
+            )
+        else:
+            primitive_word = "primitive" if n_primitives == 1 else "primitives"
+            finding_word = "finding" if n_findings == 1 else "findings"
+            summary = (
+                f"DISCOVER on {project.id!r} (READ-ONLY): worker returned "
+                f"{n_findings} candidate {finding_word} and {n_primitives} suspected "
+                f"{primitive_word}. Ingested the envelope only; {len(conductor.ledger)} "
+                f"primitive(s) now in the ledger; recorded read coverage for "
+                f"{len(coverage_refs)} in-scope area(s). No code executed; scope unchanged."
+            )
 
         return SessionOutcome(
             summary=summary,
-            next_steps=self._suggest_next(project, n_findings),
+            next_steps=self._suggest_next(project, n_findings, outcome),
             # findings_touched is exactly what the envelope reported written.
             findings_touched=list(envelope.findings_written),
             coverage_changed=coverage_refs,
@@ -415,7 +425,16 @@ class DiscoverSession(BaseSession):
         return refs
 
     @staticmethod
-    def _suggest_next(project: Project, n_findings: int) -> str:
+    def _suggest_next(project: Project, n_findings: int, outcome: str = "resolved") -> str:
+        if outcome == "blocked":
+            # SARIF was supplied but failed to load — point at the paged detail
+            # for the reason, not at "provide SARIF".
+            return (
+                f"The DISCOVER worker was blocked. Inspect the paged detail "
+                f"(state/detail/<session>/discover.txt) for the block reason (e.g. a "
+                f"malformed or unsupported SARIF), fix it, and re-run DISCOVER on "
+                f"{project.id!r}."
+            )
         if n_findings == 0:
             return (
                 f"No candidates surfaced for {project.id!r}. Provide tool SARIF "

@@ -127,3 +127,26 @@ def test_coverage_slug_is_traversal_safe(state_dir):
     files = list((state_dir / "coverage").rglob("*.md"))
     assert len(files) == 1
     assert files[0].parent == state_dir / "coverage" / "p"  # never escaped
+
+
+def test_coverage_reads_and_migrates_legacy_slug(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    # Simulate a store written by the OLD slugger: ext/soap -> ext-soap.md
+    legacy = state_dir / "coverage" / "p" / "ext-soap.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        Coverage(project="p", area="ext/soap", method="read", depth="touched",
+                 last_session="S-1", body="legacy").to_markdown()
+    )
+    # Direct lookup still resolves via the legacy fallback.
+    assert store.get_coverage("p", "ext/soap").body == "legacy"
+    # Re-saving migrates it to the new slug and removes the stale legacy file.
+    store.save_coverage(
+        Coverage(project="p", area="ext/soap", method="read", depth="explored",
+                 last_session="S-2", body="new")
+    )
+    assert not legacy.exists()
+    assert len(store.list_coverage(project="p")) == 1
+    assert store.get_coverage("p", "ext/soap").depth.value == "explored"

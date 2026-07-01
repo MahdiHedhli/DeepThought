@@ -743,3 +743,33 @@ def test_map_refuses_backslash_scope_entry(tmp_path):
     run_session(store, DefaultGate(), MapSession("target"))
     covered = {c.area for c in store.list_coverage(project="target")}
     assert covered == {"src"}
+
+
+def test_discover_blocked_worker_reports_honestly(state_dir, monkeypatch):
+    import deepthought.sessions.discover as discover_mod
+
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            authorization_basis="own_code", scope_allowlist=["app"],
+        )
+    )
+
+    def blocked_worker(store, session_id, project, sarif_path, root=None):
+        from deepthought.schema import Envelope
+        return Envelope(
+            envelope_version="1.0", session_ref=session_id, worker_id="w",
+            task_ref="t", outcome="blocked", primitives=[], findings_written=[],
+            coverage_delta=[], next_step_hints=[], detail_ref=None,
+            gate_attestation={"scope_ok": True, "authorization_ref": "own_code"},
+        )
+
+    monkeypatch.setattr(discover_mod, "_run_marvin_worker", blocked_worker)
+    session = DiscoverSession("target", sarif_path="whatever.sarif")
+    record = run_session(store, DefaultGate(), session)
+    # The block is reported plainly, not as an empty success; next steps point at
+    # the paged detail rather than "provide SARIF".
+    assert "BLOCKED" in record.body
+    assert "discover.txt" in record.next_steps()
+    assert store.list_coverage(project="target") == []
