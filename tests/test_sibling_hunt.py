@@ -771,13 +771,22 @@ def test_worker_returning_duplicate_ids_in_a_batch_persists_only_one(state_dir, 
 
     real_worker = sh._run_marvin_worker
 
+    from deepthought.schema.envelope import Primitive
+
     def _dupes(session_id, target, signature, sarif_path, root, id_start):
         env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
         a = make_finding(id="F-8000", project=target.id, status="candidate", evidence_ref=None,
                          summary="A", body="**Location:** `app/a.py:1`")
         b = make_finding(id="F-8000", project=target.id, status="candidate", evidence_ref=None,
                          summary="B", body="**Location:** `app/b.py:1`")
-        env = env.model_copy(update={"findings_written": list(env.findings_written) + ["F-8000"]})
+        # F-8000 needs a same-class primitive to pass the firewall (the point of this
+        # test is the dedup, not the same-class gate).
+        prim = Primitive(kind=signature.capability, target_locus="app/a.py", preconditions=[],
+                         grants=[signature.capability], confidence="suspected", finding_ref="F-8000")
+        env = env.model_copy(update={
+            "findings_written": list(env.findings_written) + ["F-8000"],
+            "primitives": list(env.primitives) + [prim],
+        })
         return env, findings + [a, b], detail
 
     monkeypatch.setattr(sh, "_run_marvin_worker", _dupes)
@@ -810,6 +819,43 @@ def test_locus_uses_the_last_appended_location_not_message_text():
     sig = signature_from_finding(finding)
     assert sig is not None
     assert sig.locus_pattern == "app/real.py:9"   # the last, structured match
+
+
+def test_finding_without_a_same_class_primitive_is_dropped(state_dir, monkeypatch):
+    """FIREWALL: a variant is persisted only if the VALIDATED envelope binds a
+    same-class primitive (kind == signature.capability) to it. An attested, in-scope
+    finding with NO matching primitive is dropped — it is not proven a same-class
+    sibling and the ledger cannot back it."""
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _no_prim(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        # Attest a NEW in-scope finding but provide NO primitive for it.
+        rogue = make_finding(
+            id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+            summary="unproven", body="**Location:** `app/rogue.py:1`",
+        )
+        env = env.model_copy(update={"findings_written": list(env.findings_written) + ["F-8000"]})
+        return env, findings + [rogue], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _no_prim)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    assert store.get_finding("F-8000") is None   # no same-class primitive -> dropped
+    # The legit variants (which DO carry same-class primitives) still persist.
+    src_variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    assert len(src_variants) == 2
 
 
 def test_same_class_drops_primitives_binding_to_filtered_findings():

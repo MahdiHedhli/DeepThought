@@ -554,11 +554,22 @@ class SiblingHuntSession(BaseSession):
             # area that escapes the root is never treated as in scope.
             contained_scope = _coverage_areas(target, root)
             attested = set(validated.findings_written)
+            # A variant is a SAME-CLASS sibling only if the validated envelope binds
+            # a primitive of the signature's capability to it. Requiring this (from
+            # the VALIDATED envelope, not the worker's word) stops a compromised
+            # worker from persisting an attested finding that has no same-class
+            # primitive — that would be an unproven candidate the ledger cannot back.
+            same_class_refs = {
+                p.finding_ref
+                for p in validated.primitives
+                if p.kind == signature.capability
+            }
             kept: list = []
             seen: set[str] = set()
             for f in findings:
                 if (
                     f.id in attested
+                    and f.id in same_class_refs
                     and f.project == target.id
                     and f.id not in seen
                     and store.get_finding(f.id) is None
