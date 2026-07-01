@@ -213,3 +213,29 @@ def test_get_coverage_legacy_fallback_requires_area_match(state_dir):
     # area "ext-soap" != "ext/soap" -> must return None, not the wrong record.
     assert store.get_coverage("p", "ext/soap") is None
     assert store.get_coverage("p", "ext-soap").body == "real"
+
+
+def test_slug_bounds_filename_length_and_stays_injective(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    long_a = "src/" + "a" * 300
+    long_b = "src/" + "b" * 300
+    store.save_coverage(Coverage(project="p", area=long_a, method="read",
+                                 depth="touched", last_session="S", body="x"))
+    store.save_coverage(Coverage(project="p", area=long_b, method="read",
+                                 depth="touched", last_session="S", body="y"))
+    files = list((state_dir / "coverage" / "p").glob("*.md"))
+    assert len(files) == 2                       # distinct areas -> distinct files
+    assert all(len(f.name) <= 255 for f in files)  # under the OS limit
+    assert store.get_coverage("p", long_a).body == "x"  # deterministic round-trip
+    assert store.get_coverage("p", long_b).body == "y"
+
+
+def test_get_coverage_corrupt_legacy_returns_none(state_dir):
+    store = FileStore(state_dir)
+    legacy = state_dir / "coverage" / "p" / "ext-soap.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("not a valid record — no front matter")
+    # A corrupt legacy file must not crash the lookup.
+    assert store.get_coverage("p", "ext/soap") is None

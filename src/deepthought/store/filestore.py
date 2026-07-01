@@ -7,6 +7,7 @@ repository alone. The lifecycle guard is enforced here, at the boundary.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from urllib.parse import quote
 
@@ -31,6 +32,12 @@ from .base import (
 )
 
 
+# Keep the slug (plus the ".md" suffix) well under the common 255-char filename
+# limit. A quoted value longer than this is truncated and disambiguated with a
+# hash of the ORIGINAL value, which keeps it injective and filesystem-safe.
+_SLUG_MAX = 200
+
+
 def _slug(value: str) -> str:
     """Injective, filesystem-safe filename for a coverage area.
 
@@ -38,9 +45,15 @@ def _slug(value: str) -> str:
     never collide (``ext/soap`` vs ``ext-soap`` — the old ``/``→``-`` slug mapped
     both to ``ext-soap.md``, silently overwriting one) and no area can escape the
     coverage directory via a ``/`` or ``\\`` in its name. A simple area like
-    ``ext-soap`` is unchanged, so existing records keep their filenames.
+    ``ext-soap`` is unchanged, so existing records keep their filenames. A very
+    long (or heavily-encoded) area is bounded to avoid a "File name too long"
+    error, staying injective via a hash of the original value.
     """
-    return quote(value, safe="") or "_"
+    quoted = quote(value, safe="") or "_"
+    if len(quoted) > _SLUG_MAX:
+        digest = hashlib.sha1(value.encode("utf-8")).hexdigest()[:16]
+        quoted = f"{quoted[: _SLUG_MAX - len(digest) - 1]}-{digest}"
+    return quoted
 
 
 class FileStore(Store):
@@ -252,7 +265,10 @@ class FileStore(Store):
         legacy = self._legacy_coverage_path(project, area)
         if legacy == path or not legacy.exists():
             return None
-        candidate = Coverage.from_markdown(self._read(legacy))
+        try:
+            candidate = Coverage.from_markdown(self._read(legacy))
+        except Exception:
+            return None  # a corrupt/malformed legacy file is not a valid record
         return candidate if candidate.area == area else None
 
     def list_coverage(self, project: str | None = None) -> list[Coverage]:
