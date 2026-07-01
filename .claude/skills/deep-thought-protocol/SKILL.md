@@ -57,8 +57,35 @@ load state  ->  gate  ->  scoped work  ->  teach back  ->  validate  ->  close
   `Coverage(method='read')` for the in-scope areas. Runs no code; the SARIF is
   untrusted data mapped only into finding fields, and the `ruleId`→capability map
   is a closed lookup an injected rule can only miss.
-- *(later)* VERIFY, SIBLING HUNT, DISCLOSURE — each behind its own gate and, for
-  anything that runs code, behind the sandbox (Article III).
+- **VERIFY** (feature 003) — promote a *candidate* to *verified* on sandboxed
+  evidence. VERIFY runs a minimized repro **only inside the sandbox**: it hands a
+  hardened `SandboxSpec` (an argv command, never a shell string, under a
+  default-deny `SandboxPolicy`) to the injected `Sandbox` and reads back **only**
+  the typed `SandboxResult` (`reproduced`, `exit_code`, `wall_seconds`, and
+  `stdout_ref`/`stderr_ref` *pointers*). Raw target stdout/stderr is paged to the
+  Store and **never inlined** into orchestrator context — the same firewall as the
+  worker envelope (Article VIII). On a reproducing result VERIFY pages a short
+  evidence artifact via `store.write_detail`, sets the finding's `evidence_ref` to
+  that resolving ref, and promotes **through `store.transition_finding`** — the
+  Store lifecycle guard owns the decision (Article IV); VERIFY never writes
+  `status=verified` by hand. A non-reproducing result pages the negative artifact
+  and leaves the finding a candidate. VERIFY refuses any finding that is not a
+  candidate.
+
+  **Sandbox HARD STOP (Article III; Phase 0 §0.3).** Executing untrusted target
+  code is OFF in this slice. The sandbox is proven by *inspecting* the hardened run
+  configuration (`DockerSandbox.build_command` argv), not by running containers;
+  tests and the smoke back VERIFY with a `NoopSandbox` that records the requested
+  run and returns a canned result **without executing anything**. A real executing
+  backend's `run()` is guarded by a default-OFF `execution_enabled` flag, raises
+  when off, and is never invoked. `deepthought playbook verify` therefore defaults
+  to a NoopSandbox dry-run that plainly reports *no execution — sandbox sign-off
+  pending*; it never enables `DockerSandbox` execution. Enabling execution — and a
+  real backend run (an ephemeral microVM per Phase 0 §0.3, or the container
+  fallback) — is a distinct, later change behind **Mahdi's sign-off**.
+
+- *(later)* SIBLING HUNT, DISCLOSURE — each behind its own gate and, for anything
+  that runs code, behind the sandbox (Article III).
 
 Run these through the CLI, which is the protocol harness in code:
 
@@ -67,10 +94,21 @@ deepthought playbook new-project --name ... --git-url ... --basis ... --scope ..
 deepthought playbook status --project <id>
 deepthought playbook map --project <id>                    # 002, READ-ONLY coverage
 deepthought playbook discover --project <id> [--sarif <path>]  # 002, candidate findings
+deepthought playbook verify --project <id> --finding <F-NNNN>  # 003, NoopSandbox dry-run (no execution)
 deepthought playbook findings [--project <id>]
 deepthought check
 deepthought publish        # local artifacts only; asserts the human gate
 ```
+
+`playbook verify` NEVER executes untrusted target code by default: it runs the
+VERIFY session behind a `NoopSandbox` and reports a dry-run. It never enables
+`DockerSandbox` execution; `--i-have-sandbox-signoff` is the hard-stop escape
+hatch and, since no executing backend is wired in this slice, exits with a message
+and runs nothing. The sandbox interface, its default-deny policy, and the
+inspection-only argv builder are specified in
+[`specs/003-execution-sandbox/contracts/sandbox.md`](../../../specs/003-execution-sandbox/contracts/sandbox.md);
+the sandbox technology choice and the hard stop are recorded in
+[`docs/phase-0-decisions.md`](../../../docs/phase-0-decisions.md) §0.3.
 
 ## Ingesting a Marvin envelope
 

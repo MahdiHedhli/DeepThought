@@ -19,11 +19,13 @@ import typer
 from .check import run_check
 from .export.osv import finding_to_osv, osv_id_for
 from .protocol import HermesUltraCodeGate, run_session
+from .sandbox import NoopSandbox, SandboxError, SandboxPolicy, SandboxResult, SandboxSpec
 from .sessions import (
     DiscoverSession,
     MapSession,
     NewProjectSession,
     StatusSession,
+    VerifySession,
 )
 from .store import FileStore, StoreError
 
@@ -161,6 +163,131 @@ def playbook_discover(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
     _echo_session(record)
+
+
+# The dry-run repro spec. It is DATA the NoopSandbox merely records — an argv
+# command (never a shell string) under a default-hardened, default-deny policy.
+# Nothing here is executed in this slice; the NoopSandbox runs nothing.
+_DRY_RUN_IMAGE = "deepthought/verify-dry-run:noop"
+_DRY_RUN_COMMAND = ["/repro/run"]
+_DRY_RUN_REPRO_REF = "detail/pending/repro.bin"
+
+
+def _dry_run_spec() -> SandboxSpec:
+    """A hardened, default-deny spec the NoopSandbox records but never runs."""
+    return SandboxSpec(
+        image=_DRY_RUN_IMAGE,
+        command=list(_DRY_RUN_COMMAND),
+        repro_ref=_DRY_RUN_REPRO_REF,
+        policy=SandboxPolicy(),  # default-constructed = fully locked down
+    )
+
+
+@playbook_app.command("verify")
+def playbook_verify(
+    project: str = typer.Option(..., help="Project id the finding belongs to."),
+    finding: str = typer.Option(..., help="Candidate finding id to verify (F-NNNN)."),
+    noop_reproduced: bool = typer.Option(
+        False,
+        "--noop-reproduced",
+        help=(
+            "DEV/TEST ONLY: change the verdict the NoopSandbox REPORTS to reproduced "
+            "(still executes nothing). This is a DRY-RUN: it does NOT promote the "
+            "finding, page evidence, or write any verification state — the finding "
+            "stays a candidate. Promotion happens only when a signed-off sandbox "
+            "actually reproduces the finding."
+        ),
+    ),
+    i_have_sandbox_signoff: bool = typer.Option(
+        False,
+        "--i-have-sandbox-signoff",
+        help=(
+            "The 003 HARD STOP escape hatch. No real executing backend is wired in "
+            "this slice, so this exits with a message and runs nothing. Enabling real "
+            "execution is a distinct, later change behind Mahdi's sign-off."
+        ),
+    ),
+    state: Path = _STATE_OPTION,
+) -> None:
+    """Verify a candidate finding in the sandbox (VERIFY session, feature 003).
+
+    By default this NEVER executes untrusted target code. It constructs a
+    ``VerifySession`` backed by a ``NoopSandbox`` — the injected sandbox seam that
+    records the requested run and returns a canned result without running anything
+    — and reports a dry-run that plainly says no execution happened while the
+    sandbox sign-off is pending (Constitution Article III; Phase 0 §0.3).
+
+    A real executing backend (``DockerSandbox``) is never enabled here. Passing
+    ``--i-have-sandbox-signoff`` is the hard stop: because no executing backend is
+    wired in this slice, it exits with a clear message and runs nothing.
+    """
+    # --- the 003 HARD STOP -------------------------------------------------
+    # The sign-off flag is the only path that would ever reach a real executing
+    # backend. In this slice no such backend is wired, so we refuse outright and
+    # execute nothing. We NEVER construct a DockerSandbox with execution enabled,
+    # never call DockerSandbox.run(), and never spawn a subprocess.
+    if i_have_sandbox_signoff:
+        typer.echo(
+            "verify refused: no real executing sandbox backend is wired in this "
+            "slice (003). Executing untrusted target code is the hard stop and "
+            "requires Mahdi's sign-off plus a signed-off backend (Constitution "
+            "Article III; Phase 0 §0.3). Nothing was executed.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # --- default: a NoopSandbox dry-run that executes NOTHING --------------
+    # The canned verdict is non-reproducing by default (a true dry-run: the
+    # candidate is not promoted). --noop-reproduced flips ONLY the recorded verdict
+    # the NoopSandbox returns; it still runs nothing. Real execution stays off.
+    canned = SandboxResult(
+        exit_code=0,
+        timed_out=False,
+        wall_seconds=0.0,
+        reproduced=noop_reproduced,
+    )
+    sandbox = NoopSandbox(canned)
+    session = VerifySession(
+        project_id=project,
+        finding_id=finding,
+        spec=_dry_run_spec(),
+        sandbox=sandbox,
+        # ALWAYS a dry-run in this slice: no signed-off executing backend exists,
+        # so the CLI must never write verification state (evidence / promotion /
+        # audit entry) from a synthetic Noop verdict — that would corrupt a real
+        # finding's results and audit trail. --noop-reproduced only changes the
+        # verdict the dry-run REPORTS; it never promotes. A finding is verified
+        # only when a signed-off sandbox actually reproduces it. The
+        # promote-through-guard path is exercised at the session level (tests +
+        # the 003 smoke), never by a user-facing CLI command on real state.
+        dry_run=True,
+    )
+    try:
+        record = run_session(_store(state), HermesUltraCodeGate(), session)
+    except (StoreError, SandboxError) as exc:
+        # SandboxError covers the sandbox seam (e.g. a backend returning no result,
+        # or the guarded-off run() hard stop) — exit cleanly, never a traceback.
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    _echo_session(record)
+    # Make the dry-run's meaning unmistakable in the operator's output — for BOTH
+    # verdicts. Nothing executed and nothing was mutated in either case.
+    typer.echo("")
+    if noop_reproduced:
+        typer.echo(
+            "no execution — sandbox sign-off pending. --noop-reproduced only sets "
+            "the verdict the NoopSandbox REPORTS; no container was built, no target "
+            "code ran, and the finding is UNCHANGED. A finding is promoted to "
+            "verified only when a signed-off sandbox actually reproduces it."
+        )
+    else:
+        typer.echo(
+            "no execution — sandbox sign-off pending. This was a NoopSandbox "
+            "dry-run: no container was built, no target code ran, nothing was "
+            "transmitted. The finding is unchanged until a signed-off sandbox "
+            "reproduces it."
+        )
 
 
 @playbook_app.command("findings")
