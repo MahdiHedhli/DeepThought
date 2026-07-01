@@ -916,3 +916,38 @@ def test_tag_fallback_honors_table_precedence_not_tag_order():
     f = sarif_to_findings(s, project="p")
     p = sarif_to_primitives(s, finding_ids=[x.id for x in f])
     assert p and p[0].kind == "read:arbitrary-file"
+
+
+def test_helpuri_rejected_when_malformed_or_control_chars():
+    from deepthought.export.osv import finding_to_osv, validate_osv
+
+    def sarif_help(uri):
+        return {
+            "version": "2.1.0",
+            "runs": [
+                {
+                    "tool": {"driver": {"rules": [{"id": "R1", "helpUri": uri}]}},
+                    "results": [
+                        {
+                            "ruleId": "R1",
+                            "message": {"text": "x"},
+                            "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app/a.py"}, "region": {"startLine": 1}}}],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    for bad in [
+        "https://ok.test/\nnot-a-uri",   # embedded newline
+        "https://ok.test/ has space",     # embedded space
+        "http://",                        # no authority
+        "https://ok\ttab.test",           # embedded tab
+        "https://ok.test/\x00null",       # embedded control char
+    ]:
+        finding = sarif_to_findings(sarif_help(bad), project="p")[0]
+        assert finding.references == [], repr(bad)
+        assert validate_osv(finding_to_osv(finding)) == []
+    # A clean https URL is still kept.
+    ok = sarif_to_findings(sarif_help("https://ok.test/rules/1"), project="p")[0]
+    assert len(ok.references) == 1

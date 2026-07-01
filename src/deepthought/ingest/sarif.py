@@ -154,10 +154,14 @@ _HEURISTIC_RE: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     for needle, capability in _HEURISTIC
 )
 
-# Schemes allowed for a persisted reference URL. A helpUri with any other scheme
-# (javascript:, data:, file:, …) is dropped — it must not reach persisted state
-# or OSV output, where it could drive XSS in a downstream viewer.
-_SAFE_URL_SCHEMES = ("http://", "https://")
+# A persisted reference URL must be a clean, bounded http(s) URL with an
+# authority and NO whitespace/control characters — so a helpUri like
+# "https://ok.test/\nnot-a-uri" or one with a foreign scheme (javascript:, data:,
+# file:) never reaches persisted state or OSV output (where the schema declares
+# references[].url as a URI, and a downstream viewer could be driven to XSS).
+# ``[!-~]`` is printable ASCII excluding space; fullmatch rejects embedded
+# newlines/controls and requires at least one char after "//" (the authority).
+_SAFE_HTTP_URL_RE = re.compile(r"https?://[!-~]+", re.IGNORECASE)
 
 # A leading URI scheme (file:, http:, javascript:) or a Windows drive/backslash.
 # A SARIF location carrying one of these is not a relative in-tree path and is
@@ -425,12 +429,13 @@ def sarif_to_findings(
         if (
             help_uri
             and len(help_uri) <= _REF_URL_MAX
-            and help_uri.lower().startswith(_SAFE_URL_SCHEMES)
+            and _SAFE_HTTP_URL_RE.fullmatch(help_uri)
         ):
             # type is free-form here; normalised to the OSV enum on export. The
-            # helpUri is dropped unless it is a bounded http(s) URL, so untrusted
-            # SARIF cannot smuggle an oversized string or a javascript:/data:/
-            # file: scheme into persisted state or OSV output.
+            # helpUri is dropped unless it is a bounded, well-formed http(s) URL,
+            # so untrusted SARIF cannot smuggle an oversized string, a foreign
+            # scheme, or an embedded newline/control char into persisted state or
+            # OSV output — keeping every finding OSV-valid by construction.
             references.append(Reference(type="detection", url=help_uri))
 
         # Render the accepted location into the finding body so the persisted
