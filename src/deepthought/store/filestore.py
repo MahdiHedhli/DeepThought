@@ -271,7 +271,7 @@ class FileStore(Store):
             candidate = Coverage.from_markdown(self._read(legacy))
         except Exception:
             return None  # a corrupt/malformed legacy file is not a valid record
-        return candidate if candidate.area == area else None
+        return candidate if (candidate is not None and candidate.area == area) else None
 
     def list_coverage(self, project: str | None = None) -> list[Coverage]:
         out = []
