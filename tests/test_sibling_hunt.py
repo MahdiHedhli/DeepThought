@@ -1144,6 +1144,85 @@ def test_worker_finding_with_no_location_is_dropped(state_dir, monkeypatch):
     assert store.get_finding("F-8000") is None   # no location -> not scope-verifiable -> dropped
 
 
+def test_worker_finding_as_valid_dict_is_revalidated_and_persisted(state_dir, monkeypatch):
+    """FORWARD BOUNDARY: once the worker runs out-of-process it returns findings as
+    JSON dicts, not Finding objects. A schema-valid dict finding (attested, same-class,
+    in-scope, new) is re-validated through the Finding model and persisted — the
+    firewall coerces the string status back to the enum and accepts the record."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)  # scope = ["app"]
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _dict_finding(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        # A JSON-shaped finding (status as a string, as it would deserialize).
+        d = make_finding(
+            id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+            summary="dict variant", body="## Root cause\n\nx\n\n**Location:** `app/z.py:3`",
+        ).model_dump(mode="json")
+        prim = Primitive(kind=signature.capability, target_locus="app/z.py", preconditions=[],
+                         grants=[signature.capability], confidence="suspected", finding_ref="F-8000")
+        env = env.model_copy(update={
+            "findings_written": list(env.findings_written) + ["F-8000"],
+            "primitives": list(env.primitives) + [prim],
+        })
+        return env, findings + [d], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _dict_finding)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    persisted = store.get_finding("F-8000")
+    assert persisted is not None
+    assert persisted.status is FindingStatus.candidate   # coerced from the string status
+
+
+def test_worker_structurally_malformed_finding_is_dropped(state_dir, monkeypatch):
+    """A worker finding that is NOT a schema-valid Finding (here: an unknown extra
+    field, which Record forbids) is dropped by the model re-validation — the symmetric
+    counterpart to envelope validation — even though it is attested and same-class."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _malformed(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        bad = make_finding(
+            id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+            summary="malformed", body="**Location:** `app/z.py:1`",
+        ).model_dump(mode="json")
+        bad["totally_unknown_field"] = "smuggled"   # Record has extra='forbid'
+        prim = Primitive(kind=signature.capability, target_locus="app/z.py", preconditions=[],
+                         grants=[signature.capability], confidence="suspected", finding_ref="F-8000")
+        env = env.model_copy(update={
+            "findings_written": list(env.findings_written) + ["F-8000"],
+            "primitives": list(env.primitives) + [prim],
+        })
+        return env, findings + [bad], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _malformed)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    assert store.get_finding("F-8000") is None   # schema-invalid -> refused before persist
+
+
 def test_primitive_with_empty_target_locus_is_not_ledgered(state_dir, monkeypatch):
     """A same-class primitive bound to a KEPT finding but whose target_locus is EMPTY
     is not carried into the ledger — a location-less primitive names no path and so

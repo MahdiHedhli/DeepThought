@@ -52,6 +52,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from ..ingest.sarif import (
     SarifError,
     _in_scope,
@@ -72,6 +74,7 @@ from ..schema import (
     SessionType,
 )
 from ..schema.envelope import Primitive
+from ..schema.finding import Finding
 from ..sibling.signature import Signature, signature_from_finding
 from ..store import NotFoundError, Store
 from .discover import (
@@ -599,7 +602,24 @@ class SiblingHuntSession(BaseSession):
             }
             kept: list = []
             seen: set[str] = set()
-            for f in findings:
+            for raw in findings:
+                # RE-VALIDATE every worker finding through the Finding model before it
+                # is trusted or persisted — the symmetric counterpart to
+                # ``conductor._validate`` on the envelope. Round-tripping through
+                # ``model_validate`` (from the worker object's dump, or a raw dict once
+                # the worker is out-of-process) re-enforces the schema: a valid
+                # ``FindingStatus`` (so the ``is`` identity check below holds for a
+                # deserialized string status too), well-formed nested ``Reference`` /
+                # ``Severity`` shapes, and ``extra='forbid'`` — so a buggy or
+                # compromised worker cannot smuggle a structurally-malformed record, an
+                # unknown field, or a non-Finding object past the firewall. What is
+                # persisted is THIS re-validated object, never the raw worker value.
+                try:
+                    f = Finding.model_validate(
+                        raw if isinstance(raw, dict) else raw.model_dump()
+                    )
+                except (ValidationError, AttributeError, TypeError):
+                    continue
                 if (
                     _VALID_FINDING_ID.fullmatch(f.id)  # id is a filename -> no traversal
                     and f.status is FindingStatus.candidate  # variants are CANDIDATES:
