@@ -198,3 +198,18 @@ def test_save_coverage_survives_legacy_unlink_failure(state_dir, monkeypatch):
                  last_session="S2", body="new")
     )
     assert store.get_coverage("p", "ext/soap").depth.value == "explored"
+
+
+def test_get_coverage_legacy_fallback_requires_area_match(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    # A real record for area "ext-soap" (its new-slug file IS ext-soap.md).
+    store.save_coverage(
+        Coverage(project="p", area="ext-soap", method="read", depth="touched",
+                 last_session="S", body="real")
+    )
+    # get_coverage("ext/soap") legacy-slugs to ext-soap.md, but that file holds
+    # area "ext-soap" != "ext/soap" -> must return None, not the wrong record.
+    assert store.get_coverage("p", "ext/soap") is None
+    assert store.get_coverage("p", "ext-soap").body == "real"

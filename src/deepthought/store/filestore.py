@@ -242,14 +242,18 @@ class FileStore(Store):
 
     def get_coverage(self, project: str, area: str) -> Coverage | None:
         path = self._coverage_path(project, area)
-        if not path.exists():
-            # Fall back to the old slug so a direct lookup still resolves on a
-            # not-yet-migrated store.
-            legacy = self._legacy_coverage_path(project, area)
-            if not legacy.exists():
-                return None
-            path = legacy
-        return Coverage.from_markdown(self._read(path))
+        if path.exists():
+            return Coverage.from_markdown(self._read(path))
+        # Fall back to the old slug so a direct lookup still resolves on a
+        # not-yet-migrated store — but ONLY if that file genuinely holds THIS
+        # area. The old slug is lossy (ext-soap.md could be the record for a
+        # different area), so returning it blindly would reintroduce the
+        # collision the percent-encoded slug removes.
+        legacy = self._legacy_coverage_path(project, area)
+        if legacy == path or not legacy.exists():
+            return None
+        candidate = Coverage.from_markdown(self._read(legacy))
+        return candidate if candidate.area == area else None
 
     def list_coverage(self, project: str | None = None) -> list[Coverage]:
         out = []

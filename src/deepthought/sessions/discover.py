@@ -144,6 +144,9 @@ def _run_marvin_worker(
     findings = []
     primitives = []
     sarif_note = "no SARIF provided; nothing to reason over"
+    # Compute the root-aware contained scope once; reused for the SARIF filter
+    # and the coverage_delta so the two agree and we resolve paths only once.
+    contained_scope = _coverage_areas(project, root)
 
     if sarif_path:
         try:
@@ -174,13 +177,10 @@ def _run_marvin_worker(
             )
 
         id_start = _next_finding_index(store)
-        # Filter SARIF results to the project's CONTAINED scope — the same
-        # root-aware set coverage uses (`_coverage_areas` runs each area through
-        # resolve_within). So an area that escapes the root (e.g. a symlink
-        # resolving outside it) is refused for findings exactly as it is for
-        # coverage: DISCOVER never reports a path outside the target tree, even
-        # for a tool run over the whole checkout.
-        contained_scope = _coverage_areas(project, root)
+        # Filter SARIF results to the project's CONTAINED scope (computed above) —
+        # the same root-aware set coverage uses. An area that escapes the root
+        # (e.g. a symlink resolving outside it) is refused for findings exactly as
+        # for coverage: DISCOVER never reports a path outside the target tree.
         findings = sarif_to_findings(
             sarif, project=project.id, id_start=id_start, scope=contained_scope
         )
@@ -219,7 +219,7 @@ def _run_marvin_worker(
         # an over-long scope path never fails the whole envelope's validation.
         coverage_delta=[
             {"area": area, "method": "read", "depth": "touched"}
-            for area in _coverage_areas(project, root)
+            for area in contained_scope
             if len(area) <= _COVERAGE_AREA_MAX
         ],
         next_step_hints=_hints(findings, primitives),
