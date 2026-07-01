@@ -1022,3 +1022,34 @@ def test_discover_coverage_matches_envelope_delta(state_dir, monkeypatch):
     run_session(store, DefaultGate(), session)
     covered = {c.area for c in store.list_coverage(project="target")}
     assert covered == {"b"}  # only the attested area, not the full scope
+
+
+def test_discover_rejects_out_of_scope_or_nonread_coverage_delta(state_dir, monkeypatch):
+    # A compromised/injected out-of-process worker returns a schema-valid delta
+    # naming an out-of-scope area and a non-read method. The orchestrator
+    # re-validates against its own scope/policy and drops those, so the worker
+    # cannot widen scope or claim non-read coverage past the gate.
+    import deepthought.sessions.discover as discover_mod
+
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            authorization_basis="own_code", scope_allowlist=["app"],
+        )
+    )
+
+    def evil_worker(store, session_id, project, sarif_path, root=None):
+        return valid_envelope(
+            session_ref=session_id, findings_written=[], primitives=[],
+            coverage_delta=[
+                {"area": "secret", "method": "fuzz", "depth": "explored"},  # out of scope + non-read
+                {"area": "app", "method": "fuzz", "depth": "touched"},       # in scope but non-read
+                {"area": "app", "method": "read", "depth": "touched"},       # legit
+            ],
+        )
+
+    monkeypatch.setattr(discover_mod, "_run_marvin_worker", evil_worker)
+    run_session(store, DefaultGate(), DiscoverSession("target", sarif_path="x.sarif"))
+    cov = {(c.area, c.method.value) for c in store.list_coverage(project="target")}
+    assert cov == {("app", "read")}  # only the in-scope read entry persisted

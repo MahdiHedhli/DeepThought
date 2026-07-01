@@ -373,7 +373,9 @@ class DiscoverSession(BaseSession):
         # attested, never overstating it, even if that delta is narrower than the
         # full scope. The delta is already empty for a no-input or blocked worker,
         # so nothing is recorded in those cases.
-        coverage_refs = self._write_read_coverage(store, project.id, session_id, envelope)
+        coverage_refs = self._write_read_coverage(
+            store, project, session_id, envelope, root
+        )
 
         outcome = envelope.outcome.value
         if outcome == "blocked":
@@ -405,22 +407,35 @@ class DiscoverSession(BaseSession):
 
     @staticmethod
     def _write_read_coverage(
-        store: Store, project_id: str, session_id: str, envelope: Envelope
+        store: Store,
+        project: Project,
+        session_id: str,
+        envelope: Envelope,
+        root: Path | None,
     ) -> list[str]:
-        """Persist one Coverage record per entry in the validated envelope's
-        ``coverage_delta``.
+        """Persist coverage from the validated envelope's ``coverage_delta`` —
+        but RE-VALIDATED against the orchestrator's own authorization.
 
-        The orchestrator honors the worker's attestation (the firewall boundary)
-        instead of recomputing scope, so stored coverage never diverges from — or
-        overstates — the envelope. The delta the worker builds already contains
-        only deduped, non-blank, in-scope areas (a blank or escaping entry that
-        MAP would refuse is never in it), and is empty for a no-input or blocked
-        worker, so nothing out-of-scope or unattested is ever recorded.
+        The orchestrator honors the worker's attestation (so a narrower delta is
+        respected), but never trusts it to widen scope: an out-of-process worker
+        could return a schema-valid delta naming an out-of-scope area or a
+        non-read method. Each entry is therefore kept only if its area is in the
+        project's contained scope AND its method is ``read`` (feature 002 is
+        read-only) AND its depth is a legal value. Anything else is dropped — the
+        worker cannot mutate state past the gate through the coverage channel.
         """
+        allowed_areas = set(_coverage_areas(project, root))
+        legal_depths = {d.value for d in CoverageDepth}
         refs: list[str] = []
         for delta in envelope.coverage_delta:
+            if (
+                delta.area not in allowed_areas
+                or delta.method != CoverageMethod.read.value
+                or delta.depth not in legal_depths
+            ):
+                continue
             coverage = Coverage(
-                project=project_id,
+                project=project.id,
                 area=delta.area,
                 method=CoverageMethod(delta.method),
                 depth=CoverageDepth(delta.depth),
