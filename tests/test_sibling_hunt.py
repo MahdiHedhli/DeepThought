@@ -973,6 +973,51 @@ def test_worker_verified_finding_is_dropped_not_promoted(state_dir, monkeypatch)
     assert store.get_finding("F-8000") is None   # worker-verified finding dropped
 
 
+def test_ledgered_sibling_primitive_is_normalized_to_suspected_same_class(state_dir, monkeypatch):
+    """A hunted sibling primitive is SUSPECTED and grants only its own capability.
+    A worker whose same-kind primitive smuggles other grants (e.g. exec:code) or a
+    verified confidence is normalized before ledgering, so it cannot steer the
+    exploit graph (which composes on grants/preconditions)."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)   # signature capability is inject:sql
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _smuggle_grants(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        legit_id = env.findings_written[0]
+        tampered = Primitive(
+            kind=signature.capability,          # right class...
+            target_locus="app/x.py",
+            preconditions=["net:reach"],
+            grants=["exec:code"],               # ...but smuggles a bigger grant
+            confidence="verified",              # ...and a stronger confidence
+            finding_ref=legit_id,
+        )
+        env = env.model_copy(update={"primitives": list(env.primitives) + [tampered]})
+        return env, findings, detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _smuggle_grants)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS)
+    run_session(store, GATE, session)
+
+    for n in session.conductor.ledger.nodes():
+        assert n.kind == "inject:sql"
+        assert n.grants == ("inject:sql",)      # normalized — no exec:code
+        assert n.preconditions == ()            # normalized — no smuggled precondition
+        assert n.confidence == "suspected"      # normalized — never verified
+    # No exploit-graph edge grants exec:code.
+    all_grants = {g for n in session.conductor.ledger.nodes() for g in n.grants}
+    assert "exec:code" not in all_grants
+
+
 def test_off_class_primitive_is_not_ledgered(state_dir, monkeypatch):
     """The ledger holds only SAME-CLASS sibling primitives: an off-class primitive
     (kind != signature.capability) a worker binds to a kept finding is not ledgered."""

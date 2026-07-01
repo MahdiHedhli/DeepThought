@@ -621,17 +621,26 @@ class SiblingHuntSession(BaseSession):
                         fid for fid in validated.findings_written if fid in kept_ids
                     ],
                     "primitives": [
-                        p
+                        # NORMALIZE every kept sibling primitive to its canonical
+                        # suspected, same-class form before ledgering. The exploit
+                        # graph composes on grants/preconditions, so a worker whose
+                        # primitive has the right kind but smuggles other `grants`
+                        # (e.g. exec:code), extra preconditions, or a
+                        # demonstrated/verified confidence must not steer the graph:
+                        # a hunted sibling is a SUSPECTED, same-class candidate that
+                        # grants only its own capability until a sandboxed VERIFY
+                        # proves more.
+                        Primitive(
+                            kind=signature.capability,
+                            target_locus=p.target_locus,
+                            preconditions=[],
+                            grants=[signature.capability],
+                            confidence="suspected",
+                            finding_ref=p.finding_ref,
+                        )
                         for p in validated.primitives
                         if p.finding_ref in kept_ids
-                        # Same-class only: the ledger must hold sibling primitives of
-                        # the signature's capability, never an off-class primitive a
-                        # worker bound to a kept finding.
                         and p.kind == signature.capability
-                        # Scope-check the primitive's own locus too — the finding
-                        # location check does not cover the primitive channel, so a
-                        # worker could otherwise ledger an out-of-scope sibling
-                        # primitive bound to an in-scope finding.
                         and _locus_in_scope(p.target_locus, contained_scope, root)
                     ],
                 }
