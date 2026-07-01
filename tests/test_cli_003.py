@@ -243,6 +243,29 @@ def test_verify_signoff_flag_refuses_and_runs_nothing(tmp_path, monkeypatch):
 # --- error handling parity with status/map/discover -------------------------
 
 
+def test_verify_cli_exits_cleanly_on_sandbox_error(tmp_path, monkeypatch):
+    """If the sandbox seam raises a SandboxError, the CLI exits code 2 with a
+    message — never an uncaught traceback."""
+    from deepthought import cli as cli_mod
+    from deepthought.sandbox import SandboxError
+
+    def _boom(*a, **k):
+        raise SandboxError("sandbox seam failed")
+
+    monkeypatch.setattr(cli_mod, "run_session", _boom)
+
+    state, _ = _seeded_state(tmp_path)
+    result = runner.invoke(
+        app,
+        ["playbook", "verify", "--state", str(state),
+         "--project", "php-src", "--finding", "F-0007"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "error" in (result.output + str(result.exception or "")).lower()
+    # Handled via typer.Exit, not an uncaught SandboxError.
+    assert not isinstance(result.exception, SandboxError)
+
+
 def test_verify_unknown_project_errors(tmp_path):
     state = tmp_path / "state"
     FileStore(state)  # empty store

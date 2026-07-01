@@ -67,27 +67,29 @@ class SandboxPolicy(BaseModel):
     # Egress is default-DENY. No allowlist in this slice; the only value is
     # ``"none"`` (rendered as ``--network=none``).
     network: Literal["none"] = "none"
-    # Read-only root filesystem (rendered ``--read-only``).
-    read_only_rootfs: bool = True
+    # The core isolation invariants are LOCKED to their hardened value with
+    # ``Literal[True]``: they are security guarantees for running untrusted code,
+    # not operator-tunable knobs. A config, finding, or future caller must not be
+    # able to weaken them by omission or override (e.g. ``read_only_rootfs=False``);
+    # relaxing any of them would be a distinct, explicit, signed-off change.
+    read_only_rootfs: Literal[True] = True      # rendered ``--read-only``
+    drop_all_caps: Literal[True] = True          # rendered ``--cap-drop=ALL``
+    no_new_privileges: Literal[True] = True      # ``--security-opt=no-new-privileges``
+    run_as_non_root: Literal[True] = True        # ``--user <uid>:<gid>``; never root/0
     # No host bind mounts, ever, in this slice (enforced off; no ``-v`` rendered).
-    allow_host_mounts: bool = False
-    # Drop every Linux capability (rendered ``--cap-drop=ALL``).
-    drop_all_caps: bool = True
-    # Forbid privilege escalation (rendered ``--security-opt=no-new-privileges``).
-    no_new_privileges: bool = True
-    # Run as a non-root user (rendered ``--user <uid>:<gid>``; never root/0).
-    run_as_non_root: bool = True
+    allow_host_mounts: Literal[False] = False
 
     # Positive, present resource + wall-time bounds. Conservative starters; their
     # presence is fixed and tested, the concrete numbers are tuned once execution
-    # is enabled (spec Open questions).
+    # is enabled (spec Open questions). ``cpus`` forbids inf/nan — an infinite cap
+    # both defeats the bound and crashes the argv renderer (int(inf) overflows).
     pids_limit: int = Field(default=128, gt=0)
     memory_mib: int = Field(default=512, gt=0)
-    cpus: float = Field(default=1.0, gt=0)
+    cpus: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     wall_timeout_seconds: int = Field(default=30, gt=0)
 
     # Ephemeral: built fresh per run and torn down after (rendered ``--rm``).
-    ephemeral: bool = True
+    ephemeral: Literal[True] = True
 
     # The non-root uid:gid rendered into ``--user``. Never root/0.
     user: Short = "65534:65534"

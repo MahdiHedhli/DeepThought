@@ -44,10 +44,10 @@ _STOP_GRACE_SECONDS = 2
 # digit, unicode, or empties — which would malform the rendered --env token.
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# The uid/name spellings docker runs as root. Only the part BEFORE ':' (the
-# user/uid) determines privilege, so we match against that, case-folded and
-# stripped — never the whole "uid:gid" string.
-_ROOT_UIDS = frozenset({"root", "0"})
+# A strictly numeric token (used to validate the --user uid[:gid]). We require a
+# NUMERIC uid so a named user cannot alias to UID 0 in the image's /etc/passwd
+# (e.g. "toor"), which we cannot inspect at argv-build time.
+_NUMERIC_RE = re.compile(r"[0-9]+")
 
 
 class DockerSandbox(Sandbox):
@@ -92,35 +92,25 @@ class DockerSandbox(Sandbox):
         if policy.no_new_privileges:
             argv.append("--security-opt=no-new-privileges")
 
-        # Non-root user, never root/0. The user/uid part (before ':') is what
-        # docker actually runs as, so validate THAT — case-folded and stripped —
-        # not the whole string. This refuses "root", "0", "0:0", and the bypass
-        # spellings "root:root", "root:0", "0:1", " root ", "ROOT", ... that a
-        # naive whole-string check would miss.
+        # Non-root user. Require a STRICTLY NUMERIC, non-zero UID — never a name.
+        # A named user ("root", "toor", "nobody", ...) can alias to UID 0 in the
+        # image's /etc/passwd, which we cannot inspect at argv-build time, so any
+        # non-numeric uid is refused. int() == 0 additionally rejects every numeric
+        # zero spelling ("0", "00", "000"); the regex rejects "+0"/"-0"/""/":gid".
+        # A gid, if present, must also be numeric.
         if policy.run_as_non_root:
             user = policy.user
-            uid_part = user.split(":", 1)[0].strip().casefold()
-            if not uid_part:
-                # An empty user/uid part (empty, whitespace, or ":gid") would
-                # render an empty --user and let docker fall back to the image's
-                # user (possibly root). Refuse it.
+            uid, _, gid = user.partition(":")
+            uid = uid.strip()
+            if not _NUMERIC_RE.fullmatch(uid) or int(uid) == 0:
                 raise SandboxError(
-                    f"run_as_non_root is set but user {user!r} has no uid/name part;"
-                    " refusing to render a run with an empty --user"
+                    f"run_as_non_root requires a numeric non-zero UID; user "
+                    f"{user!r} is refused (a named or zero UID can run as root)"
                 )
-            # Root by name ("root") or by numeric UID 0 in ANY spelling docker/Linux
-            # accept as 0 — "0", "00", "000", "+0", "-0". A padded numeric uid still
-            # resolves to root, so parse it as an int and reject zero.
-            is_root = uid_part in _ROOT_UIDS
-            if not is_root:
-                try:
-                    is_root = int(uid_part) == 0
-                except ValueError:
-                    is_root = False
-            if is_root:
+            if gid and not _NUMERIC_RE.fullmatch(gid.strip()):
                 raise SandboxError(
-                    f"run_as_non_root is set but user {user!r} resolves to root;"
-                    " refusing to render a privileged run configuration"
+                    f"run_as_non_root requires a numeric gid; user {user!r} has a"
+                    " non-numeric gid"
                 )
             argv += ["--user", user]
 

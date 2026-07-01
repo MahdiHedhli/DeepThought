@@ -44,9 +44,9 @@ class Sandbox(ABC):
 
 # base.py
 class SandboxPolicy(BaseModel):      # extra='forbid'
-    """The hardened, default-deny run configuration. Default-constructed is fully
-    hardened; an operator opts into LESS isolation explicitly, never MORE by
-    omission."""
+    """The hardened, default-deny run configuration. The core isolation invariants
+    are Literal-locked (cannot be weakened); only the resource NUMBERS and the
+    numeric user vary. Loosening isolation is a later, signed-off change."""
 
 class SandboxError(RuntimeError):
     """Base error for the sandbox module."""
@@ -104,17 +104,17 @@ isolation tests assert its rendered argv contains every clause below.
 
 ```
 network              Literal["none"] = "none"  # -> --network=none  (no egress; no allowlist in this slice)
-read_only_rootfs     bool  = True        # -> --read-only
-allow_host_mounts    bool  = False       # enforced off: NO -v / --mount host bind is ever rendered
-drop_all_caps        bool  = True        # -> --cap-drop=ALL
-no_new_privileges    bool  = True        # -> --security-opt=no-new-privileges
-run_as_non_root      bool  = True        # gate: refuses to render a root run
-user                 str   = "65534:65534" # -> --user <uid>:<gid>  (never root / 0)
+read_only_rootfs     Literal[True]  = True   # LOCKED -> --read-only
+allow_host_mounts    Literal[False] = False  # LOCKED off: NO -v / --mount host bind is ever rendered
+drop_all_caps        Literal[True]  = True   # LOCKED -> --cap-drop=ALL
+no_new_privileges    Literal[True]  = True   # LOCKED -> --security-opt=no-new-privileges
+run_as_non_root      Literal[True]  = True   # LOCKED gate: refuses any non-numeric or zero uid
+user                 str   = "65534:65534"   # -> --user <uid>:<gid>  (uid must be NUMERIC and non-zero)
 pids_limit           int   = 128         # -> --pids-limit 128
 memory_mib           int   = 512         # -> --memory 512m
-cpus                 float = 1.0         # -> --cpus 1
+cpus                 float = 1.0         # -> --cpus 1   (finite; inf/nan rejected)
 wall_timeout_seconds int   = 30          # NOT a docker flag; the wall-clock EXECUTION limit is enforced externally by the runner
-ephemeral            bool  = True        # -> --rm   (built fresh per run, torn down after)
+ephemeral            Literal[True]  = True   # LOCKED -> --rm   (built fresh per run, torn down after)
 ```
 
 Policy discipline:
@@ -125,9 +125,11 @@ Policy discipline:
 - **No host mounts.** `allow_host_mounts` is `False` and enforced off: `build_argv`
   never renders a `-v`/`--mount` host bind. The repro input reaches the sandbox as
   a controlled artifact, not a host-path bind.
-- **Least privilege.** All capabilities dropped, `no-new-privileges`, non-root
-  user. An operator can only opt into *less* isolation explicitly; omission always
-  yields *more*.
+- **Least privilege, LOCKED.** All capabilities dropped, `no-new-privileges`, a
+  non-root NUMERIC user. These invariants are `Literal`-locked — no config or
+  caller can weaken them; loosening isolation is a later, signed-off change. The
+  `--user` uid must be numeric and non-zero (a named user could alias to UID 0 in
+  the image's passwd), and `cpus` must be finite.
 - **Ephemeral.** `--rm` plus the wall-time bound: the environment is built fresh
   per run and torn down after, with no persistence of target code or side effects
   beyond the paged evidence artifact.
@@ -147,7 +149,7 @@ docker run
   --read-only                            # policy.read_only_rootfs
   --cap-drop=ALL                         # policy.drop_all_caps
   --security-opt=no-new-privileges       # policy.no_new_privileges
-  --user <uid>:<gid>                     # policy.user (non-root; never 0/root)
+  --user <uid>:<gid>                     # policy.user (NUMERIC uid, non-zero; names refused)
   --pids-limit <N>                       # policy.pids_limit
   --memory <N>m                          # policy.memory_mib
   --cpus <N>                             # policy.cpus
@@ -166,8 +168,8 @@ Argv discipline:
   with this (or any untrusted) input anywhere in 003.
 - **Every hardening clause is present or the build fails a test.** A missing
   `--network=none`, a missing `--pull=never` (a registry fetch is pre-sandbox
-  egress), a `root` user (in any spelling — `root:root`, `root:0`, a
-  padded/upper-case variant), an empty `--user`, an absent limit, a rendered host
+  egress), a non-numeric / zero / named `--user` uid (any of which could run as
+  root — `root`, `toor`, `0`, `00`, `+0`, `""`), an absent limit, a rendered host
   mount, an image ref that is empty or begins with `-` (argument injection), an
   empty command, or a malformed env-var name is a test failure. `--stop-timeout`
   renders a short FIXED teardown grace (a large wall timeout must not block

@@ -92,6 +92,21 @@ def test_policy_forbids_unknown_fields():
         SandboxPolicy(allow_everything=True)
 
 
+def test_policy_core_isolation_flags_are_locked_and_cannot_be_weakened():
+    """The core isolation invariants are Literal-locked: no caller can flip them to
+    a weaker value. Attempting to disable any of them fails validation."""
+    for kwargs in (
+        {"read_only_rootfs": False},
+        {"drop_all_caps": False},
+        {"no_new_privileges": False},
+        {"run_as_non_root": False},
+        {"allow_host_mounts": True},
+        {"ephemeral": False},
+    ):
+        with pytest.raises(ValidationError):
+            SandboxPolicy(**kwargs)
+
+
 def test_policy_rejects_nonpositive_limits():
     with pytest.raises(ValidationError):
         SandboxPolicy(pids_limit=0)
@@ -101,6 +116,15 @@ def test_policy_rejects_nonpositive_limits():
         SandboxPolicy(cpus=0)
     with pytest.raises(ValidationError):
         SandboxPolicy(wall_timeout_seconds=0)
+
+
+def test_policy_rejects_infinite_or_nan_cpus():
+    """inf/nan cpus pass a naive gt=0 check but defeat the bound and crash the argv
+    renderer (int(inf) overflows). They must fail validation."""
+    with pytest.raises(ValidationError):
+        SandboxPolicy(cpus=float("inf"))
+    with pytest.raises(ValidationError):
+        SandboxPolicy(cpus=float("nan"))
 
 
 # --- SandboxSpec -----------------------------------------------------------
@@ -273,6 +297,18 @@ def test_build_command_allows_a_numeric_non_root_uid():
     )
     assert "--user" in argv
     assert argv[argv.index("--user") + 1] == "01000:01000"
+
+
+def test_build_command_refuses_named_and_non_numeric_users():
+    """A NAMED user can alias to UID 0 in the image's passwd (e.g. 'toor'), which
+    we cannot inspect here — so only numeric non-zero UIDs are allowed. A
+    non-numeric gid is refused too."""
+    for bad in ("toor", "nobody", "admin", "daemon", "toor:0", "1000:staff", "user:group"):
+        with pytest.raises(SandboxError):
+            DockerSandbox().build_command(make_spec(policy=SandboxPolicy(user=bad)))
+    # A fully-numeric uid:gid is accepted.
+    argv = DockerSandbox().build_command(make_spec(policy=SandboxPolicy(user="1000:1000")))
+    assert argv[argv.index("--user") + 1] == "1000:1000"
 
 
 def test_build_command_refuses_image_starting_with_dash():

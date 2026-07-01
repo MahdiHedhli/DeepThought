@@ -19,7 +19,7 @@ import typer
 from .check import run_check
 from .export.osv import finding_to_osv, osv_id_for
 from .protocol import HermesUltraCodeGate, run_session
-from .sandbox import NoopSandbox, SandboxPolicy, SandboxResult, SandboxSpec
+from .sandbox import NoopSandbox, SandboxError, SandboxPolicy, SandboxResult, SandboxSpec
 from .sessions import (
     DiscoverSession,
     MapSession,
@@ -262,7 +262,9 @@ def playbook_verify(
     )
     try:
         record = run_session(_store(state), HermesUltraCodeGate(), session)
-    except StoreError as exc:
+    except (StoreError, SandboxError) as exc:
+        # SandboxError covers the sandbox seam (e.g. a backend returning no result,
+        # or the guarded-off run() hard stop) — exit cleanly, never a traceback.
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
 

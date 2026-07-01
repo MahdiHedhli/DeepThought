@@ -93,31 +93,43 @@ The isolation contract, hardened by default. Its **presence** and its **default
 values** are what the isolation tests assert (via `DockerSandbox.build_argv`, the
 policy renderer behind the `build_command` convenience wrapper):
 
+The core isolation invariants are **`Literal`-locked**, not operator-tunable
+booleans: they are security guarantees for running untrusted code, so no config,
+finding, or future caller can weaken them by omission or override. Relaxing any of
+them is a distinct, explicit, signed-off change.
+
 - `network` — egress mode, `Literal["none"]` default `"none"` (renders
   `--network=none`). No allowlist in this slice.
-- `read_only_rootfs` — default `True` (renders `--read-only`).
-- `allow_host_mounts` — default `False` and enforced in this slice (no `-v`/`--mount`
-  host bind is ever rendered).
-- `drop_all_caps` — default `True` (renders `--cap-drop=ALL`).
-- `no_new_privileges` — default `True` (renders
-  `--security-opt=no-new-privileges`).
-- `run_as_non_root` — default `True`; with `user` (default `"65534:65534"`) it
-  renders `--user <uid>:<gid>`, never `root`/`0`.
+- `read_only_rootfs` — `Literal[True]` (renders `--read-only`).
+- `allow_host_mounts` — `Literal[False]`; no `-v`/`--mount` host bind is ever
+  rendered.
+- `drop_all_caps` — `Literal[True]` (renders `--cap-drop=ALL`).
+- `no_new_privileges` — `Literal[True]` (renders `--security-opt=no-new-privileges`).
+- `run_as_non_root` — `Literal[True]`; with `user` (default `"65534:65534"`) it
+  renders `--user <uid>:<gid>`. The uid MUST be a **numeric, non-zero** value —
+  a named user (e.g. `toor`) could alias to UID 0 in the image's passwd, which the
+  builder cannot inspect, so any non-numeric or zero uid (and a non-numeric gid) is
+  refused.
 - `pids_limit` — a positive integer cap, default `128` (renders `--pids-limit`).
 - `memory_mib` — a positive MiB cap, default `512` (renders `--memory 512m`).
-- `cpus` — a positive fractional CPU cap, default `1.0` (renders `--cpus`).
+- `cpus` — a positive **finite** fractional CPU cap, default `1.0` (renders
+  `--cpus`). `inf`/`nan` are rejected (they defeat the bound and overflow the argv
+  renderer).
 - `wall_timeout_seconds` — a positive wall-clock timeout, default `30`. This is
   **not** rendered as a `docker run` flag: the wall-clock EXECUTION limit is
   enforced externally by the runner when a real backend is wired. (`--stop-timeout`
   is rendered separately as a short, fixed teardown grace so killing a hung
   container never blocks the runner for minutes.) The ephemeral container is
   `--rm`, torn down after.
-- `ephemeral` — default `True` (renders `--rm`; built fresh per run, torn down
+- `ephemeral` — `Literal[True]` (renders `--rm`; built fresh per run, torn down
   after; no persistence of target code or side effects beyond the paged evidence).
 
-The default-constructed `SandboxPolicy()` is fully hardened: an operator opts into
-*less* isolation explicitly (and, for network egress, only later behind a logged
-per-engagement allowlist), never into *more* by omission.
+The default-constructed `SandboxPolicy()` is fully hardened, and the core isolation
+invariants are `Literal`-locked so they cannot be weakened at all in this slice.
+Only the tunable *numbers* (`pids_limit`, `memory_mib`, `cpus`,
+`wall_timeout_seconds`) and the numeric `user` vary; loosening an isolation
+invariant, or adding a network-egress allowlist, is a later, explicit,
+signed-off change — never something omission can grant.
 
 ### SandboxResult — the typed outcome (a firewall)
 
