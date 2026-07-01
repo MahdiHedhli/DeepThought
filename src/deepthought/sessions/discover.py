@@ -42,6 +42,7 @@ what later promotes any of them on evidence.
 from __future__ import annotations
 
 import re
+from pathlib import Path, PurePosixPath
 
 from ..ingest.sarif import (
     SarifError,
@@ -84,6 +85,44 @@ def _attestation_ref(project: Project) -> str:
     )
     return ref[:_ATTESTATION_REF_MAX]
 
+
+def _resolve_checkout(candidate: str | None) -> Path | None:
+    """A checkout root to containment-check scope areas against, or None."""
+    if not candidate:
+        return None
+    path = Path(candidate)
+    return path if path.is_dir() else None
+
+
+def _area_in_scope(area: str, root: Path | None) -> bool:
+    """Whether a scope area stays inside the target, mirroring MAP's refusal.
+
+    Rejects absolute paths, backslash paths, and ``..`` traversal syntactically
+    (with or without a root); when a checkout root resolves, also requires the
+    area to resolve strictly inside it. DISCOVER records read coverage only for
+    areas that pass, so it never claims an out-of-root area was surveyed.
+    """
+    if not area or area.startswith("/") or "\\" in area:
+        return False
+    pp = PurePosixPath(area)
+    if pp.is_absolute() or ".." in pp.parts:
+        return False
+    if root is not None:
+        try:
+            (root.resolve() / area).resolve().relative_to(root.resolve())
+        except (ValueError, OSError):
+            return False
+    return True
+
+
+def _coverage_areas(project: Project, root: Path | None) -> list[str]:
+    """Deduped, stripped, non-blank, in-scope areas DISCOVER may record."""
+    areas: list[str] = []
+    for area in dict.fromkeys(a.strip() for a in project.scope_allowlist):
+        if area and _area_in_scope(area, root):
+            areas.append(area)
+    return areas
+
 _FINDING_ID = re.compile(r"^F-(\d+)$")
 
 
@@ -106,6 +145,7 @@ def _run_marvin_worker(
     session_id: str,
     project: Project,
     sarif_path: str | None,
+    root: Path | None,
 ) -> Envelope | dict:
     """The stub Marvin worker. Reads SARIF, writes candidate findings, pages
     detail, and returns exactly one envelope.
@@ -195,9 +235,9 @@ def _run_marvin_worker(
         # the full, uncapped Coverage record for it in _write_read_coverage), so
         # an over-long scope path never fails the whole envelope's validation.
         coverage_delta=[
-            {"area": area.strip(), "method": "read", "depth": "touched"}
-            for area in dict.fromkeys(project.scope_allowlist)
-            if area.strip() and len(area.strip()) <= _COVERAGE_AREA_MAX
+            {"area": area, "method": "read", "depth": "touched"}
+            for area in _coverage_areas(project, root)
+            if len(area) <= _COVERAGE_AREA_MAX
         ],
         next_step_hints=_hints(findings, primitives),
         detail_ref=detail_ref,
@@ -294,7 +334,8 @@ class DiscoverSession(BaseSession):
         # --- orchestrator dispatches ONE worker ---
         # The worker does the reasoning, writes findings, and pages detail. It
         # returns exactly one typed envelope.
-        envelope = _run_marvin_worker(store, session_id, project, self.sarif_path)
+        root = _resolve_checkout(self.root or project.local_path)
+        envelope = _run_marvin_worker(store, session_id, project, self.sarif_path, root)
 
         # --- orchestrator ingests ONLY the envelope, through the Conductor ---
         # Never the worker's free-text, never the detail file. The Ledger updates
@@ -342,7 +383,7 @@ class DiscoverSession(BaseSession):
         # VERIFY. Nothing outside the scope allowlist is ever covered.
         inputs_read = self.sarif_path is not None and envelope.outcome.value != "blocked"
         if inputs_read:
-            coverage_refs = self._write_read_coverage(store, project, session_id)
+            coverage_refs = self._write_read_coverage(store, project, session_id, root)
         else:
             coverage_refs = []
 
@@ -366,21 +407,18 @@ class DiscoverSession(BaseSession):
 
     @staticmethod
     def _write_read_coverage(
-        store: Store, project: Project, session_id: str
+        store: Store, project: Project, session_id: str, root: Path | None
     ) -> list[str]:
         """Persist Coverage(method='read', depth='touched') for each in-scope area.
 
         A static reasoning pass surveyed (but did not exhaust) the in-scope
         surface by reading, so ``read``/``touched`` is the honest record. Only
-        the scope allowlist is covered — DISCOVER never records a path outside it.
+        deduped, non-blank, in-scope areas are covered — a blank or an escaping
+        entry (``../secret``, ``/etc``) that MAP would refuse is never recorded,
+        so DISCOVER cannot claim an out-of-root area was surveyed.
         """
         refs: list[str] = []
-        for raw_area in dict.fromkeys(project.scope_allowlist):
-            area = raw_area.strip()  # normalise padding for the persisted record
-            if not area:
-                # A blank entry is refused by MAP; DISCOVER writes no Coverage
-                # record for it either, keeping the store consistent.
-                continue
+        for area in _coverage_areas(project, root):
             coverage = Coverage(
                 project=project.id,
                 area=area,

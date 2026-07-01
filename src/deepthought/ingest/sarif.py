@@ -448,7 +448,12 @@ def _match_capability(rule_id: str | None, tags: list[str]) -> str | None:
     None (finding only, no primitive). The ruleId is never evaluated, formatted
     into a command, or used as a capability — it is only ever a table key.
     """
-    haystacks = [h.lower() for h in ([rule_id] if rule_id else []) + list(tags)]
+    # Normalise underscores to hyphens so `\b` (which treats `_` as a word char)
+    # still tokenises underscore-style ids: sql_injection, path_traversal,
+    # unsafe_deserialization all match their hyphen/word needles.
+    haystacks = [
+        h.lower().replace("_", "-") for h in ([rule_id] if rule_id else []) + list(tags)
+    ]
     for pattern, capability in _HEURISTIC_RE:
         for hay in haystacks:
             if pattern.search(hay):

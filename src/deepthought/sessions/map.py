@@ -100,8 +100,9 @@ class MapSession(BaseSession):
         touched = 0
         # Dedupe the allowlist (preserving order) so a repeated entry is not
         # walked twice or written as a duplicate Coverage record.
-        for raw_area in dict.fromkeys(project.scope_allowlist):
-            area = raw_area.strip()  # normalise padding for resolution and record
+        # Normalise padding THEN dedupe, so "src" and " src " collapse to one
+        # area (otherwise the same tree is walked and recorded twice).
+        for area in dict.fromkeys(a.strip() for a in project.scope_allowlist):
             if not area:
                 # A blank entry would resolve to the repository root and map the
                 # whole checkout — refuse it, don't silently walk everything.

@@ -173,7 +173,7 @@ def test_discover_handles_worker_returning_a_valid_dict(state_dir, monkeypatch):
 
     # The real out-of-process worker returns an UNTYPED dict. The session must
     # not crash accessing envelope attributes — it uses the validated envelope.
-    def fake_worker(store, session_id, project, sarif_path):
+    def fake_worker(store, session_id, project, sarif_path, root=None):
         env = valid_envelope(session_ref=session_id, findings_written=[], primitives=[])
         return env  # a plain dict, not an Envelope instance
 
@@ -650,6 +650,52 @@ def test_deserialization_rules_map_under_word_boundaries():
         findings = sarif_to_findings(s, project="p")
         prims = sarif_to_primitives(s, finding_ids=[f.id for f in findings])
         assert prims and prims[0].kind == "deserialize:untrusted", rid
+
+
+def test_underscore_separated_rules_map():
+    # `_` must act as a token separator so underscore-style rule ids still match.
+    for rid, kind in [
+        ("python/sql_injection", "inject:sql"),
+        ("py/path_traversal", "write:arbitrary-file"),
+        ("java/unsafe_deserialization", "deserialize:untrusted"),
+    ]:
+        s = _sarif_rule(rid)
+        findings = sarif_to_findings(s, project="p")
+        prims = sarif_to_primitives(s, finding_ids=[f.id for f in findings])
+        assert prims and prims[0].kind == kind, rid
+
+
+def test_map_dedupes_after_trimming(tmp_path):
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("x = 1\n")
+    store = FileStore(tmp_path / "state")
+    store.save_project(_project_at(root, ["src", " src "]))
+    record = run_session(store, DefaultGate(), MapSession("target"))
+    # "src" and " src " collapse to one area — walked and recorded once.
+    assert len(store.list_coverage(project="target")) == 1
+    assert record.coverage_changed.count("target/src") == 1
+
+
+def test_discover_refuses_escaping_scope_in_coverage(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    sarif_path = tmp_path / "s.sarif"
+    sarif_path.write_text(json.dumps(_sarif_with_uris(["app/in.py"])))
+    store = FileStore(tmp_path / "state")
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(root),
+            authorization_basis="own_code",
+            scope_allowlist=["../secret", "/etc", "app"],
+        )
+    )
+    session = DiscoverSession("target", sarif_path=str(sarif_path))
+    run_session(store, DefaultGate(), session)
+    covered = {c.area for c in store.list_coverage(project="target")}
+    # Escaping entries MAP would refuse are never recorded as surveyed.
+    assert covered == {"app"}
+    assert all(cd.area == "app" for cd in session.envelope.coverage_delta)
 
 
 def test_discover_tolerates_overlong_scope_path(state_dir):

@@ -296,7 +296,7 @@ def test_discover_session_handles_a_worker_that_returns_a_bad_dict(
     """
     import deepthought.sessions.discover as discover_mod
 
-    def _bad_worker(store, session_id, project, sarif_path):
+    def _bad_worker(store, session_id, project, sarif_path, root=None):
         # An untyped, malformed envelope, as an out-of-process worker would
         # emit. Missing gate_attestation -> rejected at ingest.
         return {
