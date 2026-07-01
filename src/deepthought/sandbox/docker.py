@@ -108,7 +108,16 @@ class DockerSandbox(Sandbox):
                     f"run_as_non_root is set but user {user!r} has no uid/name part;"
                     " refusing to render a run with an empty --user"
                 )
-            if uid_part in _ROOT_UIDS:
+            # Root by name ("root") or by numeric UID 0 in ANY spelling docker/Linux
+            # accept as 0 — "0", "00", "000", "+0", "-0". A padded numeric uid still
+            # resolves to root, so parse it as an int and reject zero.
+            is_root = uid_part in _ROOT_UIDS
+            if not is_root:
+                try:
+                    is_root = int(uid_part) == 0
+                except ValueError:
+                    is_root = False
+            if is_root:
                 raise SandboxError(
                     f"run_as_non_root is set but user {user!r} resolves to root;"
                     " refusing to render a privileged run configuration"

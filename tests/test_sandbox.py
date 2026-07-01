@@ -257,9 +257,22 @@ def test_build_command_refuses_root_user_spellings():
     """The non-root gate must not be bypassable by a root SPELLING. Any user whose
     uid/name part resolves to root/0 — including root:root, root:0, 0:1, padded, or
     upper-case — is refused, never rendered as a privileged run."""
-    for bad in ("root", "0", "0:0", "0:1", "root:root", "root:0", " root ", "ROOT", "Root:0"):
+    for bad in (
+        "root", "0", "0:0", "0:1", "root:root", "root:0", " root ", "ROOT", "Root:0",
+        # Padded / signed numeric UID 0 spellings docker/Linux still parse as root.
+        "00", "000", "00:00", "+0", "-0", "0000:1",
+    ):
         with pytest.raises(SandboxError):
             DockerSandbox().build_command(make_spec(policy=SandboxPolicy(user=bad)))
+
+
+def test_build_command_allows_a_numeric_non_root_uid():
+    # A legitimate non-root numeric uid (even zero-padded) still renders.
+    argv = DockerSandbox().build_command(
+        make_spec(policy=SandboxPolicy(user="01000:01000"))
+    )
+    assert "--user" in argv
+    assert argv[argv.index("--user") + 1] == "01000:01000"
 
 
 def test_build_command_refuses_image_starting_with_dash():
