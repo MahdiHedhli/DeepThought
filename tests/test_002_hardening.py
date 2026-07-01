@@ -985,3 +985,40 @@ def test_discover_no_sarif_has_empty_coverage_delta(state_dir):
     # No input -> no store coverage AND an empty envelope coverage_delta (consistent).
     assert store.list_coverage(project="target") == []
     assert session.envelope.coverage_delta == []
+
+
+def test_load_sarif_invalid_utf8_raises_sarif_error(tmp_path):
+    from deepthought.ingest.sarif import SarifError, load_sarif
+
+    bad = tmp_path / "bad.sarif"
+    bad.write_bytes(b'{"version": "2.1.0", "x": "\xff\xfe invalid utf8"}')
+    with pytest.raises(SarifError):
+        load_sarif(str(bad))
+
+
+def test_discover_coverage_matches_envelope_delta(state_dir, monkeypatch):
+    # The orchestrator writes coverage from the validated envelope.coverage_delta,
+    # so a worker that attests a NARROWER delta than the full scope does not get
+    # overstated coverage.
+    import deepthought.sessions.discover as discover_mod
+
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            authorization_basis="own_code", scope_allowlist=["a", "b", "c"],
+        )
+    )
+
+    def narrow_worker(store, session_id, project, sarif_path, root=None):
+        env = valid_envelope(
+            session_ref=session_id, findings_written=[], primitives=[],
+            coverage_delta=[{"area": "b", "method": "read", "depth": "touched"}],
+        )
+        return env
+
+    monkeypatch.setattr(discover_mod, "_run_marvin_worker", narrow_worker)
+    session = DiscoverSession("target", sarif_path="x.sarif")
+    run_session(store, DefaultGate(), session)
+    covered = {c.area for c in store.list_coverage(project="target")}
+    assert covered == {"b"}  # only the attested area, not the full scope

@@ -186,6 +186,8 @@ def load_sarif(path: str) -> dict:
             data = json.load(handle)
     except json.JSONDecodeError as exc:
         raise SarifError(f"file is not valid JSON: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise SarifError(f"file is not valid UTF-8: {exc}") from exc
     except OSError as exc:
         # Missing file, a directory, a permission error — a read failure is a
         # blocked worker, not an orchestrator crash. Callers handle SarifError.

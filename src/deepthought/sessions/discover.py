@@ -367,18 +367,13 @@ class DiscoverSession(BaseSession):
         n_primitives = len(envelope.primitives)
 
         # --- teach back coverage (FR-6: DISCOVER writes findings AND coverage) ---
-        # Only record read coverage when the worker actually read an input. In
-        # 002 DISCOVER reads SARIF; with no SARIF (or a SARIF that failed to
-        # load, outcome 'blocked') nothing was surveyed, so recording the areas
-        # as read would corrupt the coverage signal operators rely on before
-        # VERIFY. Nothing outside the scope allowlist is ever covered.
-        # bool(): a blank sarif_path ("" / "--sarif '' ") is no input, matching
-        # the worker's `if sarif_path` check — so it records no coverage.
-        inputs_read = bool(self.sarif_path) and envelope.outcome.value != "blocked"
-        if inputs_read:
-            coverage_refs = self._write_read_coverage(store, project, session_id, root)
-        else:
-            coverage_refs = []
+        # Persist coverage FROM the validated envelope's coverage_delta — the
+        # firewall boundary — rather than recomputing scope. So the stored
+        # Coverage exactly matches what the (possibly out-of-process) worker
+        # attested, never overstating it, even if that delta is narrower than the
+        # full scope. The delta is already empty for a no-input or blocked worker,
+        # so nothing is recorded in those cases.
+        coverage_refs = self._write_read_coverage(store, project.id, session_id, envelope)
 
         outcome = envelope.outcome.value
         if outcome == "blocked":
@@ -410,27 +405,29 @@ class DiscoverSession(BaseSession):
 
     @staticmethod
     def _write_read_coverage(
-        store: Store, project: Project, session_id: str, root: Path | None
+        store: Store, project_id: str, session_id: str, envelope: Envelope
     ) -> list[str]:
-        """Persist Coverage(method='read', depth='touched') for each in-scope area.
+        """Persist one Coverage record per entry in the validated envelope's
+        ``coverage_delta``.
 
-        A static reasoning pass surveyed (but did not exhaust) the in-scope
-        surface by reading, so ``read``/``touched`` is the honest record. Only
-        deduped, non-blank, in-scope areas are covered — a blank or an escaping
-        entry (``../secret``, ``/etc``) that MAP would refuse is never recorded,
-        so DISCOVER cannot claim an out-of-root area was surveyed.
+        The orchestrator honors the worker's attestation (the firewall boundary)
+        instead of recomputing scope, so stored coverage never diverges from — or
+        overstates — the envelope. The delta the worker builds already contains
+        only deduped, non-blank, in-scope areas (a blank or escaping entry that
+        MAP would refuse is never in it), and is empty for a no-input or blocked
+        worker, so nothing out-of-scope or unattested is ever recorded.
         """
         refs: list[str] = []
-        for area in _coverage_areas(project, root):
+        for delta in envelope.coverage_delta:
             coverage = Coverage(
-                project=project.id,
-                area=area,
-                method=CoverageMethod.read,
-                depth=CoverageDepth.touched,
+                project=project_id,
+                area=delta.area,
+                method=CoverageMethod(delta.method),
+                depth=CoverageDepth(delta.depth),
                 last_session=session_id,
                 body=(
-                    f"Read-only DISCOVER reasoning over `{area}`: static signals "
-                    f"and SARIF surveyed for candidates. Nothing executed."
+                    f"Read-only DISCOVER reasoning over `{delta.area}`: static "
+                    f"signals and SARIF surveyed for candidates. Nothing executed."
                 ),
             )
             store.save_coverage(coverage)
@@ -444,9 +441,9 @@ class DiscoverSession(BaseSession):
             # for the reason, not at "provide SARIF".
             return (
                 f"The DISCOVER worker was blocked. Inspect the paged detail "
-                f"(state/detail/<session>/discover.txt) for the block reason (e.g. a "
-                f"malformed or unsupported SARIF), fix it, and re-run DISCOVER on "
-                f"{project.id!r}."
+                f"(detail/<session>/discover.txt in the state store) for the block "
+                f"reason (e.g. a malformed or unsupported SARIF), fix it, and re-run "
+                f"DISCOVER on {project.id!r}."
             )
         if n_findings == 0:
             return (
