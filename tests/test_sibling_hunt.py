@@ -648,6 +648,78 @@ def test_worker_out_of_scope_finding_location_is_dropped(state_dir, monkeypatch)
     assert src_variants and all("app" in (f.body or "") for f in src_variants)
 
 
+def test_ledger_drops_primitives_for_findings_the_orchestrator_filters(state_dir, monkeypatch):
+    """When the orchestrator drops a finding (here: out-of-scope), the ledger must
+    NOT retain that finding's primitive — the filtered envelope is ingested, so no
+    dangling ledger primitive points at a dropped/non-persisted finding."""
+    store = FileStore(state_dir)
+    _seed_source(store)  # scope ["app"]
+
+    import deepthought.sessions.sibling_hunt as sh
+    from deepthought.schema.envelope import Primitive
+
+    real_worker = sh._run_marvin_worker
+
+    def _smuggle(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        oos = make_finding(
+            id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+            summary="oos", body="**Location:** `secret/x.py:1`",
+        )
+        smuggled_prim = Primitive(
+            kind=signature.capability, target_locus="secret/x.py", preconditions=[],
+            grants=[signature.capability], confidence="suspected", finding_ref="F-8000",
+        )
+        env = env.model_copy(update={
+            "findings_written": list(env.findings_written) + ["F-8000"],
+            "primitives": list(env.primitives) + [smuggled_prim],
+        })
+        return env, findings + [oos], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _smuggle)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS)
+    run_session(store, GATE, session)
+
+    assert store.get_finding("F-8000") is None
+    ledger_refs = {n.finding_ref for n in session.conductor.ledger.nodes()}
+    assert "F-8000" not in ledger_refs   # no dangling ledger primitive
+
+
+def test_worker_returning_duplicate_ids_in_a_batch_persists_only_one(state_dir, monkeypatch):
+    """Two side-channel findings with the SAME new id both pass the not-in-store
+    check pre-save; dedupe-by-id ensures only ONE is persisted, no overwrite."""
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _dupes(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        a = make_finding(id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+                         summary="A", body="**Location:** `app/a.py:1`")
+        b = make_finding(id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+                         summary="B", body="**Location:** `app/b.py:1`")
+        env = env.model_copy(update={"findings_written": list(env.findings_written) + ["F-8000"]})
+        return env, findings + [a, b], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _dupes)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS)
+    run_session(store, GATE, session)
+
+    f = store.get_finding("F-8000")
+    assert f is not None and f.summary == "A"   # first kept, not overwritten by B
+    src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
+    assert src_out.findings.count("F-8000") == 1
+
+
 def test_same_class_drops_primitives_binding_to_filtered_findings():
     """_same_class keeps a primitive only if it is same-class AND binds to a KEPT
     finding — never a finding id that no returned finding provides (no dangling

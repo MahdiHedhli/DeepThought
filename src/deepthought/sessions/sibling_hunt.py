@@ -520,45 +520,69 @@ class SiblingHuntSession(BaseSession):
             )
             return
 
-        result = self.conductor.ingest(envelope)
-        if not result.ok:
-            # MUTATE-ONLY-ON-ACCEPT. The worker persisted nothing; a rejected
-            # envelope therefore strands NO findings and writes no detail, ledger,
-            # or coverage. The ids it would have used stay free for the next target.
+        # VALIDATE the envelope WITHOUT ledgering yet (the firewall runs first).
+        validated = self.conductor._validate(envelope)
+        if validated is None:
+            # MUTATE-ONLY-ON-ACCEPT. A rejected envelope ledgers nothing, persists
+            # nothing, writes no detail or coverage. Its ids stay free.
             self.target_outcomes.append(
                 TargetOutcome(
                     project_id=target.id,
                     gate_outcome="proceed",
                     proceeded=True,
-                    reason=f"worker envelope rejected at ingest ({result.reason})",
+                    reason=(
+                        "worker envelope rejected at ingest "
+                        f"({self.conductor.errors[-1] if self.conductor.errors else 'invalid'})"
+                    ),
                 )
             )
             return
 
-        validated = result.envelope
-        self.envelopes.append(validated)  # ingested into the ledger (in-memory)
         # ENVELOPE FIREWALL over the side channel. The worker returns the `findings`
         # OBJECTS alongside the envelope (the envelope itself carries only ids). A
         # buggy/out-of-process/compromised worker could return a benign envelope yet
-        # include extra Finding objects. Persist ONLY findings that are, ALL of:
-        #   * attested by the VALIDATED envelope (id in findings_written),
+        # include extra Finding objects. Keep ONLY findings that are, ALL of:
+        #   * attested by the validated envelope (id in findings_written),
         #   * bound to THIS target (project == target.id) — no cross-project write,
         #   * NEW (not already in the Store) — never overwrite/hijack an existing
-        #     finding (e.g. a verified one) by reusing its id, and
-        #   * in scope (claimed location inside the target's allowlist) — no
-        #     out-of-scope-area smuggling.
-        # Everything else is dropped, never saved. Persistence is driven by the
-        # validated envelope + the target's authority, not by unchecked worker
-        # output.
+        #     finding (e.g. a verified one) by id reuse,
+        #   * DISTINCT within this batch (dedupe by id — two same-id objects would
+        #     otherwise both pass the not-in-store check and overwrite each other),
+        #   * in scope (claimed location inside the target's allowlist).
         attested = set(validated.findings_written)
-        findings = [
-            f
-            for f in findings
-            if f.id in attested
-            and f.project == target.id
-            and store.get_finding(f.id) is None
-            and _finding_location_in_scope(f, target.scope_allowlist, root)
-        ]
+        kept: list = []
+        seen: set[str] = set()
+        for f in findings:
+            if (
+                f.id in attested
+                and f.project == target.id
+                and f.id not in seen
+                and store.get_finding(f.id) is None
+                and _finding_location_in_scope(f, target.scope_allowlist, root)
+            ):
+                seen.add(f.id)
+                kept.append(f)
+        kept_ids = seen
+        findings = kept
+
+        # Ingest a FILTERED envelope so the LEDGER holds only primitives that bind
+        # to a KEPT finding — a dropped finding (unattested / cross-project / id
+        # reuse / out-of-scope) leaves NO dangling primitive in the ledger. Coverage
+        # deltas are per-area (re-validated against scope below), not per-finding, so
+        # they are unchanged.
+        filtered = validated.model_copy(
+            update={
+                "findings_written": [
+                    fid for fid in validated.findings_written if fid in kept_ids
+                ],
+                "primitives": [
+                    p for p in validated.primitives if p.finding_ref in kept_ids
+                ],
+            }
+        )
+        result = self.conductor.ingest(filtered)
+        validated = result.envelope
+        self.envelopes.append(validated)  # the FILTERED, ledgered envelope
         saved_ids: list[str] = []
         saved_cov: list[str] = []
         try:
