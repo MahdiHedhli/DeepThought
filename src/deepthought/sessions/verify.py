@@ -243,8 +243,13 @@ class VerifySession(BaseSession):
         else:
             # Defensive: the guard rejected despite a resolving ref. Never
             # promoted; report the guard's reason. (Not expected in this slice.)
-            # Revert the evidence_ref so a still-candidate finding is not left
-            # pointing at evidence for a promotion that did not happen.
+            # The guard may have recorded a rejected transition_log entry on the
+            # STORED finding, so RELOAD it and revert only the evidence_ref on that
+            # reloaded object — saving our stale in-memory finding would overwrite
+            # (erase) the guard's audit entry the next-steps tell operators to read.
+            reloaded = store.get_finding(finding.id)
+            if reloaded is not None:
+                finding = reloaded
             finding.evidence_ref = original_evidence_ref
             store.save_finding(finding)
             summary = (

@@ -520,6 +520,41 @@ def test_promotion_failure_reverts_evidence_ref(state_dir):
     assert not finding.evidence_ref
 
 
+def test_promotion_failure_preserves_the_guards_rejected_audit_entry(state_dir):
+    """If the guard rejects AFTER recording a rejected transition_log entry on the
+    stored finding, VERIFY must revert evidence_ref WITHOUT erasing that entry —
+    reload the finding rather than overwriting the log with a stale in-memory one."""
+    from deepthought.schema.common import iso_z, utcnow
+    from deepthought.schema.finding import TransitionLogEntry
+    from deepthought.store import TransitionResult
+
+    store = _seeded_store(state_dir)
+    real_get = store.get_finding
+
+    def _reject_but_log(finding_id, new_status):
+        # Mimic the real guard: append a rejected entry to the STORED finding and
+        # persist it, then reject.
+        f = real_get(finding_id)
+        f.transition_log.append(
+            TransitionLogEntry(
+                at=iso_z(utcnow()), from_status=f.status.value,
+                to_status="verified", accepted=False, reason="guard rejected (test)",
+            )
+        )
+        store.save_finding(f)
+        return TransitionResult(ok=False, status=f.status, reason="guard rejected (test)")
+
+    store.transition_finding = _reject_but_log  # type: ignore[method-assign]
+
+    run_session(store, GATE, _verify(NoopSandbox(make_result(reproduced=True))))
+
+    finding = store.get_finding("F-0007")
+    assert finding.status is FindingStatus.candidate
+    assert not finding.evidence_ref                      # reverted
+    assert finding.transition_log                        # guard's audit entry survived
+    assert finding.transition_log[-1].accepted is False
+
+
 # --- dry-run: report the verdict, mutate the finding nowhere ----------------
 
 

@@ -410,5 +410,26 @@ def test_docker_run_raises_signoff_error_by_default(monkeypatch):
     assert "003" in msg or "hard stop" in msg
 
 
+def test_sandbox_context_tears_down_when_setup_fails():
+    """If setup() raises, teardown() must still run — the context was never
+    entered, so __exit__ won't fire. No partial environment is left standing."""
+    events: list[str] = []
+
+    class _SetupBoom(NoopSandbox):
+        def setup(self) -> None:
+            events.append("setup")
+            raise RuntimeError("setup blew up")
+
+        def teardown(self) -> None:
+            events.append("teardown")
+
+    box = _SetupBoom(make_result())
+    with pytest.raises(RuntimeError):
+        with box:
+            events.append("body")  # pragma: no cover - never reached
+
+    assert events == ["setup", "teardown"]  # torn down, body never ran
+
+
 def test_docker_is_a_sandbox():
     assert isinstance(DockerSandbox(), Sandbox)

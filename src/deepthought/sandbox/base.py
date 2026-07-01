@@ -163,7 +163,14 @@ class Sandbox(ABC):
         """Tear the ephemeral environment down. Default: nothing to tear down."""
 
     def __enter__(self) -> "Sandbox":
-        self.setup()
+        try:
+            self.setup()
+        except BaseException:
+            # setup() may have allocated resources before raising. Because the
+            # context was never entered, __exit__ will NOT run — so tear down here
+            # before propagating, or a partial VM/container could be left standing.
+            self.teardown()
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
