@@ -113,7 +113,7 @@ user                 str   = "65534:65534" # -> --user <uid>:<gid>  (never root 
 pids_limit           int   = 128         # -> --pids-limit 128
 memory_mib           int   = 512         # -> --memory 512m
 cpus                 float = 1.0         # -> --cpus 1
-wall_timeout_seconds int   = 30          # -> --stop-timeout 30  (ephemeral container torn down after)
+wall_timeout_seconds int   = 30          # -> --stop-timeout 30 (SIGKILL grace only; wall-clock EXECUTION limit is runner-enforced)
 ephemeral            bool  = True        # -> --rm   (built fresh per run, torn down after)
 ```
 
@@ -150,11 +150,11 @@ docker run
   --pids-limit <N>                       # policy.pids_limit
   --memory <N>m                          # policy.memory_mib
   --cpus <N>                             # policy.cpus
-  --stop-timeout <N>                     # policy.wall_timeout_seconds
+  --stop-timeout <N>                     # policy.wall_timeout_seconds (SIGKILL grace on stop)
   --workdir <spec.workdir>               # spec.workdir
   # (NO -v / --mount host bind — allow_host_mounts enforced off)
   # (NO --env from host; only spec.env, explicit and bounded)
-  <spec.image>
+  <spec.image>                           # validated: refused if it starts with '-'
   <spec.command ...>                     # argv, never a shell string
 ```
 
@@ -164,9 +164,12 @@ Argv discipline:
   assert over the list; nothing runs it in this slice. `subprocess` is never called
   with this (or any untrusted) input anywhere in 003.
 - **Every hardening clause is present or the build fails a test.** A missing
-  `--network=none`, a `root` user, an absent limit, or a rendered host mount is a
-  test failure. The wall-time bound renders as `--stop-timeout` on the ephemeral
-  (`--rm`) container and is asserted in the argv alongside the other clauses.
+  `--network=none`, a `root` user (in any spelling — `root:root`, `root:0`, a
+  padded/upper-case variant), an absent limit, a rendered host mount, or an image
+  ref beginning with `-` (argument injection) is a test failure. `--stop-timeout`
+  renders `wall_timeout_seconds` as the SIGKILL grace on the ephemeral (`--rm`)
+  container; the wall-clock EXECUTION limit itself is enforced externally by the
+  runner when a real backend is wired, not by this flag.
 - **`run()` is the hard stop.** `DockerSandbox.run` is guarded by
   `execution_enabled` (default `False`). With the flag off — the only shipped state
   — `run()` raises `SandboxExecutionDisabled` and executes nothing. No test, smoke,

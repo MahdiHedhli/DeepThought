@@ -270,6 +270,35 @@ def test_verify_refuses_a_disclosed_finding_without_running(state_dir):
     assert store.get_finding("F-0007").status is FindingStatus.disclosed
 
 
+# --- refuse a finding that belongs to another project -----------------------
+
+
+def test_verify_refuses_a_finding_from_another_project(state_dir):
+    """VERIFY must not promote a finding that belongs to a DIFFERENT project than
+    the one whose gate/session is running — that widens scope and corrupts another
+    project's lifecycle. It refuses BEFORE running the sandbox."""
+    store = FileStore(state_dir)
+    store.save_project(make_project())  # php-src, the authorized project
+    # A candidate finding that belongs to a DIFFERENT project.
+    store.save_finding(
+        make_finding(id="F-0007", project="other-project", status="candidate",
+                     evidence_ref=None)
+    )
+
+    box = NoopSandbox(make_result(reproduced=True))
+    session = _verify(box)  # runs under project php-src
+    record = run_session(store, GATE, session)
+
+    # Refused before any run: sandbox never invoked, finding untouched.
+    assert box.recorded == []
+    finding = store.get_finding("F-0007")
+    assert finding.status is FindingStatus.candidate
+    assert not finding.evidence_ref
+    assert record.close_state is CloseState.clean
+    assert record.has_next_steps()
+    assert "belongs to project" in session.outcome.summary.lower()
+
+
 # --- the sandbox is the ONLY door to execution ------------------------------
 
 
@@ -365,6 +394,113 @@ def test_verify_held_when_scope_allowlist_is_empty(state_dir):
     assert record.gate_outcome is GateOutcome.hold
     assert box.recorded == []
     assert store.get_finding("F-0007").status is FindingStatus.candidate
+
+
+# --- the sandbox lifecycle is honored (setup/teardown) ----------------------
+
+
+def test_verify_runs_the_sandbox_within_its_context_manager(state_dir):
+    """A real Sandbox relies on setup()/teardown() for the promised ephemeral
+    environment. VERIFY must enter the sandbox's context so setup runs before the
+    run and teardown always runs after."""
+    events: list[str] = []
+
+    class _LifecycleNoop(NoopSandbox):
+        def setup(self) -> None:
+            events.append("setup")
+
+        def teardown(self) -> None:
+            events.append("teardown")
+
+        def run(self, spec):
+            events.append("run")
+            return super().run(spec)
+
+    store = _seeded_store(state_dir)
+    run_session(store, GATE, _verify(_LifecycleNoop(make_result(reproduced=True))))
+
+    # Entered and exited around exactly one run: setup before, teardown after.
+    assert events == ["setup", "run", "teardown"]
+
+
+def test_verify_tears_down_the_sandbox_even_if_run_raises(state_dir):
+    """If the backend's run() raises, teardown must still run — no resources left
+    standing. The exception then propagates (the harness records an interrupted
+    session and re-raises)."""
+    events: list[str] = []
+
+    class _BoomSandbox(NoopSandbox):
+        def teardown(self) -> None:
+            events.append("teardown")
+
+        def run(self, spec):
+            events.append("run")
+            raise RuntimeError("backend blew up")
+
+    store = _seeded_store(state_dir)
+    with pytest.raises(RuntimeError):
+        run_session(store, GATE, _verify(_BoomSandbox(make_result())))
+
+    assert events == ["run", "teardown"]
+    # The finding was never promoted by a failed run.
+    assert store.get_finding("F-0007").status is FindingStatus.candidate
+
+
+# --- a failed VERIFY is recorded on the finding -----------------------------
+
+
+def test_non_resolving_records_the_blocked_attempt_on_the_finding(state_dir):
+    """A failed repro is verification history: the finding's transition_log records
+    the blocked candidate->verified attempt, not just the session detail. The
+    finding stays a candidate with no resolving evidence_ref."""
+    store = _seeded_store(state_dir)
+    run_session(store, GATE, _verify(NoopSandbox(make_result(reproduced=False))))
+
+    finding = store.get_finding("F-0007")
+    assert finding.status is FindingStatus.candidate
+    assert not finding.evidence_ref
+    # The blocked attempt is on the finding's audit trail.
+    assert finding.transition_log, "expected a transition_log entry for the attempt"
+    last = finding.transition_log[-1]
+    assert last.to_status == "verified"
+    assert last.accepted is False
+    assert "did not reproduce" in last.reason.lower()
+
+
+def test_non_resolving_keeps_check_green(state_dir):
+    """Recording the blocked attempt must not break the hard gate."""
+    from deepthought.check import run_check
+
+    store = _seeded_store(state_dir)
+    run_session(store, GATE, _verify(NoopSandbox(make_result(reproduced=False))))
+
+    report = run_check(store)
+    assert report.ok, report.errors
+
+
+# --- evidence_ref is reverted if the guard rejects the promotion ------------
+
+
+def test_promotion_failure_reverts_evidence_ref(state_dir):
+    """If the guard rejects the promotion despite a resolving ref, VERIFY must not
+    leave a dangling evidence_ref on a still-candidate finding."""
+    from deepthought.store import TransitionResult
+
+    store = _seeded_store(state_dir)
+
+    def _reject(finding_id, new_status):
+        current = store.get_finding(finding_id)
+        return TransitionResult(ok=False, status=current.status, reason="forced reject")
+
+    store.transition_finding = _reject  # type: ignore[method-assign]
+
+    session = _verify(NoopSandbox(make_result(reproduced=True)))
+    run_session(store, GATE, session)
+
+    finding = store.get_finding("F-0007")
+    # Not promoted, and the evidence_ref was reverted to its original (None).
+    assert finding.status is FindingStatus.candidate
+    assert not finding.evidence_ref
 
 
 # --- unknown finding --------------------------------------------------------

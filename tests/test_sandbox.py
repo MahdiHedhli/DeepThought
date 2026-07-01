@@ -247,6 +247,39 @@ def test_build_command_uses_a_non_root_user():
     assert not user.startswith("0:")
 
 
+def test_build_command_refuses_root_user_spellings():
+    """The non-root gate must not be bypassable by a root SPELLING. Any user whose
+    uid/name part resolves to root/0 — including root:root, root:0, 0:1, padded, or
+    upper-case — is refused, never rendered as a privileged run."""
+    for bad in ("root", "0", "0:0", "0:1", "root:root", "root:0", " root ", "ROOT", "Root:0"):
+        with pytest.raises(SandboxError):
+            DockerSandbox().build_command(make_spec(policy=SandboxPolicy(user=bad)))
+
+
+def test_build_command_refuses_image_starting_with_dash():
+    """An image ref that starts with '-' would be parsed by docker as another
+    OPTION (argument injection, e.g. --privileged). It is refused, not rendered."""
+    for bad in ("--privileged", "-v", "-", "   "):
+        with pytest.raises(SandboxError):
+            DockerSandbox().build_command(make_spec(image=bad))
+
+
+def test_build_command_strips_image_whitespace():
+    padded = "  ghcr.io/x/y@sha256:" + "0" * 64 + "  "
+    argv = DockerSandbox().build_command(make_spec(image=padded))
+    assert padded.strip() in argv      # the trimmed image is what is rendered
+    assert padded not in argv          # the padded form never is
+
+
+def test_build_command_renders_stop_timeout_grace():
+    """--stop-timeout (the SIGKILL grace period on stop) is rendered from
+    wall_timeout_seconds. The wall-clock EXECUTION limit is enforced externally by
+    the runner, not by this flag — but the flag is still present and bounded."""
+    argv = DockerSandbox().build_command(make_spec())
+    assert "--stop-timeout" in argv
+    assert argv[argv.index("--stop-timeout") + 1] == str(SandboxPolicy().wall_timeout_seconds)
+
+
 def test_build_command_renders_no_host_mount():
     # No -v / --mount host bind is EVER rendered: host_mounts are enforced off.
     argv = DockerSandbox().build_command(make_spec())

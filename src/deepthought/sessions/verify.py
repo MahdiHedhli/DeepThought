@@ -51,6 +51,8 @@ from ..schema import (
     Project,
     SessionType,
 )
+from ..schema.common import iso_z, utcnow
+from ..schema.finding import TransitionLogEntry
 from ..store import NotFoundError, Store
 
 # The evidence artifact's stable name under the session's detail directory. The
@@ -110,6 +112,27 @@ class VerifySession(BaseSession):
         if finding is None:
             raise NotFoundError(f"finding {self.finding_id!r} not found")
 
+        # Refuse a finding that belongs to a DIFFERENT project. The gate was
+        # evaluated for self.project_id only; promoting another project's finding
+        # under this project's gate would widen scope and corrupt that project's
+        # lifecycle. Refuse BEFORE running the sandbox — least privilege.
+        if finding.project != self.project_id:
+            return self._record(
+                SessionOutcome(
+                    summary=(
+                        f"VERIFY on {self.project_id!r}: finding {finding.id!r} "
+                        f"belongs to project {finding.project!r}, not "
+                        f"{self.project_id!r} — refusing. No repro was run; scope "
+                        f"unchanged."
+                    ),
+                    next_steps=(
+                        f"Run VERIFY under the finding's own project "
+                        f"({finding.project!r}) so its gate governs, or pass a "
+                        f"finding that belongs to {self.project_id!r}."
+                    ),
+                )
+            )
+
         # Refuse anything that is not a candidate. VERIFY promotes candidate ->
         # verified only; it never re-verifies, and it does not run the sandbox for
         # a finding it cannot promote.
@@ -131,10 +154,14 @@ class VerifySession(BaseSession):
             )
 
         # --- the ONLY door to execution: the injected Sandbox seam ---
-        # Hand the hardened spec to the injected sandbox and read back ONLY the
-        # typed result. With a NoopSandbox this executes nothing. There is no
-        # subprocess, no shell, and no in-process run of target code here.
-        result = self.sandbox.run(self.spec)
+        # Enter the sandbox's context so a real backend's setup()/teardown()
+        # lifecycle runs: the ephemeral environment is built before the run and
+        # ALWAYS torn down after, even if run() raises. Hand it the hardened spec
+        # and read back ONLY the typed result. With a NoopSandbox this executes
+        # nothing. There is no subprocess, no shell, and no in-process run of
+        # target code here.
+        with self.sandbox as sandbox:
+            result = sandbox.run(self.spec)
         self.sandbox_result = result
 
         # --- page the evidence artifact (the firewall boundary) ---
@@ -150,7 +177,7 @@ class VerifySession(BaseSession):
                 self._promote(store, finding, evidence_ref, result)
             )
         return self._record(
-            self._leave_candidate(finding, evidence_ref, result)
+            self._leave_candidate(store, finding, evidence_ref, result)
         )
 
     # --- promotion (through the guard) -------------------------------------
@@ -170,6 +197,7 @@ class VerifySession(BaseSession):
         both true by construction — and it owns the decision. VERIFY never assigns
         ``status = verified`` directly.
         """
+        original_evidence_ref = finding.evidence_ref
         finding.evidence_ref = evidence_ref
         store.save_finding(finding)
         transition = store.transition_finding(finding.id, FindingStatus.verified)
@@ -192,6 +220,10 @@ class VerifySession(BaseSession):
         else:
             # Defensive: the guard rejected despite a resolving ref. Never
             # promoted; report the guard's reason. (Not expected in this slice.)
+            # Revert the evidence_ref so a still-candidate finding is not left
+            # pointing at evidence for a promotion that did not happen.
+            finding.evidence_ref = original_evidence_ref
+            store.save_finding(finding)
             summary = (
                 f"VERIFY on {self.project_id!r}: repro for {finding.id!r} reproduced "
                 f"but the Store lifecycle guard rejected the promotion: "
@@ -212,23 +244,44 @@ class VerifySession(BaseSession):
 
     def _leave_candidate(
         self,
+        store: Store,
         finding: Finding,
         evidence_ref: str,
         result: SandboxResult,
     ) -> SessionOutcome:
         """Repro did not reproduce: page the negative artifact, promote nothing.
 
-        A failed repro is durable state, so the artifact is still paged — but VERIFY
-        sets no resolving ``evidence_ref``, so the guard is never even asked to
-        promote. The finding stays ``candidate``.
+        A failed repro is durable *verification history*, so besides paging the
+        negative artifact we record a rejected ``candidate -> verified`` attempt in
+        the finding's ``transition_log`` (the data model promises verification
+        history lives on the finding, not only in the session detail). This sets NO
+        resolving ``evidence_ref`` — that would let the guard promote a
+        non-reproducing finding — and changes NO status: the finding stays
+        ``candidate``.
         """
+        finding.transition_log.append(
+            TransitionLogEntry(
+                at=iso_z(utcnow()),
+                from_status=finding.status.value,
+                to_status=FindingStatus.verified.value,
+                accepted=False,
+                reason=(
+                    f"VERIFY: repro did not reproduce (exit_code={result.exit_code}, "
+                    f"timed_out={result.timed_out}); no resolving evidence, not "
+                    f"promoted. Negative result paged at {evidence_ref}."
+                ),
+            )
+        )
+        store.save_finding(finding)
+
         summary = (
             f"VERIFY on {self.project_id!r}: repro for {finding.id!r} did NOT "
             f"reproduce (exit_code={result.exit_code}, "
             f"wall_seconds={result.wall_seconds}, timed_out={result.timed_out}). "
-            f"Paged the negative result as durable state ({evidence_ref}); left the "
-            f"finding as a candidate — no evidence_ref set, so the lifecycle guard "
-            f"promotes nothing. No untrusted code executed in this slice."
+            f"Paged the negative result as durable state ({evidence_ref}) and "
+            f"recorded the blocked attempt on the finding; left it a candidate — no "
+            f"evidence_ref set, so the lifecycle guard promotes nothing. No "
+            f"untrusted code executed in this slice."
         )
         next_steps = (
             f"{finding.id!r} stays a candidate: the minimized repro did not "

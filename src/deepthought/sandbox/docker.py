@@ -30,7 +30,10 @@ from .base import (
     SandboxSpec,
 )
 
-_ROOT_USERS = frozenset({"root", "0", "0:0"})
+# The uid/name spellings docker runs as root. Only the part BEFORE ':' (the
+# user/uid) determines privilege, so we match against that, case-folded and
+# stripped — never the whole "uid:gid" string.
+_ROOT_UIDS = frozenset({"root", "0"})
 
 
 class DockerSandbox(Sandbox):
@@ -69,13 +72,18 @@ class DockerSandbox(Sandbox):
         if policy.no_new_privileges:
             argv.append("--security-opt=no-new-privileges")
 
-        # Non-root user, never root/0. Refuse to render a root run.
+        # Non-root user, never root/0. The user/uid part (before ':') is what
+        # docker actually runs as, so validate THAT — case-folded and stripped —
+        # not the whole string. This refuses "root", "0", "0:0", and the bypass
+        # spellings "root:root", "root:0", "0:1", " root ", "ROOT", ... that a
+        # naive whole-string check would miss.
         if policy.run_as_non_root:
             user = policy.user
-            if user in _ROOT_USERS or user.startswith("0:"):
+            uid_part = user.split(":", 1)[0].strip().casefold()
+            if uid_part in _ROOT_UIDS:
                 raise SandboxError(
-                    f"run_as_non_root is set but user {user!r} is root; refusing"
-                    " to render a privileged run configuration"
+                    f"run_as_non_root is set but user {user!r} resolves to root;"
+                    " refusing to render a privileged run configuration"
                 )
             argv += ["--user", user]
 
@@ -83,8 +91,12 @@ class DockerSandbox(Sandbox):
         argv += ["--pids-limit", str(policy.pids_limit)]
         argv += ["--memory", f"{policy.memory_mib}m"]
         argv += ["--cpus", _format_cpus(policy.cpus)]
-        # The wall-time bound is enforced by the runner (a --stop-timeout on the
-        # ephemeral container, torn down after); it is not a host mount.
+        # NOTE: --stop-timeout only sets the SIGKILL grace period after a stop
+        # signal; it does NOT cap total run time or terminate a hung container. The
+        # wall-clock EXECUTION limit (wall_timeout_seconds) must be enforced
+        # externally by the runner when a real backend is wired (a distinct,
+        # signed-off change). It is rendered here so the ephemeral container is
+        # still bounded on teardown.
         argv += ["--stop-timeout", str(policy.wall_timeout_seconds)]
 
         argv += ["--workdir", spec.workdir]
@@ -100,8 +112,17 @@ class DockerSandbox(Sandbox):
             argv += ["--env", f"{key}={spec.env[key]}"]
 
         # The image, then the untrusted argv as separate tokens (never joined
-        # into a shell string).
-        argv.append(spec.image)
+        # into a shell string). Validate the image token first: docker parses
+        # options until the IMAGE positional, so a ref beginning with '-' (e.g.
+        # "--privileged") would be consumed as another OPTION — argument injection
+        # that could enable a privileged run. Strip and refuse it; never render it.
+        image = spec.image.strip()
+        if not image or image.startswith("-"):
+            raise SandboxError(
+                f"invalid image ref {spec.image!r}: must be non-empty and must not"
+                " start with '-' (argument-injection guard)"
+            )
+        argv.append(image)
         argv += list(spec.command)
         return argv
 
