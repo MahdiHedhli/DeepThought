@@ -578,8 +578,8 @@ class SiblingHuntSession(BaseSession):
                 ]
             kept_ids = {f.id for f in kept}
 
-            # Ingest a FILTERED envelope so the LEDGER holds only primitives binding
-            # to a KEPT finding — a dropped finding leaves NO dangling ledger
+            # Build a FILTERED envelope so the LEDGER (below) holds only primitives
+            # binding to a KEPT finding — a dropped finding leaves NO dangling ledger
             # primitive. Coverage deltas are per-area (re-validated against scope
             # below), not per-finding, so they are unchanged.
             filtered = validated.model_copy(
@@ -592,17 +592,23 @@ class SiblingHuntSession(BaseSession):
                     ],
                 }
             )
-            validated = self.conductor.ingest(filtered).envelope
-            self.envelopes.append(validated)  # the FILTERED, ledgered envelope
 
-            # Accepted: ONLY NOW mutate the Store, accumulating what reaches disk.
+            # Persist to the Store FIRST (mutate-only-on-accept), accumulating what
+            # reaches disk, THEN ledger — so a store-write failure leaves the shared
+            # in-memory ledger untouched (no primitive for a target whose findings
+            # did not persist), keeping ledger and Store consistent.
             for finding in kept:
                 store.save_finding(finding)
                 saved_ids.append(finding.id)
             store.write_detail(session_id, f"{target.id}-sibling-hunt.txt", detail_body)
             self._write_read_coverage(
-                store, target, session_id, validated, root, saved_cov
+                store, target, session_id, filtered, root, saved_cov
             )
+
+            # All store writes succeeded: NOW ledger the filtered envelope's
+            # primitives (the only mutation of the shared Conductor for this target).
+            self.conductor.ingest(filtered)
+            self.envelopes.append(filtered)  # the FILTERED, ledgered envelope
         except Exception as exc:
             # Any failure above may have persisted SOME findings/coverage already;
             # report EXACTLY those so the session log matches Store state, surface the
