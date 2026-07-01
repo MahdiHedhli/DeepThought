@@ -500,26 +500,37 @@ class SiblingHuntSession(BaseSession):
 
         validated = result.envelope
         self.envelopes.append(validated)  # ingested into the ledger (in-memory)
+        saved_ids: list[str] = []
         try:
             # Accepted: ONLY NOW mutate the Store — persist the variant findings and
             # page the detail, from the worker's built (now validated) output. These
             # writes are ALSO inside the per-target isolation guard: a Store write
             # failure (permission/disk) for THIS target is recorded and surfaced as
             # that target's failure and the hunt continues to the next target — it
-            # never aborts the whole session or leaves the failure unreported.
+            # never aborts the whole session.
             for finding in findings:
                 store.save_finding(finding)
+                saved_ids.append(finding.id)
             store.write_detail(session_id, f"{target.id}-sibling-hunt.txt", detail_body)
             coverage_refs = self._write_read_coverage(
                 store, target, session_id, validated, root
             )
         except Exception as exc:
+            # A write failure mid-batch may have already persisted SOME variants.
+            # Report EXACTLY those (findings=saved_ids) so the session log matches
+            # Store state — no persisted variant is left unreported — and surface the
+            # partial failure distinctly. The hunt continues to the next target.
             self.target_outcomes.append(
                 TargetOutcome(
                     project_id=target.id,
                     gate_outcome="proceed",
                     proceeded=True,
-                    reason=f"worker failed for {target.id}: {type(exc).__name__} (store write)",
+                    reason=(
+                        f"worker failed for {target.id}: {type(exc).__name__} "
+                        f"(store write); {len(saved_ids)} variant(s) persisted before "
+                        f"the failure"
+                    ),
+                    findings=saved_ids,
                 )
             )
             return

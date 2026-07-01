@@ -494,6 +494,47 @@ def test_post_ingest_store_write_failure_is_isolated_and_surfaced(state_dir, mon
     assert "store write" in (src_out.reason or "")
 
 
+def test_partial_store_write_failure_reports_the_persisted_variants(state_dir, monkeypatch):
+    """If a write fails MID-batch (some variants already persisted), the session log
+    must MATCH Store state: the persisted variants are reported in findings_touched,
+    never left silently behind, and the target is surfaced as a partial failure."""
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    real_save = store.save_finding
+    calls = {"n": 0}
+
+    def _fail_second(finding):
+        if finding.project == "src-proj" and finding.status is FindingStatus.candidate:
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise OSError("disk full on the 2nd variant")
+        return real_save(finding)
+
+    monkeypatch.setattr(store, "save_finding", _fail_second)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS
+    )
+    record = run_session(store, GATE, session)
+
+    src_variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    # Exactly ONE variant persisted before the failure — and it IS reported, so the
+    # session log does not diverge from Store state.
+    assert len(src_variants) == 1
+    persisted_id = src_variants[0].id
+    assert persisted_id in record.findings_touched
+    src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
+    assert src_out.findings == [persisted_id]
+    assert "store write" in (src_out.reason or "")
+    surfaced = (record.body + record.next_steps()).upper()
+    assert "FAILED" in surfaced or "BLOCKED" in surfaced
+
+
 def test_siblings_are_gated_by_the_harness_gate_not_a_hardcoded_default(state_dir):
     """AUTHORITY EDGE: a sibling is gated by the SAME gate the harness ran the
     source through (injected as self.harness_gate), not a hardcoded DefaultGate —
