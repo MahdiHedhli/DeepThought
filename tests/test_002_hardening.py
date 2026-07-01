@@ -600,6 +600,40 @@ def test_map_prunes_ignored_directories(tmp_path):
     assert "1 file(s)" in cov.body
 
 
+def test_file_read_tagged_cwe73_maps_to_read():
+    # A read-specific rule that also carries a broad cwe-73 tag must map to read.
+    sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"rules": [{"id": "py/arbitrary-file-read", "properties": {"tags": ["external/cwe/cwe-73"]}}]}},
+                "results": [
+                    {
+                        "ruleId": "py/arbitrary-file-read",
+                        "message": {"text": "reads an attacker-chosen file"},
+                        "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app/x.py"}, "region": {"startLine": 1}}}],
+                    }
+                ],
+            }
+        ],
+    }
+    findings = sarif_to_findings(sarif, project="p")
+    prims = sarif_to_primitives(sarif, finding_ids=[f.id for f in findings])
+    assert prims and prims[0].kind == "read:arbitrary-file"
+
+
+def test_location_capped_when_uri_is_huge():
+    from deepthought.ingest.sarif import _BODY_MAX
+
+    huge_uri = "app/" + "a" * 6000 + ".py"
+    s = _sarif_rule("py/style-only", uri=huge_uri)
+    s["runs"][0]["results"][0]["message"]["text"] = "short message"
+    finding = sarif_to_findings(s, project="p", scope=["app"])[0]
+    # An absurdly long uri cannot push the bounded body over _BODY_MAX.
+    assert len(finding.body) <= _BODY_MAX
+    assert "**Location:** app/" in finding.body
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.

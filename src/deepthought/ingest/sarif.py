@@ -44,6 +44,10 @@ _SUMMARY_MAX = 200
 # truncated URL is not a valid URL).
 _REF_URL_MAX = 2048
 
+# Conservative bound on the "**Location:** file:line" line rendered into the body,
+# so an absurdly long uri cannot push the bounded body over _BODY_MAX.
+_LOCATION_MAX = 512
+
 # Conservative bound on the finding body assembled from SARIF text. The
 # Finding.body field is unbounded in the schema, but the sarif-ingest contract
 # (property 1) and data-model require SARIF text to be *length-bounded* into the
@@ -88,21 +92,21 @@ _HEURISTIC: tuple[tuple[str, str], ...] = (
     ("eval", "exec:code"),
     ("rce", "exec:code"),
     ("cwe-94", "exec:code"),
-    # Arbitrary file write / path traversal (and conservative memory-write proxy)
-    ("path-traversal", "write:arbitrary-file"),
-    ("path-injection", "write:arbitrary-file"),
+    # Arbitrary file write / read. Unambiguous write tokens first; then the
+    # read-specific rows, which MUST outrank EVERY broad path/CWE write fallback
+    # below (path-traversal, cwe-22, cwe-73, path) so a file-read finding that
+    # also carries a common cwe-22/cwe-73 tag is not misclassified as write.
     ("arbitrary-file-write", "write:arbitrary-file"),
     ("file-write", "write:arbitrary-file"),
+    ("arbitrary-file-read", "read:arbitrary-file"),
+    ("file-read", "read:arbitrary-file"),
+    ("path-traversal", "write:arbitrary-file"),
+    ("path-injection", "write:arbitrary-file"),
     ("zip-slip", "write:arbitrary-file"),
     ("cwe-22", "write:arbitrary-file"),
     ("cwe-73", "write:arbitrary-file"),
-    # Arbitrary file read — the read-specific rows MUST precede the broad `path`
-    # fallback below, so a rule like "path/arbitrary-file-read" maps to read, not
-    # to the write fallback.
-    ("arbitrary-file-read", "read:arbitrary-file"),
-    ("file-read", "read:arbitrary-file"),
-    # Broad path fallback (write) and conservative memory-write proxies. These
-    # are last so a more specific row always wins first.
+    # Broad path fallback (write) and conservative memory-write proxies, last so
+    # a more specific row always wins first.
     ("path", "write:arbitrary-file"),
     ("buffer", "write:arbitrary-file"),
     ("oob-write", "write:arbitrary-file"),
@@ -402,14 +406,16 @@ def sarif_to_findings(
         location = ""
         if uri:
             location = f"\n\n**Location:** {uri}" + (f":{line}" if line is not None else "")
+            # Cap the location itself so an absurdly long uri cannot push the body
+            # over _BODY_MAX even after the message is truncated to fit.
+            location = location[:_LOCATION_MAX]
 
-        # Bound the untrusted SARIF text, but preserve the location: reserve room
-        # for it and truncate the MESSAGE, not the appended location. Otherwise a
-        # message near _BODY_MAX would slice the locus away and leave an unmapped
-        # finding without any persisted location.
+        # Bound the untrusted SARIF text, but preserve the (now bounded) location:
+        # reserve room for it and truncate the MESSAGE, not the appended location.
+        # The final slice is a backstop; by construction header+location <= budget.
         header = "## Root cause\n\n"
         msg_budget = max(0, _BODY_MAX - len(header) - len(location))
-        body = f"{header}{message[:msg_budget]}{location}"
+        body = f"{header}{message[:msg_budget]}{location}"[:_BODY_MAX]
 
         findings.append(
             Finding(
