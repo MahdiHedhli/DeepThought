@@ -191,9 +191,11 @@ def playbook_verify(
         False,
         "--noop-reproduced",
         help=(
-            "DEV/TEST ONLY: feed a REPRODUCED verdict through the NoopSandbox seam "
-            "(still executes nothing) so a candidate is promoted to verified through "
-            "the Store lifecycle guard. Used by the 003 Noop-backed smoke."
+            "DEV/TEST ONLY: change the verdict the NoopSandbox REPORTS to reproduced "
+            "(still executes nothing). This is a DRY-RUN: it does NOT promote the "
+            "finding, page evidence, or write any verification state — the finding "
+            "stays a candidate. Promotion happens only when a signed-off sandbox "
+            "actually reproduces the finding."
         ),
     ),
     i_have_sandbox_signoff: bool = typer.Option(

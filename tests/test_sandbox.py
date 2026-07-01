@@ -390,13 +390,30 @@ def test_build_command_renders_bounded_spec_env_only():
     assert "LANG=C" in argv
 
 
-def test_build_command_ends_with_image_then_argv():
+def test_build_command_forces_entrypoint_and_appends_args_after_image():
+    """The repro must run EXACTLY as spec.command, independent of the image's
+    ENTRYPOINT: command[0] is rendered as --entrypoint (an option, before the
+    image) and command[1:] follow the image as args. Otherwise docker would append
+    the whole command as ARGS to the image's baked-in entrypoint."""
     spec = make_spec(command=["/repro/run", "--input", "/work/case"])
     argv = DockerSandbox().build_command(spec)
-    # image immediately precedes the untrusted argv; the argv is passed as tokens,
-    # never joined into a shell string.
-    idx = argv.index(spec.image)
-    assert argv[idx + 1 :] == spec.command
+
+    # --entrypoint is set to command[0], and appears BEFORE the image.
+    assert "--entrypoint" in argv
+    ep_idx = argv.index("--entrypoint")
+    assert argv[ep_idx + 1] == "/repro/run"
+    img_idx = argv.index(spec.image)
+    assert ep_idx < img_idx                       # option precedes the image positional
+    # Only the ARGS (command[1:]) follow the image; command[0] is NOT re-appended.
+    assert argv[img_idx + 1 :] == ["--input", "/work/case"]
+
+
+def test_build_command_single_token_command_has_no_trailing_args():
+    spec = make_spec(command=["/repro/run"])
+    argv = DockerSandbox().build_command(spec)
+    assert argv[argv.index("--entrypoint") + 1] == "/repro/run"
+    # Nothing follows the image when the command is a single token.
+    assert argv[argv.index(spec.image) + 1 :] == []
 
 
 def test_build_command_renders_workdir():

@@ -155,11 +155,17 @@ docker run
   --cpus <N>                             # policy.cpus
   --stop-timeout <grace>                 # SHORT FIXED teardown grace (NOT wall_timeout_seconds)
   --workdir <spec.workdir>               # spec.workdir
+  --entrypoint <spec.command[0]>         # force the repro executable; ignore the image ENTRYPOINT
   # (NO -v / --mount host bind — allow_host_mounts enforced off)
   # (NO --env from host; only spec.env — keys validated [A-Za-z_][A-Za-z0-9_]*)
   <spec.image>                           # validated: stripped; refused if empty or starts with '-'
-  <spec.command ...>                     # argv (>= 1 token), never a shell string
+  <spec.command[1:] ...>                 # ARGS only (command[0] is the entrypoint); never a shell string
 ```
+
+`--entrypoint` is set to `command[0]` and only `command[1:]` follow the image, so
+EXACTLY `spec.command` runs. Without it, `docker run IMAGE cmd...` would append the
+whole command as ARGS to the image's baked-in `ENTRYPOINT` — running the image's
+entrypoint, not the minimized repro.
 
 Argv discipline:
 

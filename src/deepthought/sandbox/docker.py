@@ -128,6 +128,15 @@ class DockerSandbox(Sandbox):
 
         argv += ["--workdir", spec.workdir]
 
+        # Force EXACTLY spec.command to run, independent of the image's
+        # ENTRYPOINT/CMD. `docker run IMAGE cmd...` appends the trailing tokens as
+        # ARGS to any image ENTRYPOINT, so command[0] would NOT be the executable —
+        # the image's entrypoint would run instead of the minimized repro. Setting
+        # --entrypoint to command[0] (a docker OPTION, before the image) and passing
+        # command[1:] after the image makes the repro argv deterministic and stops
+        # any baked-in entrypoint from running. command is non-empty (min_length=1).
+        argv += ["--entrypoint", spec.command[0]]
+
         # NO host bind mounts are EVER rendered in this slice: host_mounts are
         # enforced off. The repro input reaches the sandbox as a controlled
         # artifact (spec.repro_ref), never a host-path bind.
@@ -157,7 +166,9 @@ class DockerSandbox(Sandbox):
                 " start with '-' (argument-injection guard)"
             )
         argv.append(image)
-        argv += list(spec.command)
+        # Only the ARGS (command[1:]) follow the image; command[0] is the
+        # --entrypoint rendered above, so exactly spec.command executes.
+        argv += list(spec.command[1:])
         return argv
 
     # --- the HARD STOP -----------------------------------------------------

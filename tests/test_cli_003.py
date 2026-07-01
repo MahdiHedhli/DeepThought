@@ -266,6 +266,17 @@ def test_verify_cli_exits_cleanly_on_sandbox_error(tmp_path, monkeypatch):
     assert not isinstance(result.exception, SandboxError)
 
 
+def test_verify_help_says_noop_reproduced_does_not_promote(tmp_path):
+    """The --noop-reproduced help must not claim it promotes the finding (the CLI
+    is always a non-mutating dry-run); it only changes the reported verdict."""
+    result = runner.invoke(app, ["playbook", "verify", "--help"])
+    assert result.exit_code == 0, result.output
+    # Collapse wrapping so the assertion is robust to Rich line breaks.
+    help_text = " ".join(result.output.split()).lower()
+    assert "--noop-reproduced" in help_text
+    assert "does not promote" in help_text
+
+
 def test_verify_unknown_project_errors(tmp_path):
     state = tmp_path / "state"
     FileStore(state)  # empty store
