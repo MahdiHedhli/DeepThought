@@ -74,8 +74,12 @@ _HEURISTIC: tuple[tuple[str, str], ...] = (
     ("template-injection", "inject:template"),
     ("template", "inject:template"),
     ("cwe-1336", "inject:template"),
-    # Deserialization
-    ("deserial", "deserialize:untrusted"),
+    # Deserialization. Word-boundary matching means the needle must be a whole
+    # token, so the full spellings are listed (a bare "deserial" prefix would
+    # never match "deserialization").
+    ("deserialization", "deserialize:untrusted"),
+    ("deserialize", "deserialize:untrusted"),
+    ("deserialized", "deserialize:untrusted"),
     ("unpickle", "deserialize:untrusted"),
     ("unmarshal", "deserialize:untrusted"),
     ("cwe-502", "deserialize:untrusted"),

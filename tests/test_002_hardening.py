@@ -642,6 +642,16 @@ def test_scope_matching_strips_whitespace_in_allowlist():
     assert sarif_to_findings(s, project="p", scope=["  other  "]) == []
 
 
+def test_deserialization_rules_map_under_word_boundaries():
+    # The word-boundary change must not drop deserialization findings that spell
+    # out the full word (a bare "deserial" prefix can't match "deserialization").
+    for rid in ("python/unsafe-deserialization", "java/deserialize-untrusted-data"):
+        s = _sarif_rule(rid)
+        findings = sarif_to_findings(s, project="p")
+        prims = sarif_to_primitives(s, finding_ids=[f.id for f in findings])
+        assert prims and prims[0].kind == "deserialize:untrusted", rid
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.
