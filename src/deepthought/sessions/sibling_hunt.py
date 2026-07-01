@@ -499,15 +499,30 @@ class SiblingHuntSession(BaseSession):
             return
 
         validated = result.envelope
-        # Accepted: ONLY NOW mutate the Store — persist the variant findings and
-        # page the detail, from the worker's built (now validated) output.
-        for finding in findings:
-            store.save_finding(finding)
-        store.write_detail(session_id, f"{target.id}-sibling-hunt.txt", detail_body)
-        self.envelopes.append(validated)
-        coverage_refs = self._write_read_coverage(
-            store, target, session_id, validated, root
-        )
+        self.envelopes.append(validated)  # ingested into the ledger (in-memory)
+        try:
+            # Accepted: ONLY NOW mutate the Store — persist the variant findings and
+            # page the detail, from the worker's built (now validated) output. These
+            # writes are ALSO inside the per-target isolation guard: a Store write
+            # failure (permission/disk) for THIS target is recorded and surfaced as
+            # that target's failure and the hunt continues to the next target — it
+            # never aborts the whole session or leaves the failure unreported.
+            for finding in findings:
+                store.save_finding(finding)
+            store.write_detail(session_id, f"{target.id}-sibling-hunt.txt", detail_body)
+            coverage_refs = self._write_read_coverage(
+                store, target, session_id, validated, root
+            )
+        except Exception as exc:
+            self.target_outcomes.append(
+                TargetOutcome(
+                    project_id=target.id,
+                    gate_outcome="proceed",
+                    proceeded=True,
+                    reason=f"worker failed for {target.id}: {type(exc).__name__} (store write)",
+                )
+            )
+            return
         self.target_outcomes.append(
             TargetOutcome(
                 project_id=target.id,

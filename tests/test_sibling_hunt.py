@@ -452,6 +452,48 @@ def test_nonexistent_sarif_surfaces_a_blocked_target_not_silent_zero(state_dir):
     assert variants == []
 
 
+def test_post_ingest_store_write_failure_is_isolated_and_surfaced(state_dir, monkeypatch):
+    """A Store write failure AFTER a successful ingest (e.g. a disk/permission error
+    persisting a variant) must be contained to that target — recorded and surfaced
+    as its failure — never aborting the whole hunt or silently losing the report."""
+    store = FileStore(state_dir)
+    _seed_source(store)
+    _register_sibling(store, "sib-proj")
+
+    real_save = store.save_finding
+
+    def _flaky_save(finding):
+        # Fail persisting the SOURCE target's variant candidates; the sibling saves
+        # fine.
+        if finding.project == "src-proj" and finding.status is FindingStatus.candidate:
+            raise OSError("disk full writing variant")
+        return real_save(finding)
+
+    monkeypatch.setattr(store, "save_finding", _flaky_save)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007",
+        sibling_project_ids=["sib-proj"], sarif_path=SIBLINGS,
+    )
+    record = run_session(store, GATE, session)
+
+    assert record.close_state.value == "clean"   # the hunt did NOT crash
+    src_variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    sib_variants = [
+        f for f in store.list_findings(project="sib-proj") if f.status is FindingStatus.candidate
+    ]
+    assert src_variants == []            # source variant writes failed
+    assert len(sib_variants) == 2        # the healthy sibling still ran
+    surfaced = (record.body + record.next_steps()).upper()
+    assert "FAILED" in surfaced or "BLOCKED" in surfaced
+    src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
+    assert "store write" in (src_out.reason or "")
+
+
 def test_siblings_are_gated_by_the_harness_gate_not_a_hardcoded_default(state_dir):
     """AUTHORITY EDGE: a sibling is gated by the SAME gate the harness ran the
     source through (injected as self.harness_gate), not a hardcoded DefaultGate —
