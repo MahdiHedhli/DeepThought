@@ -1,9 +1,10 @@
-"""Shared, security-critical scope containment for the read-only sessions.
+"""Shared, security-critical path containment.
 
-Both MAP and DISCOVER must refuse a scope area that escapes the target root
-(an absolute path, a backslash path, or a ``..`` traversal). Keeping the check
-in one place means the two sessions cannot drift apart on a security-critical
-rule.
+Both the SARIF ingest and the read-only sessions (MAP, DISCOVER) must refuse a
+path that escapes the target root — an absolute path, a backslash path, a ``..``
+traversal, or (against a real checkout) a symlinked component that resolves
+outside the root. This lives at the package top level so both ``ingest`` and
+``sessions`` can import it without a circular dependency.
 """
 
 from __future__ import annotations
@@ -31,9 +32,9 @@ def resolve_within(root: Path, area: str) -> Path | None:
     """Resolve ``area`` under ``root`` iff it stays strictly inside ``root``.
 
     Returns the resolved path when it is contained, else None. Rejects absolute,
-    backslash, and ``..``-traversal areas syntactically first (so a backslash
-    entry cannot pass as an in-tree filename), then requires the resolved path to
-    stay under the root.
+    backslash, and ``..``-traversal areas syntactically first, then resolves
+    (following any symlinks) and requires the result to stay under the root — so
+    a symlinked component that escapes the tree is refused.
     """
     if not _syntactically_safe(area):
         return None

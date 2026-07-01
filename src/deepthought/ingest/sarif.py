@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
 from ..schema.envelope import CAPABILITY_TAXONOMY, Confidence, Primitive
 from ..schema.finding import Finding, FindingStatus, Reference
+from ..scope import resolve_within
 
 # The only SARIF version this ingest accepts. Anything else is rejected rather
 # than silently coerced.
@@ -282,7 +283,9 @@ def _rule_tags(rule: dict | None) -> list[str]:
     return [t.strip() for t in tags if isinstance(t, str) and t.strip()]
 
 
-def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
+def _in_scope(
+    uri: str | None, scope: list[str] | None, root: Path | None = None
+) -> bool:
     """Whether a SARIF result location is inside the project's scope allowlist.
 
     ``scope=None`` means "no filter" (accept). A result with no location (``uri``
@@ -290,6 +293,10 @@ def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
     A URI is in scope when it equals, or is contained under, an allowlist area.
     An absolute URI or a ``..`` traversal escapes the allowlist and is refused —
     DISCOVER never reports a finding for a path outside the authorized scope.
+
+    When ``root`` is given (a real checkout), the URI is ALSO resolved under the
+    root, so a symlinked component (e.g. ``app/link/secret.py`` where ``app/link``
+    links outside the tree) is refused even though it is lexically under ``app``.
     """
     if scope is None:
         return True  # no scope filter
@@ -317,6 +324,10 @@ def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
             return False  # escapes the target tree
         parts.append(seg)
     norm = PurePosixPath(*parts) if parts else PurePosixPath()
+    # Root-aware: against a real checkout, resolve the URI and refuse a symlinked
+    # component that escapes the tree even if it is lexically under an area.
+    if root is not None and norm.parts and resolve_within(root, str(norm)) is None:
+        return False
     for area in scope:
         if not isinstance(area, str) or not area.strip():
             continue
@@ -337,13 +348,16 @@ def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
     return False
 
 
-def _accepted_results(sarif: dict, scope: list[str] | None = None):
+def _accepted_results(
+    sarif: dict, scope: list[str] | None = None, root: Path | None = None
+):
     """Yield (result, rule) for every result worth turning into a finding.
 
     A result with no usable ``message.text`` is skipped. When ``scope`` is given,
     a result whose location is not contained in the scope allowlist is also
-    skipped, so out-of-scope (or traversal) results never become findings. Order
-    is the document order, which is the ordering contract both mappings walk.
+    skipped, so out-of-scope (or traversal) results never become findings. With a
+    ``root``, the location is resolved against it (symlink-aware). Order is the
+    document order, which is the ordering contract both mappings walk.
     """
     for run in _runs(sarif):
         if not isinstance(run, dict):
@@ -358,7 +372,7 @@ def _accepted_results(sarif: dict, scope: list[str] | None = None):
             if _message_text(result) is None:
                 continue
             uri, _ = _first_location(result)
-            if not _in_scope(uri, scope):
+            if not _in_scope(uri, scope, root):
                 continue
             rule_id = result.get("ruleId")
             rule = index.get(rule_id) if isinstance(rule_id, str) else None
@@ -369,7 +383,12 @@ def _accepted_results(sarif: dict, scope: list[str] | None = None):
 
 
 def sarif_to_findings(
-    sarif: dict, *, project: str, id_start: int = 1, scope: list[str] | None = None
+    sarif: dict,
+    *,
+    project: str,
+    id_start: int = 1,
+    scope: list[str] | None = None,
+    root: Path | None = None,
 ) -> list[Finding]:
     """Map the accepted SARIF subset to candidate Findings.
 
@@ -385,7 +404,7 @@ def sarif_to_findings(
     """
     findings: list[Finding] = []
     n = id_start
-    for result, rule in _accepted_results(sarif, scope):
+    for result, rule in _accepted_results(sarif, scope, root):
         message = _message_text(result)
         assert message is not None  # _accepted_results guarantees this
         rule_id = result.get("ruleId")
@@ -485,7 +504,11 @@ def _match_capability(rule_id: str | None, tags: list[str]) -> str | None:
 
 
 def sarif_to_primitives(
-    sarif: dict, *, finding_ids: list[str], scope: list[str] | None = None
+    sarif: dict,
+    *,
+    finding_ids: list[str],
+    scope: list[str] | None = None,
+    root: Path | None = None,
 ) -> list[Primitive]:
     """Map accepted SARIF results to suspected Primitives via the closed table.
 
@@ -495,7 +518,7 @@ def sarif_to_primitives(
     Every primitive is ``confidence: suspected`` with no ``evidence_ref``.
     """
     primitives: list[Primitive] = []
-    for i, (result, rule) in enumerate(_accepted_results(sarif, scope)):
+    for i, (result, rule) in enumerate(_accepted_results(sarif, scope, root)):
         if i >= len(finding_ids):
             break
         rule_id = result.get("ruleId")

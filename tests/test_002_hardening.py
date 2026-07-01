@@ -718,7 +718,7 @@ def test_discover_tolerates_overlong_scope_path(state_dir):
 def test_shared_scope_module_containment():
     from pathlib import Path
 
-    from deepthought.sessions.scope import area_in_scope, resolve_within
+    from deepthought.scope import area_in_scope, resolve_within
 
     root = Path("/tmp/xyz-root")
     # Syntactic refusals hold with or without a root.
@@ -862,3 +862,30 @@ def test_ruleid_capability_takes_precedence_over_tag():
     f2 = sarif_to_findings(s2, project="p")
     p2 = sarif_to_primitives(s2, finding_ids=[x.id for x in f2])
     assert p2 and p2[0].kind == "inject:sql"
+
+
+def test_discover_refuses_symlinked_uri_component(tmp_path):
+    # An allowlisted area ("app") is legit, but a symlink INSIDE it points out of
+    # the root; a SARIF result under that symlink must be refused (root-aware).
+    root = tmp_path / "repo"
+    (root / "app").mkdir(parents=True)
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "s.py").write_text("leak")
+    (root / "app" / "link").symlink_to(secret, target_is_directory=True)
+
+    sarif_path = tmp_path / "s.sarif"
+    sarif_path.write_text(json.dumps(_sarif_with_uris(["app/link/secret.py", "app/real.py"])))
+    store = FileStore(tmp_path / "state")
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(root),
+            authorization_basis="own_code", scope_allowlist=["app"],
+        )
+    )
+    run_session(store, DefaultGate(), DiscoverSession("target", sarif_path=str(sarif_path)))
+    findings = store.list_findings(project="target")
+    # The symlink-escaping location is dropped; the genuine in-tree one is kept.
+    assert len(findings) == 1
+    assert "app/real.py" in findings[0].body
+    assert all("secret.py" not in f.body for f in findings)

@@ -36,7 +36,7 @@ from ..schema import (
     SessionType,
 )
 from ..store import NotFoundError, Store
-from .scope import resolve_within
+from ..scope import resolve_within
 
 # Directories a source walk should never descend into: version-control, package,
 # and tooling caches. They are huge, irrelevant to the attack surface, and skew

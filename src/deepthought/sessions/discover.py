@@ -53,7 +53,7 @@ from ..ingest.sarif import (
 from ..orchestrator import Conductor
 from ..protocol.gate import GateContext
 from ..protocol.session import BaseSession, SessionOutcome
-from .scope import area_in_scope
+from ..scope import area_in_scope
 from ..schema import (
     Coverage,
     CoverageDepth,
@@ -182,12 +182,13 @@ def _run_marvin_worker(
         # (e.g. a symlink resolving outside it) is refused for findings exactly as
         # for coverage: DISCOVER never reports a path outside the target tree.
         findings = sarif_to_findings(
-            sarif, project=project.id, id_start=id_start, scope=contained_scope
+            sarif, project=project.id, id_start=id_start, scope=contained_scope, root=root
         )
         primitives = sarif_to_primitives(
             sarif,
             finding_ids=[f.id for f in findings],
             scope=contained_scope,
+            root=root,
         )
         sarif_note = (
             f"parsed SARIF {sarif_path!r}: {len(findings)} candidate finding(s), "
