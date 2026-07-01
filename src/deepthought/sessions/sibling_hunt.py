@@ -141,6 +141,28 @@ def _same_class(
 _FINDING_LOCATION_RE = re.compile(r"\*\*Location:\*\*\s+`([^`]+)`")
 
 
+def _drop_source_instance(findings: list, primitives: list, source_locus: str):
+    """On the SOURCE project, drop the SOURCE finding's OWN instance.
+
+    Reusing the SARIF that produced/verified the source finding surfaces the source
+    location as an in-scope, same-capability result — but the already-verified source
+    bug is NOT a sibling of itself. Drop the finding whose rendered ``**Location:**``
+    equals the signature's ``locus_pattern`` (the source's location), plus any
+    primitive bound to it. A genuine sibling at a DIFFERENT location is kept.
+    """
+    dropped: set[str] = set()
+    kept_findings = []
+    for f in findings:
+        match = _FINDING_LOCATION_RE.search(f.body or "")
+        loc = match.group(1).strip() if match else None
+        if loc is not None and loc == source_locus:
+            dropped.add(f.id)
+            continue
+        kept_findings.append(f)
+    kept_primitives = [p for p in primitives if p.finding_ref not in dropped]
+    return kept_findings, kept_primitives
+
+
 def _finding_location_in_scope(
     finding, scope: list[str] | None, root: Path | None
 ) -> bool:
@@ -231,6 +253,14 @@ def _run_marvin_worker(
         findings, primitives = _same_class(
             raw_findings, raw_primitives, signature.capability
         )
+        # On the SOURCE project, exclude the SOURCE finding's own instance — a
+        # reused SARIF would otherwise re-save the already-verified source bug (same
+        # capability + same location) as a fresh candidate. It is not a sibling of
+        # itself. Siblings live at OTHER locations (or in sibling projects).
+        if target.id == signature.source_project and signature.locus_pattern:
+            findings, primitives = _drop_source_instance(
+                findings, primitives, signature.locus_pattern
+            )
 
     outcome = "resolved" if findings else "empty"
 

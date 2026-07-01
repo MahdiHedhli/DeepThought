@@ -352,6 +352,35 @@ def test_session_exports_from_sessions_package():
 # --- T006: OSV validity -----------------------------------------------------
 
 
+def test_source_target_excludes_the_source_findings_own_instance(state_dir):
+    """On the source project, the source finding's OWN location is NOT re-saved as a
+    variant (it is the already-verified source, not a sibling of itself); a genuine
+    sibling at a different location IS kept."""
+    store = FileStore(state_dir)
+    store.save_project(make_project(
+        id="src-proj", git_url="https://example.test/src-proj",
+        authorization_basis="permissive_oss", scope_allowlist=["app"],
+    ))
+    # Source finding located at app/reports.py:88 — a location present in SIBLINGS.
+    finding = make_finding(
+        id="F-0007", project="src-proj", status="verified",
+        summary="py/sql-injection: user input reaches a SQL query",
+        body="## Root cause\n\nx\n\n**Location:** `app/reports.py:88`", evidence_ref=None,
+    )
+    finding.evidence_ref = store.write_detail("S-seed", "evidence.txt", "seed")
+    store.save_finding(finding)
+
+    _run(store, project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS)
+
+    variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    bodies = [f.body or "" for f in variants]
+    assert not any("app/reports.py:88" in b for b in bodies)   # source instance excluded
+    assert any("app/search.py:21" in b for b in bodies)        # genuine sibling kept
+    assert len(variants) == 1
+
+
 def test_every_variant_is_osv_valid(state_dir):
     store = FileStore(state_dir)
     _seed_source(store)
