@@ -140,6 +140,24 @@ def _same_class(
 # rendering so the orchestrator can re-validate a finding's claimed path.
 _FINDING_LOCATION_RE = re.compile(r"\*\*Location:\*\*\s+`([^`]+)`")
 
+# The allocated finding-id format (``F-NNNN``). A worker-returned finding id is used
+# by the Store as a FILENAME, so a compromised worker returning an id with path
+# separators (``../../tmp/pwn``) could write outside ``state/findings``. Only ids of
+# this exact shape are persisted.
+_VALID_FINDING_ID = re.compile(r"F-\d+")
+
+
+def _locus_in_scope(locus: str | None, scope: list[str] | None, root: Path | None) -> bool:
+    """Whether a ``file[:line]`` locus resolves inside ``scope`` (root-aware).
+
+    Strips a trailing ``:line`` / ``:line:col`` and reuses the SARIF ingest's
+    containment check. A ``None``/empty locus names no path and is in scope.
+    """
+    if not locus:
+        return True
+    path = re.sub(r":\d+(?::\d+)?$", "", locus)
+    return _in_scope(path, scope, root)
+
 
 def _finding_locus(finding) -> str | None:
     """The finding's STRUCTURED location — the LAST ``**Location:**`` match.
@@ -166,12 +184,7 @@ def _finding_location_in_scope(
     of an (otherwise authorized) project. A finding that claims no location names no
     path and is kept — it cannot report an out-of-scope file.
     """
-    locus = _finding_locus(finding)
-    if locus is None:
-        return True
-    # Strip a trailing ``:line`` / ``:line:col`` so we scope-check the file path.
-    path = re.sub(r":\d+(?::\d+)?$", "", locus)
-    return _in_scope(path, scope, root)
+    return _locus_in_scope(_finding_locus(finding), scope, root)
 
 
 def _run_marvin_worker(
@@ -568,7 +581,10 @@ class SiblingHuntSession(BaseSession):
             seen: set[str] = set()
             for f in findings:
                 if (
-                    f.id in attested
+                    _VALID_FINDING_ID.fullmatch(f.id)  # id is a filename -> no traversal
+                    and f.status is FindingStatus.candidate  # variants are CANDIDATES:
+                    and not f.evidence_ref  # never worker-promoted; VERIFY-only boundary
+                    and f.id in attested
                     and f.id in same_class_refs
                     and f.project == target.id
                     and f.id not in seen
@@ -599,7 +615,14 @@ class SiblingHuntSession(BaseSession):
                         fid for fid in validated.findings_written if fid in kept_ids
                     ],
                     "primitives": [
-                        p for p in validated.primitives if p.finding_ref in kept_ids
+                        p
+                        for p in validated.primitives
+                        if p.finding_ref in kept_ids
+                        # Scope-check the primitive's own locus too — the finding
+                        # location check does not cover the primitive channel, so a
+                        # worker could otherwise ledger an out-of-scope sibling
+                        # primitive bound to an in-scope finding.
+                        and _locus_in_scope(p.target_locus, contained_scope, root)
                     ],
                 }
             )

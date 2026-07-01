@@ -858,6 +858,117 @@ def test_finding_without_a_same_class_primitive_is_dropped(state_dir, monkeypatc
     assert len(src_variants) == 2
 
 
+def test_worker_finding_id_with_path_separators_is_dropped(state_dir, monkeypatch):
+    """FIREWALL: a worker-returned finding id is used by the Store as a FILENAME, so
+    an id with path separators (traversal, e.g. ../../tmp/pwn) is refused — only
+    F-NNNN ids are persisted, so a worker cannot write outside state/findings."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+    bad_id = "../../tmp/pwn"
+
+    def _traversal(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        rogue = make_finding(id=bad_id, project=target.id, status="candidate", evidence_ref=None,
+                             summary="traversal", body="**Location:** `app/x.py:1`")
+        prim = Primitive(kind=signature.capability, target_locus="app/x.py", preconditions=[],
+                         grants=[signature.capability], confidence="suspected", finding_ref=bad_id)
+        env = env.model_copy(update={
+            "findings_written": list(env.findings_written) + [bad_id],
+            "primitives": list(env.primitives) + [prim],
+        })
+        return env, findings + [rogue], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _traversal)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    # No traversal write anywhere near the state dir; only F-NNNN candidates persist.
+    assert list(Path(state_dir).parent.rglob("*pwn*")) == []
+    src_variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    assert len(src_variants) == 2
+    assert all(f.id.startswith("F-") for f in store.list_findings())
+
+
+def test_worker_verified_finding_is_dropped_not_promoted(state_dir, monkeypatch):
+    """A worker cannot bypass the VERIFY-only boundary: an attested, same-class,
+    in-scope finding with status=verified (+ evidence_ref) is DROPPED, never
+    persisted as-is. Variants must be candidates promoted later by VERIFY."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _promoted(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        promoted = make_finding(id="F-8000", project=target.id, status="verified",
+                                evidence_ref="detail/x/e.txt", summary="pre-promoted",
+                                body="**Location:** `app/x.py:1`")
+        prim = Primitive(kind=signature.capability, target_locus="app/x.py", preconditions=[],
+                         grants=[signature.capability], confidence="suspected", finding_ref="F-8000")
+        env = env.model_copy(update={
+            "findings_written": list(env.findings_written) + ["F-8000"],
+            "primitives": list(env.primitives) + [prim],
+        })
+        return env, findings + [promoted], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _promoted)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    assert store.get_finding("F-8000") is None   # worker-verified finding dropped
+
+
+def test_out_of_scope_primitive_is_not_ledgered(state_dir, monkeypatch):
+    """A same-class primitive bound to an in-scope KEPT finding but whose own
+    target_locus is OUT of scope is not carried into the ledger — the finding check
+    does not cover the primitive channel."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _oos_prim(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        legit_id = env.findings_written[0]  # an in-scope, kept finding id
+        oos = Primitive(kind=signature.capability, target_locus="secret/keys.txt",
+                        preconditions=[], grants=[signature.capability],
+                        confidence="suspected", finding_ref=legit_id)
+        env = env.model_copy(update={"primitives": list(env.primitives) + [oos]})
+        return env, findings, detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _oos_prim)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS)
+    run_session(store, GATE, session)
+
+    ledger_loci = {n.target_locus for n in session.conductor.ledger.nodes()}
+    assert "secret/keys.txt" not in ledger_loci   # out-of-scope primitive not ledgered
+
+
 def test_same_class_drops_primitives_binding_to_filtered_findings():
     """_same_class keeps a primitive only if it is same-class AND binds to a KEPT
     finding — never a finding id that no returned finding provides (no dangling
