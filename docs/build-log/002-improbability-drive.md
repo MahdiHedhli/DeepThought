@@ -1,7 +1,13 @@
 # Build Session Log — Feature 002, Improbability Drive (DISCOVER + MAP)
 
+> **STATUS: MERGED to `main` 2026-07-01 (squash commit `2d200fa`), PR #1.**
+> ~28 adversarial review rounds (gemini-code-assist + chatgpt-codex-connector),
+> all threads resolved. **224 tests green; both smokes (`smoke.sh`, `smoke_002.sh`)
+> pass on `main`.** Next: feature 003 (execution sandbox) — hard stop before any
+> target code executes, pending Mahdi's sandbox sign-off.
+
 **Feature:** 002-improbability-drive
-**Branch:** `002-improbability-drive`
+**Branch:** `002-improbability-drive` (merged + deleted)
 **Date:** 2026-07-01
 **Orchestrator:** Deep Thought core. **Workers:** 8 dispatched (design, 4 implement
 slices, verify, independent review, fix). **Gate:** running on the **default gate**
