@@ -195,9 +195,9 @@ def _run_marvin_worker(
         # the full, uncapped Coverage record for it in _write_read_coverage), so
         # an over-long scope path never fails the whole envelope's validation.
         coverage_delta=[
-            {"area": area, "method": "read", "depth": "touched"}
+            {"area": area.strip(), "method": "read", "depth": "touched"}
             for area in dict.fromkeys(project.scope_allowlist)
-            if area.strip() and len(area) <= _COVERAGE_AREA_MAX
+            if area.strip() and len(area.strip()) <= _COVERAGE_AREA_MAX
         ],
         next_step_hints=_hints(findings, primitives),
         detail_ref=detail_ref,
@@ -375,8 +375,9 @@ class DiscoverSession(BaseSession):
         the scope allowlist is covered — DISCOVER never records a path outside it.
         """
         refs: list[str] = []
-        for area in dict.fromkeys(project.scope_allowlist):
-            if not area.strip():
+        for raw_area in dict.fromkeys(project.scope_allowlist):
+            area = raw_area.strip()  # normalise padding for the persisted record
+            if not area:
                 # A blank entry is refused by MAP; DISCOVER writes no Coverage
                 # record for it either, keeping the store consistent.
                 continue

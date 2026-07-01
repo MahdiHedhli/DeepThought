@@ -634,6 +634,14 @@ def test_location_capped_when_uri_is_huge():
     assert "**Location:** app/" in finding.body
 
 
+def test_scope_matching_strips_whitespace_in_allowlist():
+    # A padded scope entry must still match a normalized SARIF path (not be
+    # silently dropped).
+    s = _sarif_rule("py/sql-injection", uri="app/db.py")
+    assert len(sarif_to_findings(s, project="p", scope=["  app  "])) == 1
+    assert sarif_to_findings(s, project="p", scope=["  other  "]) == []
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.

@@ -309,9 +309,9 @@ def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
         parts.append(seg)
     norm = PurePosixPath(*parts) if parts else PurePosixPath()
     for area in scope:
-        if not isinstance(area, str) or not area:
+        if not isinstance(area, str) or not area.strip():
             continue
-        ap = PurePosixPath(area)
+        ap = PurePosixPath(area.strip())  # padded scope entries must still match
         if norm == ap:
             return True
         try:

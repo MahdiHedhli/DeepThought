@@ -18,7 +18,7 @@ import typer
 
 from .check import run_check
 from .export.osv import finding_to_osv, osv_id_for
-from .protocol import DefaultGate, HermesUltraCodeGate, run_session
+from .protocol import HermesUltraCodeGate, run_session
 from .sessions import (
     DiscoverSession,
     MapSession,
@@ -126,7 +126,7 @@ def playbook_map(
     """
     try:
         record = run_session(
-            _store(state), DefaultGate(), MapSession(project, root=root)
+            _store(state), HermesUltraCodeGate(), MapSession(project, root=root)
         )
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -154,7 +154,7 @@ def playbook_discover(
     try:
         record = run_session(
             _store(state),
-            DefaultGate(),
+            HermesUltraCodeGate(),
             DiscoverSession(project, sarif_path=sarif, root=root),
         )
     except StoreError as exc:

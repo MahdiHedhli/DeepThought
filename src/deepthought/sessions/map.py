@@ -100,8 +100,9 @@ class MapSession(BaseSession):
         touched = 0
         # Dedupe the allowlist (preserving order) so a repeated entry is not
         # walked twice or written as a duplicate Coverage record.
-        for area in dict.fromkeys(project.scope_allowlist):
-            if not area.strip():
+        for raw_area in dict.fromkeys(project.scope_allowlist):
+            area = raw_area.strip()  # normalise padding for resolution and record
+            if not area:
                 # A blank entry would resolve to the repository root and map the
                 # whole checkout — refuse it, don't silently walk everything.
                 refused.append("(blank)")
@@ -168,11 +169,11 @@ class MapSession(BaseSession):
     def _count_files(area_root: Path) -> int:
         """Count files under a contained area, READ-ONLY. Zero if it is missing.
 
-        Walks with :meth:`pathlib.Path.rglob`; it lists directory entries only
-        and never opens or executes any target file. Robust to the untrusted
-        filesystem: a scope entry that names a single file counts as one, and an
-        unreadable directory or a special file (``PermissionError``/``OSError``)
-        is skipped rather than crashing the session.
+        Walks with :meth:`pathlib.Path.walk`, pruning VCS/cache directories; it
+        lists directory entries only and never opens or executes any target file.
+        Robust to the untrusted filesystem: a scope entry that names a single
+        file counts as one, and an unreadable directory or a special file
+        (``PermissionError``/``OSError``) is skipped rather than crashing.
         """
         try:
             if area_root.is_file():
