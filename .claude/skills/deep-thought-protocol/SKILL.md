@@ -47,14 +47,26 @@ load state  ->  gate  ->  scoped work  ->  teach back  ->  validate  ->  close
   Refuse an unresolvable git URL. Resolve to the existing project on a repeat.
 - **STATUS** — summarize findings and coverage; write next steps; change no
   finding status.
-- *(later)* DISCOVER, MAP, VERIFY, SIBLING HUNT, DISCLOSURE — each behind its own
-  gate and, for anything that runs code, behind the sandbox (Article III).
+- **MAP** (feature 002, READ-ONLY) — walk the in-scope paths of a real checkout
+  and record `Coverage(method='read')` for each surveyed area. Never walk a path
+  outside the scope allowlist. Executes nothing; creates no finding.
+- **DISCOVER** (feature 002, READ-ONLY) — reason over static signals and an
+  ingested SARIF file. Dispatch a stub Marvin that writes candidate `Finding`s
+  and returns one envelope; ingest it through the `Conductor` so the ledger holds
+  the suspected primitives; then teach back candidate findings *and*
+  `Coverage(method='read')` for the in-scope areas. Runs no code; the SARIF is
+  untrusted data mapped only into finding fields, and the `ruleId`→capability map
+  is a closed lookup an injected rule can only miss.
+- *(later)* VERIFY, SIBLING HUNT, DISCLOSURE — each behind its own gate and, for
+  anything that runs code, behind the sandbox (Article III).
 
 Run these through the CLI, which is the protocol harness in code:
 
 ```
 deepthought playbook new-project --name ... --git-url ... --basis ... --scope ...
 deepthought playbook status --project <id>
+deepthought playbook map --project <id>                    # 002, READ-ONLY coverage
+deepthought playbook discover --project <id> [--sarif <path>]  # 002, candidate findings
 deepthought playbook findings [--project <id>]
 deepthought check
 deepthought publish        # local artifacts only; asserts the human gate

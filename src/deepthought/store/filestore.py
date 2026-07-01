@@ -7,7 +7,9 @@ repository alone. The lifecycle guard is enforced here, at the boundary.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+from urllib.parse import quote
 
 from ..schema import (
     Coverage,
@@ -30,9 +32,30 @@ from .base import (
 )
 
 
+# Keep the slug (plus the ".md" suffix) well under the common 255-char filename
+# limit. A quoted value longer than this is truncated and disambiguated with a
+# hash of the ORIGINAL value, which keeps it injective and filesystem-safe.
+_SLUG_MAX = 200
+
+
 def _slug(value: str) -> str:
-    """Filesystem-safe slug for area ids that may contain path separators."""
-    return value.replace("/", "-").replace("\\", "-").strip("-")
+    """Injective, filesystem-safe filename for a coverage area.
+
+    Percent-encodes every path separator and unsafe character, so distinct areas
+    never collide (``ext/soap`` vs ``ext-soap`` — the old ``/``→``-`` slug mapped
+    both to ``ext-soap.md``, silently overwriting one) and no area can escape the
+    coverage directory via a ``/`` or ``\\`` in its name. A simple area like
+    ``ext-soap`` is unchanged, so existing records keep their filenames. A very
+    long (or heavily-encoded) area is bounded to avoid a "File name too long"
+    error, staying injective via a hash of the original value.
+    """
+    quoted = quote(value, safe="") or "_"
+    if len(quoted) > _SLUG_MAX:
+        # Non-cryptographic use (filename dedup); usedforsecurity=False keeps it
+        # available under FIPS, where SHA-1 for security is blocked.
+        digest = hashlib.sha1(value.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
+        quoted = f"{quoted[: _SLUG_MAX - len(digest) - 1]}-{digest}"
+    return quoted
 
 
 class FileStore(Store):
@@ -204,18 +227,51 @@ class FileStore(Store):
     def _coverage_path(self, project: str, area: str) -> Path:
         return self.root / "coverage" / project / f"{_slug(area)}.md"
 
+    def _legacy_coverage_path(self, project: str, area: str) -> Path:
+        # The pre-percent-encoding slug (``/``/``\`` -> ``-``). Kept only so a
+        # store written by the old code upgrades cleanly instead of duplicating.
+        legacy = area.replace("/", "-").replace("\\", "-").strip("-")
+        return self.root / "coverage" / project / f"{legacy}.md"
+
     def save_coverage(self, coverage: Coverage) -> Coverage:
-        self._write(
-            self._coverage_path(coverage.project, coverage.area),
-            coverage.to_markdown(),
-        )
+        path = self._coverage_path(coverage.project, coverage.area)
+        self._write(path, coverage.to_markdown())
+        # Migrate: drop a stale record THIS area wrote under the old slug, so an
+        # upgraded store does not keep two files for it. Only remove the legacy
+        # file if it genuinely holds this same area — never a different area whose
+        # own (new-slug) filename happens to equal this area's legacy filename
+        # (e.g. real `ext-soap` vs legacy of `ext/soap`).
+        legacy = self._legacy_coverage_path(coverage.project, coverage.area)
+        if legacy != path and legacy.exists():
+            try:
+                existing = Coverage.from_markdown(self._read(legacy))
+            except Exception:
+                existing = None
+            if existing is not None and existing.area == coverage.area:
+                try:
+                    legacy.unlink()
+                except OSError:
+                    pass  # cleanup only — a locked/undeletable legacy file must
+                    # not fail the primary write that already succeeded.
         return coverage
 
     def get_coverage(self, project: str, area: str) -> Coverage | None:
         path = self._coverage_path(project, area)
-        if not path.exists():
+        if path.exists():
+            return Coverage.from_markdown(self._read(path))
+        # Fall back to the old slug so a direct lookup still resolves on a
+        # not-yet-migrated store — but ONLY if that file genuinely holds THIS
+        # area. The old slug is lossy (ext-soap.md could be the record for a
+        # different area), so returning it blindly would reintroduce the
+        # collision the percent-encoded slug removes.
+        legacy = self._legacy_coverage_path(project, area)
+        if legacy == path or not legacy.exists():
             return None
-        return Coverage.from_markdown(self._read(path))
+        try:
+            candidate = Coverage.from_markdown(self._read(legacy))
+        except Exception:
+            return None  # a corrupt/malformed legacy file is not a valid record
+        return candidate if (candidate is not None and candidate.area == area) else None
 
     def list_coverage(self, project: str | None = None) -> list[Coverage]:
         out = []

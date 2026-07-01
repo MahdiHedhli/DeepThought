@@ -1,6 +1,7 @@
 """The Agent Session Protocol and the pre-dispatch Gate."""
 
 from .gate import (
+    DefaultGate,
     Gate,
     GateContext,
     GateDecision,
@@ -16,6 +17,7 @@ from .session import (
 
 __all__ = [
     "Gate",
+    "DefaultGate",
     "GateContext",
     "GateDecision",
     "HermesUltraCodeGate",

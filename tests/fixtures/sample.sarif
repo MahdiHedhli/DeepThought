@@ -1,0 +1,82 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "ExampleAnalyzer",
+          "rules": [
+            {
+              "id": "py/sql-injection",
+              "properties": {
+                "tags": ["security", "external/cwe/cwe-89"]
+              },
+              "helpUri": "https://example.test/rules/sql-injection"
+            },
+            {
+              "id": "py/path-injection",
+              "properties": {
+                "tags": ["security", "external/cwe/cwe-22"]
+              },
+              "helpUri": "https://example.test/rules/path-injection"
+            },
+            {
+              "id": "py/style-only",
+              "properties": {
+                "tags": ["maintainability"]
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "py/sql-injection",
+          "level": "error",
+          "message": {
+            "text": "This SQL query depends on a user-provided value without sanitization."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "app/db.py"},
+                "region": {"startLine": 42}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "py/path-injection",
+          "level": "warning",
+          "message": {
+            "text": "This path expression depends on a user-provided value."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "app/files.py"},
+                "region": {"startLine": 17}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "py/style-only",
+          "level": "note",
+          "message": {
+            "text": "Prefer a single import statement."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "app/util.py"},
+                "region": {"startLine": 3}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -94,3 +94,148 @@ def test_write_and_resolve_detail(state_dir):
     assert store.detail_exists(ref)
     assert store.detail_exists("state/" + ref)
     assert not store.detail_exists("detail/nope/missing.txt")
+
+
+def test_coverage_slug_is_injective_no_collision(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    store.save_coverage(
+        Coverage(project="p", area="ext/soap", method="read", depth="touched",
+                 last_session="S-1", body="alpha")
+    )
+    store.save_coverage(
+        Coverage(project="p", area="ext-soap", method="read", depth="touched",
+                 last_session="S-1", body="beta")
+    )
+    # Distinct areas that used to slug to the same file are now separate records.
+    areas = {c.area for c in store.list_coverage(project="p")}
+    assert areas == {"ext/soap", "ext-soap"}
+    assert store.get_coverage("p", "ext/soap").body == "alpha"
+    assert store.get_coverage("p", "ext-soap").body == "beta"
+
+
+def test_coverage_slug_is_traversal_safe(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    # A path-separator-laden area must stay inside the coverage dir (flat file).
+    store.save_coverage(
+        Coverage(project="p", area="../../etc/passwd", method="read",
+                 depth="touched", last_session="S-1", body="x")
+    )
+    files = list((state_dir / "coverage").rglob("*.md"))
+    assert len(files) == 1
+    assert files[0].parent == state_dir / "coverage" / "p"  # never escaped
+
+
+def test_coverage_reads_and_migrates_legacy_slug(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    # Simulate a store written by the OLD slugger: ext/soap -> ext-soap.md
+    legacy = state_dir / "coverage" / "p" / "ext-soap.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        Coverage(project="p", area="ext/soap", method="read", depth="touched",
+                 last_session="S-1", body="legacy").to_markdown()
+    )
+    # Direct lookup still resolves via the legacy fallback.
+    assert store.get_coverage("p", "ext/soap").body == "legacy"
+    # Re-saving migrates it to the new slug and removes the stale legacy file.
+    store.save_coverage(
+        Coverage(project="p", area="ext/soap", method="read", depth="explored",
+                 last_session="S-2", body="new")
+    )
+    assert not legacy.exists()
+    assert len(store.list_coverage(project="p")) == 1
+    assert store.get_coverage("p", "ext/soap").depth.value == "explored"
+
+
+def test_migration_does_not_delete_unrelated_area(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    # A real record for area "ext-soap" (its file is ext-soap.md).
+    store.save_coverage(
+        Coverage(project="p", area="ext-soap", method="read", depth="touched",
+                 last_session="S", body="unrelated")
+    )
+    # Saving area "ext/soap" (legacy slug ext-soap.md) must NOT delete the
+    # unrelated ext-soap record.
+    store.save_coverage(
+        Coverage(project="p", area="ext/soap", method="read", depth="touched",
+                 last_session="S", body="slashed")
+    )
+    areas = {c.area for c in store.list_coverage(project="p")}
+    assert areas == {"ext-soap", "ext/soap"}
+    assert store.get_coverage("p", "ext-soap").body == "unrelated"
+
+
+def test_save_coverage_survives_legacy_unlink_failure(state_dir, monkeypatch):
+    import pathlib
+
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    legacy = state_dir / "coverage" / "p" / "ext-soap.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        Coverage(project="p", area="ext/soap", method="read", depth="touched",
+                 last_session="S", body="old").to_markdown()
+    )
+    orig_unlink = pathlib.Path.unlink
+
+    def boom(self, *a, **k):
+        if self.name == "ext-soap.md":
+            raise OSError("locked")
+        return orig_unlink(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", boom)
+    # The primary write must still succeed even though the legacy cleanup fails.
+    store.save_coverage(
+        Coverage(project="p", area="ext/soap", method="read", depth="explored",
+                 last_session="S2", body="new")
+    )
+    assert store.get_coverage("p", "ext/soap").depth.value == "explored"
+
+
+def test_get_coverage_legacy_fallback_requires_area_match(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    # A real record for area "ext-soap" (its new-slug file IS ext-soap.md).
+    store.save_coverage(
+        Coverage(project="p", area="ext-soap", method="read", depth="touched",
+                 last_session="S", body="real")
+    )
+    # get_coverage("ext/soap") legacy-slugs to ext-soap.md, but that file holds
+    # area "ext-soap" != "ext/soap" -> must return None, not the wrong record.
+    assert store.get_coverage("p", "ext/soap") is None
+    assert store.get_coverage("p", "ext-soap").body == "real"
+
+
+def test_slug_bounds_filename_length_and_stays_injective(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    long_a = "src/" + "a" * 300
+    long_b = "src/" + "b" * 300
+    store.save_coverage(Coverage(project="p", area=long_a, method="read",
+                                 depth="touched", last_session="S", body="x"))
+    store.save_coverage(Coverage(project="p", area=long_b, method="read",
+                                 depth="touched", last_session="S", body="y"))
+    files = list((state_dir / "coverage" / "p").glob("*.md"))
+    assert len(files) == 2                       # distinct areas -> distinct files
+    assert all(len(f.name) <= 255 for f in files)  # under the OS limit
+    assert store.get_coverage("p", long_a).body == "x"  # deterministic round-trip
+    assert store.get_coverage("p", long_b).body == "y"
+
+
+def test_get_coverage_corrupt_legacy_returns_none(state_dir):
+    store = FileStore(state_dir)
+    legacy = state_dir / "coverage" / "p" / "ext-soap.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("not a valid record — no front matter")
+    # A corrupt legacy file must not crash the lookup.
+    assert store.get_coverage("p", "ext/soap") is None

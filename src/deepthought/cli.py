@@ -19,7 +19,12 @@ import typer
 from .check import run_check
 from .export.osv import finding_to_osv, osv_id_for
 from .protocol import HermesUltraCodeGate, run_session
-from .sessions import NewProjectSession, StatusSession
+from .sessions import (
+    DiscoverSession,
+    MapSession,
+    NewProjectSession,
+    StatusSession,
+)
 from .store import FileStore, StoreError
 
 app = typer.Typer(
@@ -99,6 +104,58 @@ def playbook_status(
     try:
         record = run_session(
             _store(state), HermesUltraCodeGate(), StatusSession(project)
+        )
+    except StoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    _echo_session(record)
+
+
+@playbook_app.command("map")
+def playbook_map(
+    project: str = typer.Option(..., help="Project id to map."),
+    root: Optional[str] = typer.Option(
+        None, "--root", help="Local checkout to walk; defaults to the project's local_path."
+    ),
+    state: Path = _STATE_OPTION,
+) -> None:
+    """Record the in-scope attack surface, READ-ONLY (MAP session, feature 002).
+
+    Walks only the project's in-scope areas and records Coverage. Executes no
+    target code, transmits nothing, and never widens scope.
+    """
+    try:
+        record = run_session(
+            _store(state), HermesUltraCodeGate(), MapSession(project, root=root)
+        )
+    except StoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    _echo_session(record)
+
+
+@playbook_app.command("discover")
+def playbook_discover(
+    project: str = typer.Option(..., help="Project id to discover over."),
+    sarif: Optional[str] = typer.Option(
+        None, "--sarif", help="SARIF file to reason over for candidate findings."
+    ),
+    root: Optional[str] = typer.Option(
+        None, "--root", help="Local checkout for code reasoning; defaults to local_path."
+    ),
+    state: Path = _STATE_OPTION,
+) -> None:
+    """Reason over code and SARIF for candidates, READ-ONLY (DISCOVER, feature 002).
+
+    Dispatches one worker that reads any SARIF and writes candidate findings; the
+    orchestrator ingests only the typed envelope. Executes no target code,
+    transmits nothing, and never widens scope.
+    """
+    try:
+        record = run_session(
+            _store(state),
+            HermesUltraCodeGate(),
+            DiscoverSession(project, sarif_path=sarif, root=root),
         )
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)

@@ -4,11 +4,13 @@ Every session passes the Gate before any work. There are three outcomes:
 ``proceed``, ``hold``, ``refuse``. A hold or refuse always carries a reason,
 which the session records.
 
-The platform reuses HermesUltraCode as the real gate and observability layer;
-the platform adapts to it through this interface rather than rebuilding it.
-``HermesUltraCodeGate`` here is the adapter stub: it enforces the authorization
-and scope rules locally so 001 is testable, with a single seam where the real
-HermesUltraCode call is wired once its interface is confirmed (Phase 0).
+``DefaultGate`` is the concrete, always-available gate: it enforces the
+Constitution's authorization and scope rules locally so the platform is testable
+and self-contained. ``HermesUltraCodeGate`` is the named seam for the real
+HermesUltraCode pre-dispatch gate — its interface is **not yet confirmed**
+(phase-0 decision 0.1), so it is currently a thin subclass that delegates to
+``DefaultGate``. When the HermesUltraCode interface is confirmed, it is wired
+behind the same three-outcome contract with no change to callers.
 """
 
 from __future__ import annotations
@@ -73,13 +75,14 @@ class Gate(ABC):
         """Return proceed, hold, or refuse for the given session context."""
 
 
-class HermesUltraCodeGate(Gate):
-    """Adapter stub for the HermesUltraCode pre-dispatch gate.
+class DefaultGate(Gate):
+    """The built-in default gate — the platform's own authorization/scope check.
 
-    Enforces the Constitution's authorization and scope rules. The real adapter
-    will delegate to HermesUltraCode; the decision contract (three outcomes,
-    reasons logged) is what the rest of the platform depends on and does not
-    change when the backing implementation is swapped in.
+    Enforces the Constitution's authorization and scope rules locally (Articles I
+    & II). This is the honest, always-present implementation the platform runs on
+    today. The decision contract (three outcomes, reasons logged) is what the rest
+    of the platform depends on and does not change when a different backing
+    implementation is swapped in behind the same interface.
     """
 
     def evaluate(self, context: GateContext) -> GateDecision:
@@ -117,3 +120,16 @@ class HermesUltraCodeGate(Gate):
             )
 
         return GateDecision(GateOutcome.proceed)
+
+
+class HermesUltraCodeGate(DefaultGate):
+    """Named seam for the real HermesUltraCode pre-dispatch gate.
+
+    The real HermesUltraCode gate interface is **not yet confirmed** (phase-0
+    decision 0.1). Until it is, this seam delegates entirely to
+    :class:`DefaultGate`: it adds no behavior and enforces the same local
+    authorization and scope rules. When the HermesUltraCode interface is
+    confirmed, its call is wired here behind the same three-outcome contract
+    (``proceed`` / ``hold`` / ``refuse``) with no change to callers. Keeping the
+    name importable now means that wiring is a single-file change.
+    """
