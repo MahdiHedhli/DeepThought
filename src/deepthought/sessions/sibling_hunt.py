@@ -537,6 +537,10 @@ class SiblingHuntSession(BaseSession):
             # (dedupe by id — else two same-id objects both pass the not-in-store
             # check and overwrite each other); and in scope (claimed location inside
             # the target's allowlist).
+            # Use the RESOLVED, contained scope (the same _coverage_areas the worker
+            # and the coverage channel use), not the raw scope_allowlist — so an
+            # area that escapes the root is never treated as in scope.
+            contained_scope = _coverage_areas(target, root)
             attested = set(validated.findings_written)
             kept: list = []
             seen: set[str] = set()
@@ -546,7 +550,7 @@ class SiblingHuntSession(BaseSession):
                     and f.project == target.id
                     and f.id not in seen
                     and store.get_finding(f.id) is None
-                    and _finding_location_in_scope(f, target.scope_allowlist, root)
+                    and _finding_location_in_scope(f, contained_scope, root)
                 ):
                     seen.add(f.id)
                     kept.append(f)
