@@ -93,6 +93,11 @@ class MapSession(BaseSession):
         # Dedupe the allowlist (preserving order) so a repeated entry is not
         # walked twice or written as a duplicate Coverage record.
         for area in dict.fromkeys(project.scope_allowlist):
+            if not area.strip():
+                # A blank entry would resolve to the repository root and map the
+                # whole checkout — refuse it, don't silently walk everything.
+                refused.append("(blank)")
+                continue
             contained_path = self._contained_area(root, area)
             if contained_path is None:
                 # The area resolves outside the repository root (absolute path or

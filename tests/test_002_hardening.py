@@ -504,6 +504,30 @@ def test_map_rejects_non_directory_root(tmp_path):
     assert "no readable root" in record.body
 
 
+def test_scope_filter_decodes_percent_encoded_traversal():
+    # app/%2e%2e/secret.py decodes to app/../secret.py -> escapes scope -> dropped.
+    s = _sarif_rule("py/sql-injection", uri="app/%2e%2e/secret.py")
+    assert sarif_to_findings(s, project="p", scope=["app"]) == []
+    s2 = _sarif_rule("py/sql-injection", uri="app%2f..%2fsecret.py")
+    assert sarif_to_findings(s2, project="p", scope=["app"]) == []
+    # A benign percent-encoded in-scope path is still accepted.
+    ok = _sarif_rule("py/sql-injection", uri="app/my%20file.py")
+    assert len(sarif_to_findings(ok, project="p", scope=["app"])) == 1
+
+
+def test_map_refuses_blank_scope_entry(tmp_path):
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("x = 1\n")
+    (root / "top_secret.py").write_text("secret")
+    store = FileStore(tmp_path / "state")
+    store.save_project(_project_at(root, ["", "  ", "src"]))
+    run_session(store, DefaultGate(), MapSession("target"))
+    covered = {c.area for c in store.list_coverage(project="target")}
+    # A blank entry must never map the whole checkout; only real areas are covered.
+    assert covered == {"src"}
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.

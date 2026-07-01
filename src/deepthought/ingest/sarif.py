@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import PurePosixPath
+from urllib.parse import unquote
 
 from ..schema.envelope import CAPABILITY_TAXONOMY, Confidence, Primitive
 from ..schema.finding import Finding, FindingStatus, Reference
@@ -280,6 +281,10 @@ def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
     """
     if scope is None or uri is None:
         return True
+    # Percent-decode first: a SARIF uri like "app/%2e%2e/secret.py" decodes to
+    # "app/../secret.py", so the traversal check below must see the decoded form
+    # (otherwise PurePosixPath treats "%2e%2e" as an ordinary in-scope segment).
+    uri = unquote(uri)
     # A URI scheme (file:, http:, javascript:), a Windows drive (C:\), or a
     # backslash path is not a relative in-tree path — refuse it so an absolute
     # file URI cannot slip past PurePosixPath (which would treat "file:/..." as
