@@ -160,8 +160,9 @@ _HEURISTIC_RE: tuple[tuple[re.Pattern[str], str], ...] = tuple(
 # file:) never reaches persisted state or OSV output (where the schema declares
 # references[].url as a URI, and a downstream viewer could be driven to XSS).
 # ``[!-~]`` is printable ASCII excluding space; fullmatch rejects embedded
-# newlines/controls and requires at least one char after "//" (the authority).
-_SAFE_HTTP_URL_RE = re.compile(r"https?://[!-~]+", re.IGNORECASE)
+# newlines/controls. The ``(?![/?#])`` lookahead requires a real authority right
+# after ``//`` (so "https:///x", "https://?q", "https://#f" are rejected).
+_SAFE_HTTP_URL_RE = re.compile(r"https?://(?![/?#])[!-~]+", re.IGNORECASE)
 
 # A leading URI scheme (file:, http:, javascript:) or a Windows drive/backslash.
 # A SARIF location carrying one of these is not a relative in-tree path and is
@@ -444,10 +445,11 @@ def sarif_to_findings(
         uri, line = _first_location(result)
         location = ""
         if uri:
-            location = f"\n\n**Location:** {uri}" + (f":{line}" if line is not None else "")
-            # Cap the location itself so an absurdly long uri cannot push the body
-            # over _BODY_MAX even after the message is truncated to fit.
-            location = location[:_LOCATION_MAX]
+            loc_text = uri if line is None else f"{uri}:{line}"
+            # Backtick the path so a downstream markdown/OSV viewer does not render
+            # underscores or other characters in it as formatting. Cap the inner
+            # text so an absurdly long uri cannot push the body over _BODY_MAX.
+            location = f"\n\n**Location:** `{loc_text[:_LOCATION_MAX]}`"
 
         # Bound the untrusted SARIF text, but preserve the (now bounded) location:
         # reserve room for it and truncate the MESSAGE, not the appended location.

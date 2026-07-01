@@ -576,7 +576,7 @@ def test_location_preserved_when_body_is_bounded():
     finding = sarif_to_findings(s, project="p")[0]
     # The oversized message is truncated, but the location survives the bound.
     assert len(finding.body) <= _BODY_MAX
-    assert "**Location:** app/big.py:1" in finding.body
+    assert "**Location:** `app/big.py:1`" in finding.body
 
 
 def test_map_prunes_ignored_directories(tmp_path):
@@ -631,7 +631,7 @@ def test_location_capped_when_uri_is_huge():
     finding = sarif_to_findings(s, project="p", scope=["app"])[0]
     # An absurdly long uri cannot push the bounded body over _BODY_MAX.
     assert len(finding.body) <= _BODY_MAX
-    assert "**Location:** app/" in finding.body
+    assert "**Location:** `app/" in finding.body
 
 
 def test_scope_matching_strips_whitespace_in_allowlist():
@@ -950,4 +950,23 @@ def test_helpuri_rejected_when_malformed_or_control_chars():
         assert validate_osv(finding_to_osv(finding)) == []
     # A clean https URL is still kept.
     ok = sarif_to_findings(sarif_help("https://ok.test/rules/1"), project="p")[0]
+    assert len(ok.references) == 1
+
+
+def test_helpuri_requires_real_authority():
+    def sarif_help(uri):
+        return {
+            "version": "2.1.0",
+            "runs": [
+                {
+                    "tool": {"driver": {"rules": [{"id": "R1", "helpUri": uri}]}},
+                    "results": [{"ruleId": "R1", "message": {"text": "x"},
+                                 "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app/a.py"}, "region": {"startLine": 1}}}]}],
+                }
+            ],
+        }
+
+    for bad in ["https:///rules/foo", "https://?q", "https://#frag", "http://"]:
+        assert sarif_to_findings(sarif_help(bad), project="p")[0].references == [], bad
+    ok = sarif_to_findings(sarif_help("https://host.test/x"), project="p")[0]
     assert len(ok.references) == 1
