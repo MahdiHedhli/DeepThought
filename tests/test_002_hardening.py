@@ -555,6 +555,30 @@ def test_discover_skips_blank_scope_in_coverage(state_dir):
     assert all(cd.area.strip() for cd in session.envelope.coverage_delta)
 
 
+def test_read_specific_rule_maps_to_read_not_write():
+    # A read-traversal rule must not fall through to the broad 'path' -> write row.
+    s = _sarif_rule("path/arbitrary-file-read")
+    findings = sarif_to_findings(s, project="p")
+    prims = sarif_to_primitives(s, finding_ids=[f.id for f in findings])
+    assert prims and prims[0].kind == "read:arbitrary-file"
+    # A genuine path-traversal still maps to write.
+    s2 = _sarif_rule("py/path-traversal")
+    f2 = sarif_to_findings(s2, project="p")
+    p2 = sarif_to_primitives(s2, finding_ids=[f.id for f in f2])
+    assert p2 and p2[0].kind == "write:arbitrary-file"
+
+
+def test_location_preserved_when_body_is_bounded():
+    from deepthought.ingest.sarif import _BODY_MAX
+
+    s = _sarif_rule("py/style-only", uri="app/big.py")
+    s["runs"][0]["results"][0]["message"]["text"] = "A" * (_BODY_MAX + 500)
+    finding = sarif_to_findings(s, project="p")[0]
+    # The oversized message is truncated, but the location survives the bound.
+    assert len(finding.body) <= _BODY_MAX
+    assert "**Location:** app/big.py:1" in finding.body
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.

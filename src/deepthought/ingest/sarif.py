@@ -96,15 +96,19 @@ _HEURISTIC: tuple[tuple[str, str], ...] = (
     ("zip-slip", "write:arbitrary-file"),
     ("cwe-22", "write:arbitrary-file"),
     ("cwe-73", "write:arbitrary-file"),
+    # Arbitrary file read — the read-specific rows MUST precede the broad `path`
+    # fallback below, so a rule like "path/arbitrary-file-read" maps to read, not
+    # to the write fallback.
+    ("arbitrary-file-read", "read:arbitrary-file"),
+    ("file-read", "read:arbitrary-file"),
+    # Broad path fallback (write) and conservative memory-write proxies. These
+    # are last so a more specific row always wins first.
     ("path", "write:arbitrary-file"),
     ("buffer", "write:arbitrary-file"),
     ("oob-write", "write:arbitrary-file"),
     ("use-after-free", "write:arbitrary-file"),
     ("cwe-787", "write:arbitrary-file"),
     ("cwe-416", "write:arbitrary-file"),
-    # Arbitrary file read
-    ("arbitrary-file-read", "read:arbitrary-file"),
-    ("file-read", "read:arbitrary-file"),
     # Auth bypass
     ("auth-bypass", "auth:bypass"),
     ("missing-auth", "auth:bypass"),
@@ -399,10 +403,13 @@ def sarif_to_findings(
         if uri:
             location = f"\n\n**Location:** {uri}" + (f":{line}" if line is not None else "")
 
-        # Bound the untrusted SARIF text on the way into the body. The body is
-        # data (never interpreted as instruction) and flows into OSV `details`
-        # on export, so it is capped here to honor the length-bounding contract.
-        body = f"## Root cause\n\n{message}{location}"[:_BODY_MAX]
+        # Bound the untrusted SARIF text, but preserve the location: reserve room
+        # for it and truncate the MESSAGE, not the appended location. Otherwise a
+        # message near _BODY_MAX would slice the locus away and leave an unmapped
+        # finding without any persisted location.
+        header = "## Root cause\n\n"
+        msg_budget = max(0, _BODY_MAX - len(header) - len(location))
+        body = f"{header}{message[:msg_budget]}{location}"
 
         findings.append(
             Finding(
