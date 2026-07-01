@@ -500,6 +500,18 @@ class SiblingHuntSession(BaseSession):
 
         validated = result.envelope
         self.envelopes.append(validated)  # ingested into the ledger (in-memory)
+        # ENVELOPE FIREWALL over the side channel. The worker returns the `findings`
+        # OBJECTS alongside the envelope (the envelope itself carries only ids). A
+        # buggy or out-of-process worker could return a benign/empty envelope yet
+        # include extra Finding objects — for ANOTHER project, or with ids the
+        # validated envelope never listed. Persist ONLY findings the VALIDATED
+        # envelope attests (id in findings_written) AND that are bound to THIS
+        # target; drop everything else, never save it. Persistence is thus driven
+        # by the validated envelope + the target, not by unchecked worker output.
+        attested = set(validated.findings_written)
+        findings = [
+            f for f in findings if f.id in attested and f.project == target.id
+        ]
         saved_ids: list[str] = []
         saved_cov: list[str] = []
         try:
@@ -545,7 +557,10 @@ class SiblingHuntSession(BaseSession):
                 gate_outcome="proceed",
                 proceeded=True,
                 reason=validated.outcome.value,
-                findings=list(validated.findings_written),
+                # Report EXACTLY what was persisted (the attested, target-bound,
+                # written set) so the teach-back matches Store state, never the raw
+                # envelope id list.
+                findings=saved_ids,
                 coverage=saved_cov,
             )
         )

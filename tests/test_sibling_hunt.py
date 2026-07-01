@@ -535,6 +535,50 @@ def test_partial_store_write_failure_reports_the_persisted_variants(state_dir, m
     assert "FAILED" in surfaced or "BLOCKED" in surfaced
 
 
+def test_worker_side_channel_findings_are_filtered_to_the_validated_envelope(state_dir, monkeypatch):
+    """FIREWALL: the worker returns Finding OBJECTS alongside the envelope. Only
+    findings the VALIDATED envelope attests (id in findings_written) AND bound to
+    the target are persisted; smuggled findings — for another project, or with an
+    id the envelope never listed — are dropped, never saved."""
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _smuggling(session_id, target, signature, sarif_path, root, id_start):
+        envelope, findings, detail_body = real_worker(
+            session_id, target, signature, sarif_path, root, id_start
+        )
+        # Smuggle two unattested findings: one for ANOTHER project, one whose id is
+        # NOT in the envelope's findings_written. Neither is attested.
+        smuggled = [
+            make_finding(id="F-9001", project="evil-proj", status="candidate", evidence_ref=None),
+            make_finding(id="F-9002", project=target.id, status="candidate", evidence_ref=None),
+        ]
+        return envelope, findings + smuggled, detail_body
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _smuggling)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(
+        store, GATE,
+        SiblingHuntSession(project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS),
+    )
+
+    # The smuggled findings were NOT persisted (unattested / wrong project).
+    assert store.get_finding("F-9001") is None
+    assert store.get_finding("F-9002") is None
+    assert store.list_findings(project="evil-proj") == []
+    # The legitimate, envelope-attested src variants ARE persisted.
+    src_variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    assert len(src_variants) == 2
+
+
 def test_partial_coverage_write_failure_reports_the_persisted_coverage(state_dir, monkeypatch):
     """Symmetric to variants: if save_coverage fails MID-batch (some areas saved),
     the persisted coverage refs are reported (coverage_changed matches Store state)
