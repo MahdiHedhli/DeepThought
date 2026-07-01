@@ -37,6 +37,14 @@ from ..schema import (
 )
 from ..store import NotFoundError, Store
 
+# Directories a source walk should never descend into: version-control, package,
+# and tooling caches. They are huge, irrelevant to the attack surface, and skew
+# the file count. Pruned in-place during the walk.
+_IGNORED_DIRS = frozenset(
+    {".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
+     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"}
+)
+
 
 class MapSession(BaseSession):
     type = SessionType.map
@@ -174,14 +182,14 @@ class MapSession(BaseSession):
         except OSError:
             return 0
 
+        # Walk with in-place pruning (Path.walk, 3.12+) so we never descend into
+        # .git/.venv/node_modules/etc. — huge, irrelevant, and count-skewing.
+        # on_error=None ignores unreadable directories rather than crashing.
         count = 0
         try:
-            for p in area_root.rglob("*"):
-                try:
-                    if p.is_file():
-                        count += 1
-                except OSError:
-                    continue  # unreadable entry — skip, do not crash
+            for _dirpath, dirnames, filenames in area_root.walk(on_error=None):
+                dirnames[:] = [d for d in dirnames if d not in _IGNORED_DIRS]
+                count += len(filenames)
         except OSError:
             pass  # unreadable subtree — count what we could reach
         return count

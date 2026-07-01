@@ -579,6 +579,27 @@ def test_location_preserved_when_body_is_bounded():
     assert "**Location:** app/big.py:1" in finding.body
 
 
+def test_map_prunes_ignored_directories(tmp_path):
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("x = 1\n")
+    # A .git dir full of objects must not be counted as source surface.
+    git = root / "src" / ".git"
+    git.mkdir()
+    for i in range(8):
+        (git / f"obj{i}").write_text("junk")
+    venv = root / "src" / ".venv"
+    venv.mkdir()
+    (venv / "lib.py").write_text("junk")
+
+    store = FileStore(tmp_path / "state")
+    store.save_project(_project_at(root, ["src"]))
+    run_session(store, DefaultGate(), MapSession("target"))
+    cov = store.get_coverage("target", "src")
+    # Only a.py is counted; .git and .venv are pruned from the walk.
+    assert "1 file(s)" in cov.body
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.
