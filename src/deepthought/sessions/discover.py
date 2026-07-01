@@ -42,7 +42,7 @@ what later promotes any of them on evidence.
 from __future__ import annotations
 
 import re
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from ..ingest.sarif import (
     SarifError,
@@ -53,6 +53,7 @@ from ..ingest.sarif import (
 from ..orchestrator import Conductor
 from ..protocol.gate import GateContext
 from ..protocol.session import BaseSession, SessionOutcome
+from .scope import area_in_scope
 from ..schema import (
     Coverage,
     CoverageDepth,
@@ -94,32 +95,11 @@ def _resolve_checkout(candidate: str | None) -> Path | None:
     return path if path.is_dir() else None
 
 
-def _area_in_scope(area: str, root: Path | None) -> bool:
-    """Whether a scope area stays inside the target, mirroring MAP's refusal.
-
-    Rejects absolute paths, backslash paths, and ``..`` traversal syntactically
-    (with or without a root); when a checkout root resolves, also requires the
-    area to resolve strictly inside it. DISCOVER records read coverage only for
-    areas that pass, so it never claims an out-of-root area was surveyed.
-    """
-    if not area or area.startswith("/") or "\\" in area:
-        return False
-    pp = PurePosixPath(area)
-    if pp.is_absolute() or ".." in pp.parts:
-        return False
-    if root is not None:
-        try:
-            (root.resolve() / area).resolve().relative_to(root.resolve())
-        except (ValueError, OSError):
-            return False
-    return True
-
-
 def _coverage_areas(project: Project, root: Path | None) -> list[str]:
     """Deduped, stripped, non-blank, in-scope areas DISCOVER may record."""
     areas: list[str] = []
     for area in dict.fromkeys(a.strip() for a in project.scope_allowlist):
-        if area and _area_in_scope(area, root):
+        if area and area_in_scope(area, root):
             areas.append(area)
     return areas
 

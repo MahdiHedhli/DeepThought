@@ -36,6 +36,7 @@ from ..schema import (
     SessionType,
 )
 from ..store import NotFoundError, Store
+from .scope import resolve_within
 
 # Directories a source walk should never descend into: version-control, package,
 # and tooling caches. They are huge, irrelevant to the attack surface, and skew
@@ -108,7 +109,7 @@ class MapSession(BaseSession):
                 # whole checkout — refuse it, don't silently walk everything.
                 refused.append("(blank)")
                 continue
-            contained_path = self._contained_area(root, area)
+            contained_path = resolve_within(root, area)
             if contained_path is None:
                 # The area resolves outside the repository root (absolute path or
                 # a ../ escape). Refuse it: never walk it, never record it as
@@ -148,23 +149,6 @@ class MapSession(BaseSession):
             next_steps=self._suggest_next(project.scope_allowlist, refused),
             coverage_changed=coverage_refs,
         )
-
-    @staticmethod
-    def _contained_area(root: Path, area: str) -> Path | None:
-        """Resolve ``area`` under ``root`` iff it stays inside ``root``.
-
-        Returns the resolved path when it is strictly within the repository root,
-        else None. An absolute ``area`` (``/etc``) or a parent-traversal
-        (``../secret``) resolves outside the root and is refused — MAP never
-        reads or records a surface beyond the authorized target root.
-        """
-        resolved_root = root.resolve()
-        try:
-            area_root = resolved_root.joinpath(area).resolve()
-            area_root.relative_to(resolved_root)
-        except (ValueError, RuntimeError, OSError):
-            return None
-        return area_root
 
     @staticmethod
     def _count_files(area_root: Path) -> int:

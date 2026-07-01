@@ -713,3 +713,20 @@ def test_discover_tolerates_overlong_scope_path(state_dir):
     record = run_session(store, DefaultGate(), session)
     assert record.close_state.value == "clean"
     assert session.conductor is not None and session.conductor.errors == []
+
+
+def test_shared_scope_module_containment():
+    from pathlib import Path
+
+    from deepthought.sessions.scope import area_in_scope, resolve_within
+
+    root = Path("/tmp/xyz-root")
+    # Syntactic refusals hold with or without a root.
+    for bad in ("/etc", "../secret", "a\\b", ""):
+        assert not area_in_scope(bad, None)
+        assert not area_in_scope(bad, root)
+    # In-tree areas pass; resolve_within refuses escapes.
+    assert area_in_scope("src/pkg", None)
+    assert area_in_scope("src/pkg", root)
+    assert resolve_within(root, "../up") is None
+    assert resolve_within(root, "/etc") is None
