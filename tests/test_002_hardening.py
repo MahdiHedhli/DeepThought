@@ -360,6 +360,100 @@ def test_sarif_keeps_reasonable_help_uri():
     assert finding.references[0].url == "https://example.test/r/1"
 
 
+# --- Review round 4 (PR #1) --------------------------------------------------
+
+
+def _sarif_rule(rule_id, uri="app/x.py"):
+    return {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "results": [
+                    {
+                        "ruleId": rule_id,
+                        "message": {"text": "finding"},
+                        "locations": [
+                            {"physicalLocation": {"artifactLocation": {"uri": uri}, "region": {"startLine": 1}}}
+                        ],
+                    }
+                ]
+            }
+        ],
+    }
+
+
+def _sarif_help(uri):
+    return {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"rules": [{"id": "R1", "helpUri": uri}]}},
+                "results": [{"ruleId": "R1", "message": {"text": "x"}}],
+            }
+        ],
+    }
+
+
+def test_capability_match_uses_word_boundaries():
+    # 'xpath'/'nosql'/'classpath' must NOT match 'path'/'sql' (wrong capability).
+    for rid in ("py/xpath-injection", "py/nosql-injection", "cpp/classpath-config"):
+        s = _sarif_rule(rid)
+        findings = sarif_to_findings(s, project="p")
+        prims = sarif_to_primitives(s, finding_ids=[f.id for f in findings])
+        assert prims == [], rid
+    # A genuine path-injection still maps.
+    s = _sarif_rule("py/path-injection")
+    findings = sarif_to_findings(s, project="p")
+    prims = sarif_to_primitives(s, finding_ids=[f.id for f in findings])
+    assert prims and prims[0].kind == "write:arbitrary-file"
+
+
+def test_help_uri_scheme_restricted_to_http():
+    assert sarif_to_findings(_sarif_help("javascript:alert(1)"), project="p")[0].references == []
+    assert sarif_to_findings(_sarif_help("data:text/html,x"), project="p")[0].references == []
+    assert sarif_to_findings(_sarif_help("file:///etc/passwd"), project="p")[0].references == []
+    ok = sarif_to_findings(_sarif_help("https://ok.test/r"), project="p")[0]
+    assert len(ok.references) == 1 and ok.references[0].url == "https://ok.test/r"
+
+
+def test_scope_filter_rejects_uri_scheme_locations():
+    # A file:// (or any scheme) location is refused regardless of the allowlist,
+    # so an absolute file URI cannot slip past the scope filter.
+    s = _sarif_rule("py/sql-injection", uri="file:///etc/secret.py")
+    assert sarif_to_findings(s, project="p", scope=["."]) == []
+    assert sarif_to_findings(s, project="p", scope=["etc"]) == []
+
+
+def test_map_dedupes_scope_allowlist(tmp_path):
+    root = tmp_path / "repo"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("x = 1\n")
+    store = FileStore(tmp_path / "state")
+    store.save_project(_project_at(root, ["src", "src"]))
+    run_session(store, DefaultGate(), MapSession("target"))
+    # A duplicated allowlist entry yields exactly one coverage record.
+    assert len(store.list_coverage(project="target")) == 1
+
+
+def test_discover_survives_overlong_authorization_ref(state_dir):
+    from pathlib import Path
+
+    sample = Path(__file__).parent / "fixtures" / "sample.sarif"
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            source_type="blackbox", authorization_basis="scoped_engagement",
+            authorization_ref="E" * 300, scope_allowlist=["app"],
+        )
+    )
+    record = run_session(store, DefaultGate(), DiscoverSession("target", sarif_path=str(sample)))
+    # A ref longer than the envelope Ref cap must not fail the envelope and
+    # strand persisted findings: the session closes clean with findings written.
+    assert record.close_state.value == "clean"
+    assert store.list_findings(project="target")
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.

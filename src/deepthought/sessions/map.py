@@ -90,7 +90,9 @@ class MapSession(BaseSession):
         refused: list[str] = []
         explored = 0
         touched = 0
-        for area in project.scope_allowlist:
+        # Dedupe the allowlist (preserving order) so a repeated entry is not
+        # walked twice or written as a duplicate Coverage record.
+        for area in dict.fromkeys(project.scope_allowlist):
             contained_path = self._contained_area(root, area)
             if contained_path is None:
                 # The area resolves outside the repository root (absolute path or

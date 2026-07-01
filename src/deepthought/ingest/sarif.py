@@ -21,6 +21,7 @@ from a local file, and the mappings are pure data transforms.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import PurePosixPath
 
 from ..schema.envelope import CAPABILITY_TAXONOMY, Confidence, Primitive
@@ -129,6 +130,25 @@ _HEURISTIC: tuple[tuple[str, str], ...] = (
 _unknown_caps = {cap for _, cap in _HEURISTIC if cap not in CAPABILITY_TAXONOMY}
 if _unknown_caps:  # pragma: no cover - guards the table, never expected to fire
     raise RuntimeError(f"heuristic table names non-taxonomy capabilities: {_unknown_caps!r}")
+
+# Match each needle on WORD BOUNDARIES, not as a bare substring, so a rule like
+# "xpath"/"classpath" does not match "path", "nosql" does not match "sql", and
+# "lazy-evaluation" does not match "eval". Hyphenated needles (path-injection,
+# cwe-89) still match because the boundary is only anchored at the needle ends.
+_HEURISTIC_RE: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(rf"\b{re.escape(needle)}\b"), capability)
+    for needle, capability in _HEURISTIC
+)
+
+# Schemes allowed for a persisted reference URL. A helpUri with any other scheme
+# (javascript:, data:, file:, …) is dropped — it must not reach persisted state
+# or OSV output, where it could drive XSS in a downstream viewer.
+_SAFE_URL_SCHEMES = ("http://", "https://")
+
+# A leading URI scheme (file:, http:, javascript:) or a Windows drive/backslash.
+# A SARIF location carrying one of these is not a relative in-tree path and is
+# refused by the scope filter regardless of the allowlist.
+_URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 
 
 class SarifError(ValueError):
@@ -260,6 +280,12 @@ def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
     """
     if scope is None or uri is None:
         return True
+    # A URI scheme (file:, http:, javascript:), a Windows drive (C:\), or a
+    # backslash path is not a relative in-tree path — refuse it so an absolute
+    # file URI cannot slip past PurePosixPath (which would treat "file:/..." as
+    # relative) into a "." or broad allowlist.
+    if _URI_SCHEME_RE.match(uri) or "\\" in uri:
+        return False
     p = PurePosixPath(uri)
     if p.is_absolute():
         return False
@@ -349,11 +375,15 @@ def sarif_to_findings(
 
         references: list[Reference] = []
         help_uri = _rule_help_uri(rule)
-        if help_uri and len(help_uri) <= _REF_URL_MAX:
-            # type is free-form here; normalised to the OSV enum on export. An
-            # over-long helpUri is dropped (a truncated URL is not a valid URL),
-            # so untrusted SARIF cannot smuggle an oversized reference into
-            # persisted state or OSV output.
+        if (
+            help_uri
+            and len(help_uri) <= _REF_URL_MAX
+            and help_uri.lower().startswith(_SAFE_URL_SCHEMES)
+        ):
+            # type is free-form here; normalised to the OSV enum on export. The
+            # helpUri is dropped unless it is a bounded http(s) URL, so untrusted
+            # SARIF cannot smuggle an oversized string or a javascript:/data:/
+            # file: scheme into persisted state or OSV output.
             references.append(Reference(type="detection", url=help_uri))
 
         # Bound the untrusted SARIF text on the way into the body. The body is
@@ -389,9 +419,9 @@ def _match_capability(rule_id: str | None, tags: list[str]) -> str | None:
     into a command, or used as a capability — it is only ever a table key.
     """
     haystacks = [h.lower() for h in ([rule_id] if rule_id else []) + list(tags)]
-    for needle, capability in _HEURISTIC:
+    for pattern, capability in _HEURISTIC_RE:
         for hay in haystacks:
-            if needle in hay:
+            if pattern.search(hay):
                 return capability
     return None
 

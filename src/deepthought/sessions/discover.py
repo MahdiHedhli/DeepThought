@@ -72,6 +72,18 @@ _WORKER_ID = "marvin-discover"
 # envelope delta (the full Coverage record is still written to the Store).
 _COVERAGE_AREA_MAX = 128
 
+# The envelope's gate_attestation.authorization_ref is a length-capped Ref (256).
+# Truncate the project's ref to that cap when attesting, so a long engagement
+# reference can never fail envelope construction.
+_ATTESTATION_REF_MAX = 256
+
+
+def _attestation_ref(project: Project) -> str:
+    ref = project.authorization_ref or (
+        project.authorization_basis.value if project.authorization_basis else "none"
+    )
+    return ref[:_ATTESTATION_REF_MAX]
+
 _FINDING_ID = re.compile(r"^F-(\d+)$")
 
 
@@ -137,12 +149,7 @@ def _run_marvin_worker(
                 detail_ref=detail_ref,
                 gate_attestation={
                     "scope_ok": True,
-                    "authorization_ref": project.authorization_ref
-                    or (
-                        project.authorization_basis.value
-                        if project.authorization_basis
-                        else "none"
-                    ),
+                    "authorization_ref": _attestation_ref(project),
                 },
             )
 
@@ -159,30 +166,18 @@ def _run_marvin_worker(
             finding_ids=[f.id for f in findings],
             scope=project.scope_allowlist,
         )
-        # WRITE the candidate findings to the Store. Only the Store holds them;
-        # the orchestrator learns which ids exist through the envelope's
-        # findings_written list, not by reading these records back.
-        for finding in findings:
-            store.save_finding(finding)
         sarif_note = (
             f"parsed SARIF {sarif_path!r}: {len(findings)} candidate finding(s), "
             f"{len(primitives)} suspected primitive(s)"
         )
 
-    # Page the worker's full working detail to the Store. This is the content the
-    # orchestrator must NEVER load into its own context.
-    detail_ref = store.write_detail(
-        session_id,
-        "discover.txt",
-        _detail_body(project, sarif_path, findings, primitives, sarif_note),
-    )
+    outcome = "resolved" if findings else "empty"
+    # The detail ref is deterministic; compute it now but do NOT write yet. The
+    # Store is mutated only AFTER the Envelope validates, so an unvalidated worker
+    # result (e.g. an over-cap field) can never strand persisted findings.
+    detail_ref = f"detail/{session_id}/discover.txt"
 
-    if findings:
-        outcome = "resolved"
-    else:
-        outcome = "empty"
-
-    return Envelope(
+    envelope = Envelope(
         envelope_version=_ENVELOPE_VERSION,
         session_ref=session_id,
         worker_id=_WORKER_ID,
@@ -201,21 +196,28 @@ def _run_marvin_worker(
         # an over-long scope path never fails the whole envelope's validation.
         coverage_delta=[
             {"area": area, "method": "read", "depth": "touched"}
-            for area in project.scope_allowlist
+            for area in dict.fromkeys(project.scope_allowlist)
             if len(area) <= _COVERAGE_AREA_MAX
         ],
         next_step_hints=_hints(findings, primitives),
         detail_ref=detail_ref,
         gate_attestation={
             "scope_ok": True,
-            "authorization_ref": project.authorization_ref
-            or (
-                project.authorization_basis.value
-                if project.authorization_basis
-                else "none"
-            ),
+            "authorization_ref": _attestation_ref(project),
         },
     )
+
+    # The envelope validated. Only NOW mutate the Store: persist the candidate
+    # findings and page the worker detail. If envelope construction had raised,
+    # nothing above would have been written.
+    for finding in findings:
+        store.save_finding(finding)
+    store.write_detail(
+        session_id,
+        "discover.txt",
+        _detail_body(project, sarif_path, findings, primitives, sarif_note),
+    )
+    return envelope
 
 
 def _detail_body(
@@ -373,7 +375,7 @@ class DiscoverSession(BaseSession):
         the scope allowlist is covered — DISCOVER never records a path outside it.
         """
         refs: list[str] = []
-        for area in project.scope_allowlist:
+        for area in dict.fromkeys(project.scope_allowlist):
             coverage = Coverage(
                 project=project.id,
                 area=area,
