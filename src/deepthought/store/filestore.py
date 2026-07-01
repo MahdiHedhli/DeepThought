@@ -8,6 +8,7 @@ repository alone. The lifecycle guard is enforced here, at the boundary.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import quote
 
 from ..schema import (
     Coverage,
@@ -31,8 +32,15 @@ from .base import (
 
 
 def _slug(value: str) -> str:
-    """Filesystem-safe slug for area ids that may contain path separators."""
-    return value.replace("/", "-").replace("\\", "-").strip("-")
+    """Injective, filesystem-safe filename for a coverage area.
+
+    Percent-encodes every path separator and unsafe character, so distinct areas
+    never collide (``ext/soap`` vs ``ext-soap`` — the old ``/``→``-`` slug mapped
+    both to ``ext-soap.md``, silently overwriting one) and no area can escape the
+    coverage directory via a ``/`` or ``\\`` in its name. A simple area like
+    ``ext-soap`` is unchanged, so existing records keep their filenames.
+    """
+    return quote(value, safe="") or "_"
 
 
 class FileStore(Store):

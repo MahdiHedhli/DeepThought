@@ -94,3 +94,36 @@ def test_write_and_resolve_detail(state_dir):
     assert store.detail_exists(ref)
     assert store.detail_exists("state/" + ref)
     assert not store.detail_exists("detail/nope/missing.txt")
+
+
+def test_coverage_slug_is_injective_no_collision(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    store.save_coverage(
+        Coverage(project="p", area="ext/soap", method="read", depth="touched",
+                 last_session="S-1", body="alpha")
+    )
+    store.save_coverage(
+        Coverage(project="p", area="ext-soap", method="read", depth="touched",
+                 last_session="S-1", body="beta")
+    )
+    # Distinct areas that used to slug to the same file are now separate records.
+    areas = {c.area for c in store.list_coverage(project="p")}
+    assert areas == {"ext/soap", "ext-soap"}
+    assert store.get_coverage("p", "ext/soap").body == "alpha"
+    assert store.get_coverage("p", "ext-soap").body == "beta"
+
+
+def test_coverage_slug_is_traversal_safe(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    # A path-separator-laden area must stay inside the coverage dir (flat file).
+    store.save_coverage(
+        Coverage(project="p", area="../../etc/passwd", method="read",
+                 depth="touched", last_session="S-1", body="x")
+    )
+    files = list((state_dir / "coverage").rglob("*.md"))
+    assert len(files) == 1
+    assert files[0].parent == state_dir / "coverage" / "p"  # never escaped
