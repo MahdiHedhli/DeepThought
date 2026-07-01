@@ -218,11 +218,18 @@ def _run_marvin_worker(
         # the cap is omitted from the delta here (the orchestrator still records
         # the full, uncapped Coverage record for it in _write_read_coverage), so
         # an over-long scope path never fails the whole envelope's validation.
-        coverage_delta=[
-            {"area": area, "method": "read", "depth": "touched"}
-            for area in contained_scope
-            if len(area) <= _COVERAGE_AREA_MAX
-        ],
+        # Only claim coverage when there was actually a SARIF input to reason
+        # over — matching the orchestrator's inputs_read gate, so the envelope
+        # delta stays consistent with the Coverage records actually written.
+        coverage_delta=(
+            [
+                {"area": area, "method": "read", "depth": "touched"}
+                for area in contained_scope
+                if len(area) <= _COVERAGE_AREA_MAX
+            ]
+            if sarif_path
+            else []
+        ),
         next_step_hints=_hints(findings, primitives),
         detail_ref=detail_ref,
         gate_attestation={

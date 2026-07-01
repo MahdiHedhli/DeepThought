@@ -970,3 +970,18 @@ def test_helpuri_requires_real_authority():
         assert sarif_to_findings(sarif_help(bad), project="p")[0].references == [], bad
     ok = sarif_to_findings(sarif_help("https://host.test/x"), project="p")[0]
     assert len(ok.references) == 1
+
+
+def test_discover_no_sarif_has_empty_coverage_delta(state_dir):
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            authorization_basis="own_code", scope_allowlist=["app"],
+        )
+    )
+    session = DiscoverSession("target")  # no SARIF input
+    run_session(store, DefaultGate(), session)
+    # No input -> no store coverage AND an empty envelope coverage_delta (consistent).
+    assert store.list_coverage(project="target") == []
+    assert session.envelope.coverage_delta == []
