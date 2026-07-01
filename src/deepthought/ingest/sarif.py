@@ -244,9 +244,9 @@ def _first_location(result: dict) -> tuple[str | None, int | None]:
         uri = artifact.get("uri")
         region = physical.get("region")
         start_line = region.get("startLine") if isinstance(region, dict) else None
-        if isinstance(uri, str) and uri:
+        if isinstance(uri, str) and uri.strip():
             line = start_line if isinstance(start_line, int) else None
-            return uri, line
+            return uri.strip(), line  # normalise padding before scope/locus use
     return None, None
 
 
@@ -254,7 +254,7 @@ def _rule_help_uri(rule: dict | None) -> str | None:
     if not isinstance(rule, dict):
         return None
     uri = rule.get("helpUri")
-    return uri if isinstance(uri, str) and uri else None
+    return uri.strip() if isinstance(uri, str) and uri.strip() else None
 
 
 def _rule_tags(rule: dict | None) -> list[str]:
@@ -266,7 +266,7 @@ def _rule_tags(rule: dict | None) -> list[str]:
     tags = properties.get("tags")
     if not isinstance(tags, list):
         return []
-    return [t for t in tags if isinstance(t, str)]
+    return [t.strip() for t in tags if isinstance(t, str) and t.strip()]
 
 
 def _in_scope(uri: str | None, scope: list[str] | None) -> bool:

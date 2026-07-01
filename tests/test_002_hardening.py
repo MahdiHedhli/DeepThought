@@ -454,6 +454,56 @@ def test_discover_survives_overlong_authorization_ref(state_dir):
     assert store.list_findings(project="target")
 
 
+# --- Review round 5 (PR #1) --------------------------------------------------
+
+
+def test_sarif_strips_whitespace_in_uri_help_and_tags():
+    sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "rules": [
+                            {
+                                "id": "R1",
+                                "helpUri": "  https://ok.test/r  ",
+                                "properties": {"tags": ["  external/cwe/cwe-89  "]},
+                            }
+                        ]
+                    }
+                },
+                "results": [
+                    {
+                        "ruleId": "R1",
+                        "message": {"text": "x"},
+                        "locations": [
+                            {"physicalLocation": {"artifactLocation": {"uri": "  app/db.py  "}, "region": {"startLine": 7}}}
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    # A padded uri is normalised, so it is in scope for ["app"] and the locus is clean.
+    findings = sarif_to_findings(sarif, project="p", scope=["app"])
+    assert len(findings) == 1
+    assert findings[0].references[0].url == "https://ok.test/r"  # helpUri stripped
+    prims = sarif_to_primitives(sarif, finding_ids=[f.id for f in findings], scope=["app"])
+    assert prims and prims[0].kind == "inject:sql"  # cwe-89 tag matched after strip
+    assert prims[0].target_locus == "app/db.py:7"
+
+
+def test_map_rejects_non_directory_root(tmp_path):
+    a_file = tmp_path / "afile.txt"
+    a_file.write_text("not a directory")
+    store = FileStore(tmp_path / "state")
+    store.save_project(_project_at(a_file, ["src"]))  # local_path points at a FILE
+    record = run_session(store, DefaultGate(), MapSession("target"))
+    assert store.list_coverage(project="target") == []
+    assert "no readable root" in record.body
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.

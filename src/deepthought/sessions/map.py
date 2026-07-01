@@ -63,7 +63,7 @@ class MapSession(BaseSession):
         if not candidate:
             return None
         path = Path(candidate)
-        if not path.exists():
+        if not path.is_dir():  # the root must be a directory to walk
             return None
         return path
 
