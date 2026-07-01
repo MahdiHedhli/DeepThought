@@ -197,7 +197,7 @@ def _run_marvin_worker(
         coverage_delta=[
             {"area": area, "method": "read", "depth": "touched"}
             for area in dict.fromkeys(project.scope_allowlist)
-            if len(area) <= _COVERAGE_AREA_MAX
+            if area.strip() and len(area) <= _COVERAGE_AREA_MAX
         ],
         next_step_hints=_hints(findings, primitives),
         detail_ref=detail_ref,
@@ -376,6 +376,10 @@ class DiscoverSession(BaseSession):
         """
         refs: list[str] = []
         for area in dict.fromkeys(project.scope_allowlist):
+            if not area.strip():
+                # A blank entry is refused by MAP; DISCOVER writes no Coverage
+                # record for it either, keeping the store consistent.
+                continue
             coverage = Coverage(
                 project=project.id,
                 area=area,

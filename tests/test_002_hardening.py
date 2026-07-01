@@ -528,6 +528,33 @@ def test_map_refuses_blank_scope_entry(tmp_path):
     assert covered == {"src"}
 
 
+def test_sarif_finding_body_includes_location():
+    # Even an unmapped rule (no primitive to carry target_locus) yields a finding
+    # whose body renders the file:line, so the persisted finding is actionable.
+    s = _sarif_rule("py/style-only", uri="app/util.py")
+    finding = sarif_to_findings(s, project="p")[0]
+    assert "app/util.py:1" in finding.body
+
+
+def test_discover_skips_blank_scope_in_coverage(state_dir):
+    from pathlib import Path
+
+    sample = Path(__file__).parent / "fixtures" / "sample.sarif"
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            authorization_basis="own_code", scope_allowlist=["", "  ", "app"],
+        )
+    )
+    session = DiscoverSession("target", sarif_path=str(sample))
+    run_session(store, DefaultGate(), session)
+    covered = {c.area for c in store.list_coverage(project="target")}
+    assert covered == {"app"}  # no blank Coverage record written
+    # No blank area leaks into the envelope coverage_delta either.
+    assert all(cd.area.strip() for cd in session.envelope.coverage_delta)
+
+
 def test_discover_tolerates_overlong_scope_path(state_dir):
     # scope_allowlist entries are uncapped, but Envelope.CoverageDelta.area is
     # capped at 128. An over-long area must not blow up the discover envelope.

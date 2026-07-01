@@ -391,10 +391,18 @@ def sarif_to_findings(
             # file: scheme into persisted state or OSV output.
             references.append(Reference(type="detection", url=help_uri))
 
+        # Render the accepted location into the finding body so the persisted
+        # finding (and OSV details on export) is actionable even when the message
+        # does not repeat the path and the rule maps to no primitive.
+        uri, line = _first_location(result)
+        location = ""
+        if uri:
+            location = f"\n\n**Location:** {uri}" + (f":{line}" if line is not None else "")
+
         # Bound the untrusted SARIF text on the way into the body. The body is
         # data (never interpreted as instruction) and flows into OSV `details`
         # on export, so it is capped here to honor the length-bounding contract.
-        body = f"## Root cause\n\n{message}"[:_BODY_MAX]
+        body = f"## Root cause\n\n{message}{location}"[:_BODY_MAX]
 
         findings.append(
             Finding(
