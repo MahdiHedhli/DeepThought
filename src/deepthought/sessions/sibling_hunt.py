@@ -151,10 +151,12 @@ def _locus_in_scope(locus: str | None, scope: list[str] | None, root: Path | Non
     """Whether a ``file[:line]`` locus resolves inside ``scope`` (root-aware).
 
     Strips a trailing ``:line`` / ``:line:col`` and reuses the SARIF ingest's
-    containment check. A ``None``/empty locus names no path and is in scope.
+    containment check. A MISSING/empty locus is NOT in scope: a persisted variant or
+    a ledgered primitive must name a concrete, scope-contained path — a location-less
+    one cannot be scope-verified, so it is refused rather than admitted by default.
     """
-    if not locus:
-        return True
+    if not locus or not locus.strip():
+        return False
     path = re.sub(r":\d+(?::\d+)?$", "", locus)
     return _in_scope(path, scope, root)
 
@@ -184,8 +186,9 @@ def _finding_location_in_scope(
     applied to the findings channel: a finding whose rendered ``**Location:**`` path
     resolves OUTSIDE the target's scope allowlist is dropped, so a buggy or
     compromised worker cannot smuggle a persisted finding for an out-of-scope area
-    of an (otherwise authorized) project. A finding that claims no location names no
-    path and is kept — it cannot report an out-of-scope file.
+    of an (otherwise authorized) project. A finding that claims NO location is also
+    dropped — a sibling variant must name a concrete, scope-verifiable place; an
+    unlocatable finding is not admitted by default.
     """
     return _locus_in_scope(_finding_locus(finding), scope, root)
 
@@ -478,7 +481,21 @@ class SiblingHuntSession(BaseSession):
         coverage — it is recorded in the outcome and nothing is written for it.
         """
         gate = self.harness_gate or _SIBLING_GATE
-        decision = gate.evaluate(GateContext.from_project(sibling, self.type))
+        try:
+            decision = gate.evaluate(GateContext.from_project(sibling, self.type))
+        except Exception as exc:
+            # PER-TARGET ISOLATION for the sibling GATE step too: a gate/context
+            # error for one sibling is contained and recorded, never aborting the
+            # whole hunt (BaseException still propagates).
+            self.target_outcomes.append(
+                TargetOutcome(
+                    project_id=sibling.id,
+                    gate_outcome="error",
+                    proceeded=False,
+                    reason=f"sibling gate failed: {type(exc).__name__}",
+                )
+            )
+            return
         if not decision.proceeds:
             self.target_outcomes.append(
                 TargetOutcome(

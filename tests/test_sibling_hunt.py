@@ -1104,6 +1104,79 @@ def test_same_class_drops_primitives_binding_to_filtered_findings():
     assert [p.finding_ref for p in kept_primitives] == ["F-1"]  # F-404 dropped
 
 
+def test_worker_finding_with_no_location_is_dropped(state_dir, monkeypatch):
+    """A side-channel finding that names NO location is NOT persisted: a sibling
+    variant must name a concrete, scope-verifiable place. An unlocatable finding
+    cannot be scope-checked, so it is refused rather than admitted by default (a
+    missing/empty locus is never in scope)."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)  # scope = ["app"]
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _no_location(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        # A finding whose body carries NO **Location:** line at all, plus a
+        # same-class primitive so ONLY the missing-location rule can drop it.
+        nowhere = make_finding(
+            id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+            summary="location-less variant", body="## Root cause\n\nno location line here",
+        )
+        prim = Primitive(kind=signature.capability, target_locus="app/x.py", preconditions=[],
+                         grants=[signature.capability], confidence="suspected", finding_ref="F-8000")
+        env = env.model_copy(update={
+            "findings_written": list(env.findings_written) + ["F-8000"],
+            "primitives": list(env.primitives) + [prim],
+        })
+        return env, findings + [nowhere], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _no_location)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    assert store.get_finding("F-8000") is None   # no location -> not scope-verifiable -> dropped
+
+
+def test_primitive_with_empty_target_locus_is_not_ledgered(state_dir, monkeypatch):
+    """A same-class primitive bound to a KEPT finding but whose target_locus is EMPTY
+    is not carried into the ledger — a location-less primitive names no path and so
+    cannot be confirmed in scope (``Locus`` has no min length, so empty is possible)."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _empty_locus_prim(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        legit_id = env.findings_written[0]  # an in-scope, kept finding id
+        empty = Primitive(kind=signature.capability, target_locus="",
+                          preconditions=[], grants=[signature.capability],
+                          confidence="suspected", finding_ref=legit_id)
+        env = env.model_copy(update={"primitives": list(env.primitives) + [empty]})
+        return env, findings, detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _empty_locus_prim)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS)
+    run_session(store, GATE, session)
+
+    ledger_loci = {n.target_locus for n in session.conductor.ledger.nodes()}
+    assert "" not in ledger_loci   # empty-locus primitive not ledgered
+
+
 def test_partial_coverage_write_failure_reports_the_persisted_coverage(state_dir, monkeypatch):
     """Symmetric to variants: if save_coverage fails MID-batch (some areas saved),
     the persisted coverage refs are reported (coverage_changed matches Store state)
@@ -1179,6 +1252,41 @@ def test_siblings_are_gated_by_the_harness_gate_not_a_hardcoded_default(state_di
     # seen 'sib-proj'.
     assert "src-proj" in evaluated
     assert "sib-proj" in evaluated
+
+
+def test_sibling_gate_failure_is_isolated_to_that_sibling(state_dir):
+    """PER-TARGET ISOLATION for the sibling GATE step: if the gate (or its context
+    build) raises for ONE sibling, that sibling is recorded as an error and the OTHER
+    authorized targets still run — a raising gate must not abort the whole hunt."""
+    from deepthought.protocol.gate import DefaultGate
+
+    class _RaisingGate(DefaultGate):
+        def evaluate(self, ctx):
+            if ctx.project_id == "sib-bad":
+                raise RuntimeError("gate blew up evaluating this sibling")
+            return super().evaluate(ctx)
+
+    store = FileStore(state_dir)
+    _seed_source(store)
+    _register_sibling(store, "sib-good")
+    _register_sibling(store, "sib-bad")
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007",
+        sibling_project_ids=["sib-good", "sib-bad"], sarif_path=SIBLINGS,
+    )
+    record = run_session(store, _RaisingGate(), session)
+
+    # The whole session still closes (the raising sibling did not abort the run).
+    assert record.close_state is CloseState.clean
+    bad = next(t for t in session.target_outcomes if t.project_id == "sib-bad")
+    assert bad.proceeded is False and bad.gate_outcome == "error"
+    assert "sibling gate failed" in (bad.reason or "")
+    # The healthy sibling and the source were still hunted.
+    assert any(t.project_id == "sib-good" and t.proceeded for t in session.target_outcomes)
+    assert any(t.project_id == "src-proj" and t.proceeded for t in session.target_outcomes)
 
 
 def test_locus_derivation_tolerates_none_references():
