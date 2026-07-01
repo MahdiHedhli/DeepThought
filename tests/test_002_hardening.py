@@ -796,3 +796,27 @@ def test_discover_blank_sarif_path_records_no_coverage(state_dir):
     # A blank --sarif "" is no input, so no coverage is recorded.
     run_session(store, DefaultGate(), DiscoverSession("target", sarif_path=""))
     assert store.list_coverage(project="target") == []
+
+
+def test_discover_symlink_escaping_area_drops_findings(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "s.py").write_text("leak")
+    (root / "linked").symlink_to(secret, target_is_directory=True)
+
+    sarif_path = tmp_path / "s.sarif"
+    sarif_path.write_text(json.dumps(_sarif_with_uris(["linked/secret.py"])))
+    store = FileStore(tmp_path / "state")
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(root),
+            authorization_basis="own_code", scope_allowlist=["linked"],
+        )
+    )
+    run_session(store, DefaultGate(), DiscoverSession("target", sarif_path=str(sarif_path)))
+    # The allowlisted area is a symlink escaping the root: findings AND coverage
+    # are both refused (root-aware containment), consistently.
+    assert store.list_findings(project="target") == []
+    assert store.list_coverage(project="target") == []

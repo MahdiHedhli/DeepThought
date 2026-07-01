@@ -174,17 +174,20 @@ def _run_marvin_worker(
             )
 
         id_start = _next_finding_index(store)
-        # Filter SARIF results to the project's scope: a result naming a file
-        # outside the allowlist (or a `..` traversal) never becomes a finding or
-        # primitive. DISCOVER's scope guarantee — out-of-scope paths are never
-        # reported — holds even for a tool run over the whole checkout.
+        # Filter SARIF results to the project's CONTAINED scope — the same
+        # root-aware set coverage uses (`_coverage_areas` runs each area through
+        # resolve_within). So an area that escapes the root (e.g. a symlink
+        # resolving outside it) is refused for findings exactly as it is for
+        # coverage: DISCOVER never reports a path outside the target tree, even
+        # for a tool run over the whole checkout.
+        contained_scope = _coverage_areas(project, root)
         findings = sarif_to_findings(
-            sarif, project=project.id, id_start=id_start, scope=project.scope_allowlist
+            sarif, project=project.id, id_start=id_start, scope=contained_scope
         )
         primitives = sarif_to_primitives(
             sarif,
             finding_ids=[f.id for f in findings],
-            scope=project.scope_allowlist,
+            scope=contained_scope,
         )
         sarif_note = (
             f"parsed SARIF {sarif_path!r}: {len(findings)} candidate finding(s), "
