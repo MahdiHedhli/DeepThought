@@ -48,11 +48,13 @@ any of them on evidence.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..ingest.sarif import (
     SarifError,
+    _in_scope,
     load_sarif,
     sarif_to_findings,
     sarif_to_primitives,
@@ -121,12 +123,43 @@ def _same_class(
     the hunt variant analysis rather than a second DISCOVER. Findings are kept
     only when a same-class primitive binds to them.
     """
-    kept_finding_ids = {p.finding_ref for p in primitives if p.kind == capability}
-    kept_findings = [f for f in findings if f.id in kept_finding_ids]
+    same_class_refs = {p.finding_ref for p in primitives if p.kind == capability}
+    kept_findings = [f for f in findings if f.id in same_class_refs]
+    # A kept primitive must be same-class AND bind to a KEPT finding — never to a
+    # finding id that was filtered out or that no returned finding provides. This
+    # keeps the ledger free of primitives dangling off non-existent findings.
+    kept_ids = {f.id for f in kept_findings}
     kept_primitives = [
-        p for p in primitives if p.kind == capability and p.finding_ref in kept_finding_ids
+        p for p in primitives if p.kind == capability and p.finding_ref in kept_ids
     ]
     return kept_findings, kept_primitives
+
+
+# The "**Location:** `<file:line>`" line the SARIF ingest renders into a finding
+# body — the only structured location a variant finding carries. Matches the ingest
+# rendering so the orchestrator can re-validate a finding's claimed path.
+_FINDING_LOCATION_RE = re.compile(r"\*\*Location:\*\*\s+`([^`]+)`")
+
+
+def _finding_location_in_scope(
+    finding, scope: list[str] | None, root: Path | None
+) -> bool:
+    """Re-validate the finding's claimed location against the TARGET's scope.
+
+    The same firewall :meth:`_write_read_coverage` applies to the coverage channel,
+    applied to the findings channel: a finding whose rendered ``**Location:**`` path
+    resolves OUTSIDE the target's scope allowlist is dropped, so a buggy or
+    compromised worker cannot smuggle a persisted finding for an out-of-scope area
+    of an (otherwise authorized) project. A finding that claims no location names no
+    path and is kept — it cannot report an out-of-scope file.
+    """
+    match = _FINDING_LOCATION_RE.search(finding.body or "")
+    if not match:
+        return True
+    locus = match.group(1).strip()
+    # Strip a trailing ``:line`` / ``:line:col`` so we scope-check the file path.
+    path = re.sub(r":\d+(?::\d+)?$", "", locus)
+    return _in_scope(path, scope, root)
 
 
 def _run_marvin_worker(
@@ -302,6 +335,10 @@ class SiblingHuntSession(BaseSession):
         self.conductor: Conductor | None = None
         self.envelopes: list[Envelope] = []
         self.target_outcomes: list[TargetOutcome] = []
+        # The harness (``run_session``) injects the gate it is using here before
+        # ``run``; default ``None`` so a direct (non-harness) call falls back to
+        # ``_SIBLING_GATE`` for sibling gating without an AttributeError.
+        self.harness_gate = None
 
     # --- gate context (the SOURCE project's gate) --------------------------
 
@@ -502,15 +539,25 @@ class SiblingHuntSession(BaseSession):
         self.envelopes.append(validated)  # ingested into the ledger (in-memory)
         # ENVELOPE FIREWALL over the side channel. The worker returns the `findings`
         # OBJECTS alongside the envelope (the envelope itself carries only ids). A
-        # buggy or out-of-process worker could return a benign/empty envelope yet
-        # include extra Finding objects — for ANOTHER project, or with ids the
-        # validated envelope never listed. Persist ONLY findings the VALIDATED
-        # envelope attests (id in findings_written) AND that are bound to THIS
-        # target; drop everything else, never save it. Persistence is thus driven
-        # by the validated envelope + the target, not by unchecked worker output.
+        # buggy/out-of-process/compromised worker could return a benign envelope yet
+        # include extra Finding objects. Persist ONLY findings that are, ALL of:
+        #   * attested by the VALIDATED envelope (id in findings_written),
+        #   * bound to THIS target (project == target.id) — no cross-project write,
+        #   * NEW (not already in the Store) — never overwrite/hijack an existing
+        #     finding (e.g. a verified one) by reusing its id, and
+        #   * in scope (claimed location inside the target's allowlist) — no
+        #     out-of-scope-area smuggling.
+        # Everything else is dropped, never saved. Persistence is driven by the
+        # validated envelope + the target's authority, not by unchecked worker
+        # output.
         attested = set(validated.findings_written)
         findings = [
-            f for f in findings if f.id in attested and f.project == target.id
+            f
+            for f in findings
+            if f.id in attested
+            and f.project == target.id
+            and store.get_finding(f.id) is None
+            and _finding_location_in_scope(f, target.scope_allowlist, root)
         ]
         saved_ids: list[str] = []
         saved_cov: list[str] = []

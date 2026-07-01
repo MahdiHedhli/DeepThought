@@ -579,6 +579,96 @@ def test_worker_side_channel_findings_are_filtered_to_the_validated_envelope(sta
     assert len(src_variants) == 2
 
 
+def test_worker_cannot_overwrite_an_existing_finding_by_id_reuse(state_dir, monkeypatch):
+    """A side-channel finding whose id ALREADY exists in the Store is DROPPED — a
+    worker cannot hijack/overwrite an existing (e.g. verified) finding by reusing
+    its id, even if it lists that id in the envelope's findings_written."""
+    store = FileStore(state_dir)
+    _seed_source(store)  # writes verified F-0007
+    before = store.get_finding("F-0007")
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _hijacker(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        # Attest F-0007 (an existing verified finding) and provide a candidate object
+        # that would overwrite it if not id-guarded.
+        env = env.model_copy(update={"findings_written": list(env.findings_written) + ["F-0007"]})
+        hijack = make_finding(id="F-0007", project=target.id, status="candidate",
+                              evidence_ref=None, summary="HIJACKED")
+        return env, findings + [hijack], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _hijacker)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    after = store.get_finding("F-0007")
+    assert after.status is before.status          # still verified — NOT overwritten
+    assert after.summary == before.summary        # untouched
+
+
+def test_worker_out_of_scope_finding_location_is_dropped(state_dir, monkeypatch):
+    """A side-channel finding whose claimed location is OUTSIDE the target's scope
+    is dropped — a worker cannot smuggle a persisted finding for an out-of-scope
+    area of an otherwise-authorized project."""
+    store = FileStore(state_dir)
+    _seed_source(store)  # scope = ["app"]
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _smuggle_oos(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        env = env.model_copy(update={"findings_written": list(env.findings_written) + ["F-8000"]})
+        oos = make_finding(
+            id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+            summary="out of scope variant",
+            body="## Root cause\n\nx\n\n**Location:** `secret/keys.txt:1`",
+        )
+        return env, findings + [oos], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _smuggle_oos)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    assert store.get_finding("F-8000") is None    # out-of-scope location -> dropped
+    # The in-scope (app/...) variants are still persisted.
+    src_variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    assert src_variants and all("app" in (f.body or "") for f in src_variants)
+
+
+def test_same_class_drops_primitives_binding_to_filtered_findings():
+    """_same_class keeps a primitive only if it is same-class AND binds to a KEPT
+    finding — never a finding id that no returned finding provides (no dangling
+    ledger primitives)."""
+    from deepthought.schema.envelope import Primitive
+    from deepthought.sessions.sibling_hunt import _same_class
+
+    f1 = make_finding(id="F-1", project="p", status="candidate", evidence_ref=None)
+    prims = [
+        Primitive(kind="inject:sql", target_locus="app/a.py", preconditions=[],
+                  grants=["inject:sql"], confidence="suspected", finding_ref="F-1"),
+        # same-class primitive bound to a finding id NOT among the findings.
+        Primitive(kind="inject:sql", target_locus="app/b.py", preconditions=[],
+                  grants=["inject:sql"], confidence="suspected", finding_ref="F-404"),
+    ]
+    kept_findings, kept_primitives = _same_class([f1], prims, "inject:sql")
+
+    assert [f.id for f in kept_findings] == ["F-1"]
+    assert [p.finding_ref for p in kept_primitives] == ["F-1"]  # F-404 dropped
+
+
 def test_partial_coverage_write_failure_reports_the_persisted_coverage(state_dir, monkeypatch):
     """Symmetric to variants: if save_coverage fails MID-batch (some areas saved),
     the persisted coverage refs are reported (coverage_changed matches Store state)
