@@ -900,6 +900,43 @@ def test_worker_finding_id_with_path_separators_is_dropped(state_dir, monkeypatc
     assert all(f.id.startswith("F-") for f in store.list_findings())
 
 
+def test_finding_location_scope_checks_the_full_untruncated_locus(state_dir, monkeypatch):
+    """A worker finding whose **Location:** starts with an in-scope prefix but places
+    a traversal / out-of-scope component AFTER the first 256 chars must NOT slip past
+    the scope firewall via truncation — the FULL locus is scope-checked."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)  # scope ["app"]
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+    # In-scope-looking 256-char prefix, then a traversal out of scope.
+    evil_locus = "app/" + ("a" * 300) + "/../../../secret/keys.txt"
+
+    def _evil(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        rogue = make_finding(id="F-8000", project=target.id, status="candidate", evidence_ref=None,
+                             summary="evil", body=f"**Location:** `{evil_locus}`")
+        prim = Primitive(kind=signature.capability, target_locus="app/x.py", preconditions=[],
+                         grants=[signature.capability], confidence="suspected", finding_ref="F-8000")
+        env = env.model_copy(update={
+            "findings_written": list(env.findings_written) + ["F-8000"],
+            "primitives": list(env.primitives) + [prim],
+        })
+        return env, findings + [rogue], detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _evil)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    run_session(store, GATE, SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS))
+
+    assert store.get_finding("F-8000") is None   # full-locus scope check dropped it
+
+
 def test_worker_verified_finding_is_dropped_not_promoted(state_dir, monkeypatch):
     """A worker cannot bypass the VERIFY-only boundary: an attested, same-class,
     in-scope finding with status=verified (+ evidence_ref) is DROPPED, never

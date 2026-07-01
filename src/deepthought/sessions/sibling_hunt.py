@@ -160,16 +160,19 @@ def _locus_in_scope(locus: str | None, scope: list[str] | None, root: Path | Non
 
 
 def _finding_locus(finding) -> str | None:
-    """The finding's STRUCTURED location — the LAST ``**Location:**`` match.
+    """The finding's STRUCTURED location — the LAST ``**Location:**`` match, FULL.
 
     ``sarif_to_findings`` appends the real location AFTER the untrusted SARIF message
     text, so the LAST match is the trustworthy one; an attacker whose message body
     embeds its own ``**Location:**`` (an earlier match) cannot steer it.
+
+    Returned UNTRUNCATED: scope containment must check the WHOLE claimed path — a
+    worker could place an in-scope-looking prefix and a traversal / out-of-scope
+    component AFTER the first 256 chars, which truncation would hide. Callers that
+    compare against the capped ``signature.locus_pattern`` truncate at the comparison.
     """
     matches = _FINDING_LOCATION_RE.findall(finding.body or "")
-    # Cap at 256 to match signature.locus_pattern's bound, so a very long locus
-    # compares equal on both sides (no truncation mismatch).
-    return matches[-1].strip()[:256] if matches else None
+    return matches[-1].strip() if matches else None
 
 
 def _finding_location_in_scope(
@@ -600,8 +603,11 @@ class SiblingHuntSession(BaseSession):
             # sibling of itself. Keyed on is_source (not a truncatable id compare);
             # siblings live at OTHER locations, or in sibling projects.
             if is_source and signature.locus_pattern:
+                # Compare against the capped signature.locus_pattern (<=256).
                 kept = [
-                    f for f in kept if _finding_locus(f) != signature.locus_pattern
+                    f
+                    for f in kept
+                    if (_finding_locus(f) or "")[:256] != signature.locus_pattern
                 ]
             kept_ids = {f.id for f in kept}
 
