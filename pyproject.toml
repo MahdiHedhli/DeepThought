@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "deepthought"
+version = "0.1.0"
+description = "Deep Thought — the governed spine of an autonomous security-research platform (feature 001, the platform spine)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "MahdiHedhli" }]
+keywords = ["security", "vulnerability", "osv", "spec-kit", "coordinated-disclosure"]
+dependencies = [
+    "pydantic>=2.6",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "jsonschema>=4.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+deepthought = "deepthought.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deepthought"]
+
+# Ship the pinned OSV schema (a non-.py file) inside the package.
+artifacts = ["src/deepthought/export/osv_schema.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["src"]

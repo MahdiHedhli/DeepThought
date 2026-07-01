@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenv
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local publish artifacts (never committed; publish is local-only)
+/out/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# OS
+.DS_Store
