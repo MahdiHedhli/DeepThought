@@ -9,6 +9,8 @@ orchestrator only ever touching a validated envelope.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from deepthought.ingest.sarif import (
@@ -245,16 +247,117 @@ def test_discover_records_coverage_when_sarif_is_read(state_dir):
 
     sample = Path(__file__).parent / "fixtures" / "sample.sarif"
     store = FileStore(state_dir)
+    # The sample SARIF locates its results under app/; scope there so DISCOVER's
+    # in-scope filter keeps them.
     store.save_project(
         make_project(
             id="target", git_url=None, local_path=str(state_dir),
-            authorization_basis="own_code", scope_allowlist=["src"],
+            authorization_basis="own_code", scope_allowlist=["app"],
         )
     )
     run_session(store, DefaultGate(), DiscoverSession("target", sarif_path=str(sample)))
     # SARIF was read -> coverage recorded, and candidate findings created.
     assert store.list_coverage(project="target")
     assert store.list_findings(project="target")
+
+
+# --- Review round 3 (PR #1): scope filtering + helpUri cap ------------------
+
+
+def _sarif_with_uris(uris):
+    return {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "results": [
+                    {
+                        "ruleId": "py/sql-injection",
+                        "message": {"text": f"finding at {u}"},
+                        "locations": [
+                            {"physicalLocation": {"artifactLocation": {"uri": u}, "region": {"startLine": 1}}}
+                        ],
+                    }
+                    for u in uris
+                ]
+            }
+        ],
+    }
+
+
+def test_sarif_scope_filter_keeps_only_in_scope_results():
+    sarif = _sarif_with_uris(["app/a.py", "other/b.py", "app/sub/d.py"])
+    # No scope -> all kept (back-compat for the direct mappers).
+    assert len(sarif_to_findings(sarif, project="p")) == 3
+    # scope=app -> only the two under app/.
+    scoped = sarif_to_findings(sarif, project="p", scope=["app"])
+    assert len(scoped) == 2
+    prims = sarif_to_primitives(sarif, finding_ids=[f.id for f in scoped], scope=["app"])
+    assert len(prims) == 2  # index alignment preserved under the same scope
+
+
+def test_sarif_scope_filter_refuses_traversal_and_absolute():
+    sarif = _sarif_with_uris(["../vendor/c.py", "/etc/passwd"])
+    # Even if 'vendor' were allowlisted, a `..` escape is refused; so is absolute.
+    assert sarif_to_findings(sarif, project="p", scope=["app", "vendor"]) == []
+
+
+def test_discover_drops_out_of_scope_sarif_results(tmp_path):
+    sarif_path = tmp_path / "s.sarif"
+    sarif_path.write_text(json.dumps(_sarif_with_uris(["app/in.py", "secret/out.py"])))
+    store = FileStore(tmp_path / "state")
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(tmp_path),
+            authorization_basis="own_code", scope_allowlist=["app"],
+        )
+    )
+    run_session(store, DefaultGate(), DiscoverSession("target", sarif_path=str(sarif_path)))
+    findings = store.list_findings(project="target")
+    # Only the in-scope (app/in.py) result becomes a finding; secret/out.py is dropped.
+    assert len(findings) == 1
+    assert "app/in.py" in findings[0].body
+    assert all("secret/out.py" not in f.body for f in findings)
+
+
+def test_sarif_drops_overlong_help_uri():
+    from deepthought.export.osv import finding_to_osv, validate_osv
+
+    huge = "https://example.test/" + "a" * 5000
+    sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"rules": [{"id": "R1", "helpUri": huge}]}},
+                "results": [
+                    {
+                        "ruleId": "R1",
+                        "message": {"text": "x"},
+                        "locations": [
+                            {"physicalLocation": {"artifactLocation": {"uri": "app/a.py"}, "region": {"startLine": 1}}}
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    finding = sarif_to_findings(sarif, project="p")[0]
+    assert finding.references == []  # over-cap helpUri dropped, not persisted
+    assert validate_osv(finding_to_osv(finding)) == []
+
+
+def test_sarif_keeps_reasonable_help_uri():
+    sarif = {
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {"driver": {"rules": [{"id": "R1", "helpUri": "https://example.test/r/1"}]}},
+                "results": [{"ruleId": "R1", "message": {"text": "x"}}],
+            }
+        ],
+    }
+    finding = sarif_to_findings(sarif, project="p")[0]
+    assert len(finding.references) == 1
+    assert finding.references[0].url == "https://example.test/r/1"
 
 
 def test_discover_tolerates_overlong_scope_path(state_dir):

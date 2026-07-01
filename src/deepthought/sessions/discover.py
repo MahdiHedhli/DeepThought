@@ -147,9 +147,17 @@ def _run_marvin_worker(
             )
 
         id_start = _next_finding_index(store)
-        findings = sarif_to_findings(sarif, project=project.id, id_start=id_start)
+        # Filter SARIF results to the project's scope: a result naming a file
+        # outside the allowlist (or a `..` traversal) never becomes a finding or
+        # primitive. DISCOVER's scope guarantee — out-of-scope paths are never
+        # reported — holds even for a tool run over the whole checkout.
+        findings = sarif_to_findings(
+            sarif, project=project.id, id_start=id_start, scope=project.scope_allowlist
+        )
         primitives = sarif_to_primitives(
-            sarif, finding_ids=[f.id for f in findings]
+            sarif,
+            finding_ids=[f.id for f in findings],
+            scope=project.scope_allowlist,
         )
         # WRITE the candidate findings to the Store. Only the Store holds them;
         # the orchestrator learns which ids exist through the envelope's

@@ -21,6 +21,7 @@ from a local file, and the mappings are pure data transforms.
 from __future__ import annotations
 
 import json
+from pathlib import PurePosixPath
 
 from ..schema.envelope import CAPABILITY_TAXONOMY, Confidence, Primitive
 from ..schema.finding import Finding, FindingStatus, Reference
@@ -33,6 +34,13 @@ SARIF_VERSION = "2.1.0"
 # Finding.summary field is unbounded in the schema, but OSV summaries are meant
 # to be one line, so we cap the untrusted copy here.
 _SUMMARY_MAX = 200
+
+# Conservative bound on a reference URL (a rule helpUri) copied out of SARIF.
+# Summary, body, and loci are already capped; the reference path is bounded here
+# too so a hostile SARIF cannot smuggle an oversized string into persisted state
+# or OSV output. An over-long helpUri is dropped rather than truncated (a
+# truncated URL is not a valid URL).
+_REF_URL_MAX = 2048
 
 # Conservative bound on the finding body assembled from SARIF text. The
 # Finding.body field is unbounded in the schema, but the sarif-ingest contract
@@ -241,11 +249,47 @@ def _rule_tags(rule: dict | None) -> list[str]:
     return [t for t in tags if isinstance(t, str)]
 
 
-def _accepted_results(sarif: dict):
+def _in_scope(uri: str | None, scope: list[str] | None) -> bool:
+    """Whether a SARIF result location is inside the project's scope allowlist.
+
+    ``scope=None`` means "no filter" (accept). A result with no location (``uri``
+    None) names no path, so it cannot report an out-of-scope file — it is kept.
+    A URI is in scope when it equals, or is contained under, an allowlist area.
+    An absolute URI or a ``..`` traversal escapes the allowlist and is refused —
+    DISCOVER never reports a finding for a path outside the authorized scope.
+    """
+    if scope is None or uri is None:
+        return True
+    p = PurePosixPath(uri)
+    if p.is_absolute():
+        return False
+    parts: list[str] = []
+    for seg in p.parts:
+        if seg == "..":
+            return False  # escapes the target tree
+        parts.append(seg)
+    norm = PurePosixPath(*parts) if parts else PurePosixPath()
+    for area in scope:
+        if not isinstance(area, str) or not area:
+            continue
+        ap = PurePosixPath(area)
+        if norm == ap:
+            return True
+        try:
+            norm.relative_to(ap)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _accepted_results(sarif: dict, scope: list[str] | None = None):
     """Yield (result, rule) for every result worth turning into a finding.
 
-    A result with no usable ``message.text`` is skipped. Order is the document
-    order, which is the ordering contract both public mappings walk.
+    A result with no usable ``message.text`` is skipped. When ``scope`` is given,
+    a result whose location is not contained in the scope allowlist is also
+    skipped, so out-of-scope (or traversal) results never become findings. Order
+    is the document order, which is the ordering contract both mappings walk.
     """
     for run in _runs(sarif):
         if not isinstance(run, dict):
@@ -259,6 +303,9 @@ def _accepted_results(sarif: dict):
                 continue
             if _message_text(result) is None:
                 continue
+            uri, _ = _first_location(result)
+            if not _in_scope(uri, scope):
+                continue
             rule_id = result.get("ruleId")
             rule = index.get(rule_id) if isinstance(rule_id, str) else None
             yield result, rule
@@ -267,7 +314,9 @@ def _accepted_results(sarif: dict):
 # --- findings ---------------------------------------------------------------
 
 
-def sarif_to_findings(sarif: dict, *, project: str, id_start: int = 1) -> list[Finding]:
+def sarif_to_findings(
+    sarif: dict, *, project: str, id_start: int = 1, scope: list[str] | None = None
+) -> list[Finding]:
     """Map the accepted SARIF subset to candidate Findings.
 
     One Finding per accepted result, status ``candidate``, ids assigned
@@ -275,10 +324,14 @@ def sarif_to_findings(sarif: dict, *, project: str, id_start: int = 1) -> list[F
     Finding is OSV-valid by construction: it carries only ``id`` + fields that
     export to a conformant OSV record, ``affected`` stays empty, and
     ``evidence_ref`` is ``None`` (a candidate carries no evidence).
+
+    When ``scope`` is given (the project's scope allowlist), results whose
+    location is outside it — or a ``..`` traversal — are dropped, so DISCOVER
+    never files a finding for an out-of-scope path.
     """
     findings: list[Finding] = []
     n = id_start
-    for result, rule in _accepted_results(sarif):
+    for result, rule in _accepted_results(sarif, scope):
         message = _message_text(result)
         assert message is not None  # _accepted_results guarantees this
         rule_id = result.get("ruleId")
@@ -296,8 +349,11 @@ def sarif_to_findings(sarif: dict, *, project: str, id_start: int = 1) -> list[F
 
         references: list[Reference] = []
         help_uri = _rule_help_uri(rule)
-        if help_uri:
-            # type is free-form here; normalised to the OSV enum on export.
+        if help_uri and len(help_uri) <= _REF_URL_MAX:
+            # type is free-form here; normalised to the OSV enum on export. An
+            # over-long helpUri is dropped (a truncated URL is not a valid URL),
+            # so untrusted SARIF cannot smuggle an oversized reference into
+            # persisted state or OSV output.
             references.append(Reference(type="detection", url=help_uri))
 
         # Bound the untrusted SARIF text on the way into the body. The body is
@@ -340,16 +396,18 @@ def _match_capability(rule_id: str | None, tags: list[str]) -> str | None:
     return None
 
 
-def sarif_to_primitives(sarif: dict, *, finding_ids: list[str]) -> list[Primitive]:
+def sarif_to_primitives(
+    sarif: dict, *, finding_ids: list[str], scope: list[str] | None = None
+) -> list[Primitive]:
     """Map accepted SARIF results to suspected Primitives via the closed table.
 
     ``finding_ids`` is the list returned alongside :func:`sarif_to_findings`
-    (same order), so each primitive binds to its finding via ``finding_ref``. A
-    result whose ruleId/tags are unmapped yields no primitive. Every primitive
-    is ``confidence: suspected`` with no ``evidence_ref`` (nothing executed).
+    (same order and same ``scope``), so each primitive binds to its finding via
+    ``finding_ref``. A result whose ruleId/tags are unmapped yields no primitive.
+    Every primitive is ``confidence: suspected`` with no ``evidence_ref``.
     """
     primitives: list[Primitive] = []
-    for i, (result, rule) in enumerate(_accepted_results(sarif)):
+    for i, (result, rule) in enumerate(_accepted_results(sarif, scope)):
         if i >= len(finding_ids):
             break
         rule_id = result.get("ruleId")

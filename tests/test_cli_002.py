@@ -31,13 +31,13 @@ def _repo_with_scope(tmp_path):
     return repo
 
 
-def _seed_project(state, repo):
+def _seed_project(state, repo, scope=("ext/soap", "ext/standard")):
     store = FileStore(state)
     store.save_project(
         make_project(
             local_path=str(repo),
             git_url=None,
-            scope_allowlist=["ext/soap", "ext/standard"],
+            scope_allowlist=list(scope),
         )
     )
     return store
@@ -109,7 +109,9 @@ def test_playbook_map_unknown_project_errors(tmp_path):
 def test_playbook_discover_creates_candidate_findings(tmp_path):
     state = tmp_path / "state"
     repo = _repo_with_scope(tmp_path)
-    store = _seed_project(state, repo)
+    # The sample SARIF locates its results under app/; scope there so DISCOVER's
+    # in-scope filter keeps them.
+    store = _seed_project(state, repo, scope=["app"])
 
     result = runner.invoke(
         app,
@@ -159,7 +161,7 @@ def test_playbook_discover_unknown_project_errors(tmp_path):
 def test_check_green_after_discover(tmp_path):
     state = tmp_path / "state"
     repo = _repo_with_scope(tmp_path)
-    _seed_project(state, repo)
+    _seed_project(state, repo, scope=["app"])
 
     discover = runner.invoke(
         app,

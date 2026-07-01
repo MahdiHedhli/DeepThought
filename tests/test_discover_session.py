@@ -41,7 +41,9 @@ FIXTURE = str(Path(__file__).parent / "fixtures" / "sample.sarif")
 
 def _seeded_store(state_dir) -> FileStore:
     store = FileStore(state_dir)
-    store.save_project(make_project())
+    # The sample SARIF locates its results under app/. Scope the project there so
+    # DISCOVER's in-scope filter keeps them (out-of-scope results are dropped).
+    store.save_project(make_project(scope_allowlist=["app"]))
     return store
 
 

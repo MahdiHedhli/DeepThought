@@ -42,6 +42,7 @@ say "1. NEW PROJECT — register this repo as the in-scope target"
   --source-type open_source \
   --basis own_code \
   --scope "$SCOPE" \
+  --scope app \
   --project-id "$PROJECT"
 ls "$STATE/projects"
 

@@ -79,6 +79,22 @@ OK, ledger=2 primitives).
 Pushed; `@codex review` / `/gemini review` re-requested. Still **not merged** —
 awaiting a clean external review pass and Mahdi's go.
 
+## Review rounds 2–3 — PR #1 (addressed)
+
+Round 2 (4 findings) and round 3 (2 findings) from codex/gemini, all fixed
+test-first. **pytest 151 → 179**; both smokes green; all 20 threads resolved.
+
+Round 3 (on the hardened code):
+- **DISCOVER now filters SARIF results to in-scope locations.** A result naming a
+  file outside `project.scope_allowlist` — or a `..` traversal / absolute path —
+  is dropped before any finding or primitive is created, so DISCOVER's scope
+  guarantee (out-of-scope paths are never reported) holds even for a SARIF run
+  over the whole checkout. (`_in_scope` in `ingest/sarif.py`; DISCOVER passes the
+  project scope.)
+- **Rule `helpUri` is length-capped** (`_REF_URL_MAX`) before becoming a
+  `Reference`, so a hostile SARIF cannot smuggle an oversized string into
+  persisted state or OSV output.
+
 ## Next feature
 
 **003 — Execution sandbox and VERIFY.** HARD STOP: the sandbox (ephemeral microVM,
