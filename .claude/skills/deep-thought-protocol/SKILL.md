@@ -84,8 +84,27 @@ load state  ->  gate  ->  scoped work  ->  teach back  ->  validate  ->  close
   real backend run (an ephemeral microVM per Phase 0 §0.3, or the container
   fallback) — is a distinct, later change behind **Mahdi's sign-off**.
 
-- *(later)* SIBLING HUNT, DISCLOSURE — each behind its own gate and, for anything
-  that runs code, behind the sandbox (Article III).
+- **SIBLING HUNT** (feature 004, READ-ONLY) — variant analysis. Take a *verified*
+  finding, derive a variant `Signature` **from its typed fields only** (the bound
+  `Primitive.kind` — a taxonomy capability — a normalized locus pattern, and
+  closed-lookup match terms; the finding's free-text body is never read as
+  instruction, so a hostile finding at worst yields no signature). Then hunt
+  read-only for **same-class** siblings across the source project AND any *named,
+  pre-registered* sibling project. **Gate EACH target independently**
+  (`GateContext.from_project` + the unchanged three-outcome gate): a sibling must
+  already exist in the Store WITH its own `authorization_basis` — no basis
+  refuses, empty scope holds, an unregistered name is skipped and logged.
+  Dispatch one stub Marvin per gated-proceed target, ingest only its typed
+  envelope through the `Conductor`, and write candidate variant `Finding`s (fresh
+  ids, OSV-valid by construction, bound to the *target* project) plus
+  `Coverage(method='read')`. A **same-class filter** keeps only instances whose
+  capability equals the signature's; out-of-scope instances are dropped by the
+  reused scope/root containment first. SIBLING HUNT **runs no code**, and it
+  **NEVER creates a project, mutates a `scope_allowlist`, or sets an
+  `authorization_basis`** — the huntable target set is fixed at dispatch and never
+  grows. Variants are promoted only by a later sandboxed VERIFY.
+
+- *(later)* DISCLOSURE — behind its own gate.
 
 Run these through the CLI, which is the protocol harness in code:
 
@@ -95,6 +114,7 @@ deepthought playbook status --project <id>
 deepthought playbook map --project <id>                    # 002, READ-ONLY coverage
 deepthought playbook discover --project <id> [--sarif <path>]  # 002, candidate findings
 deepthought playbook verify --project <id> --finding <F-NNNN>  # 003, NoopSandbox dry-run (no execution)
+deepthought playbook sibling-hunt --project <id> --finding <F-NNNN> [--sibling <id> ...] [--sarif <path>]  # 004, READ-ONLY variant hunt
 deepthought playbook findings [--project <id>]
 deepthought check
 deepthought publish        # local artifacts only; asserts the human gate

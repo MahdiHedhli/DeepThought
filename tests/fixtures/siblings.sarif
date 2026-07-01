@@ -1,0 +1,91 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "ExampleAnalyzer",
+          "rules": [
+            {
+              "id": "py/sql-injection",
+              "properties": {
+                "tags": ["security", "external/cwe/cwe-89"]
+              },
+              "helpUri": "https://example.test/rules/sql-injection"
+            },
+            {
+              "id": "py/path-injection",
+              "properties": {
+                "tags": ["security", "external/cwe/cwe-22"]
+              },
+              "helpUri": "https://example.test/rules/path-injection"
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "py/sql-injection",
+          "level": "error",
+          "message": {
+            "text": "A second SQL query concatenates a request parameter without binding — a sibling of the verified injection."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "app/reports.py"},
+                "region": {"startLine": 88}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "py/sql-injection",
+          "level": "error",
+          "message": {
+            "text": "A third SQL query builds its WHERE clause by string formatting user input."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "app/search.py"},
+                "region": {"startLine": 21}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "py/path-injection",
+          "level": "warning",
+          "message": {
+            "text": "A path expression depends on a user-provided value — a DIFFERENT bug class than the SQL injection signature."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "app/files.py"},
+                "region": {"startLine": 17}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "py/sql-injection",
+          "level": "error",
+          "message": {
+            "text": "An SQL injection in a vendored dependency that sits OUTSIDE the authorized scope."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {"uri": "vendor/thirdparty/orm.py"},
+                "region": {"startLine": 305}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
