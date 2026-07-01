@@ -150,6 +150,15 @@ def test_spec_requires_a_non_empty_command():
         make_spec(command=[])
 
 
+def test_spec_rejects_an_empty_executable_token():
+    # command[0] becomes --entrypoint; an empty/whitespace token would render
+    # `--entrypoint ""` which docker treats as CLEARING the entrypoint (falling
+    # back to the image's own). Refuse it at construction.
+    for bad in ([""], ["   "], ["", "arg"]):
+        with pytest.raises(ValidationError):
+            make_spec(command=bad)
+
+
 def test_spec_forbids_unknown_fields():
     with pytest.raises(ValidationError):
         make_spec(shell=True)
@@ -297,6 +306,22 @@ def test_build_command_allows_a_numeric_non_root_uid():
     )
     assert "--user" in argv
     assert argv[argv.index("--user") + 1] == "01000:01000"
+
+
+def test_build_command_renders_the_normalized_numeric_user():
+    """The rendered --user must be the NORMALIZED (stripped) numeric value, not the
+    raw string — else docker could fail numeric parsing on " 1000 : 2000 " and fall
+    back to a passwd lookup."""
+    argv = DockerSandbox().build_command(
+        make_spec(policy=SandboxPolicy(user=" 1000 : 2000 "))
+    )
+    assert argv[argv.index("--user") + 1] == "1000:2000"
+    # A uid-only user renders just the uid.
+    argv2 = DockerSandbox().build_command(make_spec(policy=SandboxPolicy(user=" 1000 ")))
+    assert argv2[argv2.index("--user") + 1] == "1000"
+    # Internal whitespace within a component is still refused (not numeric).
+    with pytest.raises(SandboxError):
+        DockerSandbox().build_command(make_spec(policy=SandboxPolicy(user="10 00")))
 
 
 def test_build_command_refuses_named_and_non_numeric_users():

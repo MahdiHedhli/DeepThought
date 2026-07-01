@@ -100,19 +100,23 @@ class DockerSandbox(Sandbox):
         # A gid, if present, must also be numeric.
         if policy.run_as_non_root:
             user = policy.user
-            uid, _, gid = user.partition(":")
-            uid = uid.strip()
+            uid_raw, sep, gid_raw = user.partition(":")
+            uid = uid_raw.strip()
+            gid = gid_raw.strip()
             if not _NUMERIC_RE.fullmatch(uid) or int(uid) == 0:
                 raise SandboxError(
                     f"run_as_non_root requires a numeric non-zero UID; user "
                     f"{user!r} is refused (a named or zero UID can run as root)"
                 )
-            if gid and not _NUMERIC_RE.fullmatch(gid.strip()):
+            if sep and not _NUMERIC_RE.fullmatch(gid):
                 raise SandboxError(
                     f"run_as_non_root requires a numeric gid; user {user!r} has a"
                     " non-numeric gid"
                 )
-            argv += ["--user", user]
+            # Render the NORMALIZED (stripped) numeric value — NOT the raw string.
+            # Validating the stripped parts but rendering the raw " 1000 : 2000 "
+            # would let docker fail numeric parsing and fall back to a passwd lookup.
+            argv += ["--user", f"{uid}:{gid}" if sep else uid]
 
         # Resource bounds. Presence is fixed and tested.
         argv += ["--pids-limit", str(policy.pids_limit)]

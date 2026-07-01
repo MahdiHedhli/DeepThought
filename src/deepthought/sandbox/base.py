@@ -31,7 +31,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 # Length caps, mirroring the envelope discipline: a bounded string field cannot
 # smuggle a large free-text payload past the typed boundary.
@@ -111,6 +111,17 @@ class SandboxSpec(BaseModel):
     # entrypoint/cmd — not the minimized repro. A repro must be explicit.
     command: list[Short] = Field(min_length=1)
     repro_ref: Ref
+
+    @field_validator("command")
+    @classmethod
+    def _executable_token_is_non_empty(cls, value: list[str]) -> list[str]:
+        # command[0] becomes ``--entrypoint``. An EMPTY executable token would
+        # render ``--entrypoint ""``, which docker treats as CLEARING the
+        # entrypoint — falling back to the image's own ENTRYPOINT/CMD and breaking
+        # the "exactly spec.command runs" invariant. Require a real executable.
+        if not value or not value[0].strip():
+            raise ValueError("command[0] (the executable) must be a non-empty token")
+        return value
     workdir: PathStr = "/work"
     env: dict[Short, Short] = Field(default_factory=dict)
     policy: SandboxPolicy
