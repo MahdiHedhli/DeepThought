@@ -149,7 +149,9 @@ def _finding_locus(finding) -> str | None:
     embeds its own ``**Location:**`` (an earlier match) cannot steer it.
     """
     matches = _FINDING_LOCATION_RE.findall(finding.body or "")
-    return matches[-1].strip() if matches else None
+    # Cap at 256 to match signature.locus_pattern's bound, so a very long locus
+    # compares equal on both sides (no truncation mismatch).
+    return matches[-1].strip()[:256] if matches else None
 
 
 def _finding_location_in_scope(
