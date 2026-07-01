@@ -967,7 +967,7 @@ def test_sibling_with_no_basis_is_refused_no_records(state_dir):
         sibling_project_ids=["sib-proj"],
         sarif_path=SIBLINGS,
     )
-    run_session(store, GATE, session)
+    record = run_session(store, GATE, session)
 
     # Refused at its OWN gate: no worker, no findings, no coverage.
     assert store.list_findings(project="sib-proj") == []
@@ -975,6 +975,10 @@ def test_sibling_with_no_basis_is_refused_no_records(state_dir):
     outcome = next(t for t in session.target_outcomes if t.project_id == "sib-proj")
     assert not outcome.proceeded
     assert outcome.gate_outcome == "refuse"
+    # The persisted session records WHY (the gate reason), not just the outcome.
+    assert "sib-proj" in record.body
+    assert (outcome.reason or "") in record.body
+    assert outcome.reason  # a non-empty gate reason was captured
 
 
 def test_sibling_with_empty_scope_is_held_no_records(state_dir):

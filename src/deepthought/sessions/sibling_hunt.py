@@ -724,8 +724,12 @@ class SiblingHuntSession(BaseSession):
                 f"were unaffected."
             )
         if refused:
-            gated_off = ", ".join(
-                f"{t.project_id} ({t.gate_outcome})" for t in refused
+            # Include the per-target REASON (no basis vs empty scope vs not
+            # registered), not just the outcome, so the persisted session log records
+            # WHY each sibling was not hunted — needed to remediate/audit.
+            gated_off = "; ".join(
+                f"{t.project_id} ({t.gate_outcome}: {t.reason or 'n/a'})"
+                for t in refused
             )
             parts.append(
                 f"Did NOT hunt (no records written): {gated_off}. No project was "
