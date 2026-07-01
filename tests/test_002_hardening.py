@@ -783,3 +783,16 @@ def test_scope_dot_matches_whole_checkout():
     # ...but traversal/absolute are still refused even with "." in scope.
     assert sarif_to_findings(_sarif_rule("py/sql-injection", uri="../secret.py"), project="p", scope=["."]) == []
     assert sarif_to_findings(_sarif_rule("py/sql-injection", uri="/etc/passwd"), project="p", scope=["."]) == []
+
+
+def test_discover_blank_sarif_path_records_no_coverage(state_dir):
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="target", git_url=None, local_path=str(state_dir),
+            authorization_basis="own_code", scope_allowlist=["app"],
+        )
+    )
+    # A blank --sarif "" is no input, so no coverage is recorded.
+    run_session(store, DefaultGate(), DiscoverSession("target", sarif_path=""))
+    assert store.list_coverage(project="target") == []

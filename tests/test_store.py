@@ -150,3 +150,23 @@ def test_coverage_reads_and_migrates_legacy_slug(state_dir):
     assert not legacy.exists()
     assert len(store.list_coverage(project="p")) == 1
     assert store.get_coverage("p", "ext/soap").depth.value == "explored"
+
+
+def test_migration_does_not_delete_unrelated_area(state_dir):
+    from deepthought.schema import Coverage
+
+    store = FileStore(state_dir)
+    # A real record for area "ext-soap" (its file is ext-soap.md).
+    store.save_coverage(
+        Coverage(project="p", area="ext-soap", method="read", depth="touched",
+                 last_session="S", body="unrelated")
+    )
+    # Saving area "ext/soap" (legacy slug ext-soap.md) must NOT delete the
+    # unrelated ext-soap record.
+    store.save_coverage(
+        Coverage(project="p", area="ext/soap", method="read", depth="touched",
+                 last_session="S", body="slashed")
+    )
+    areas = {c.area for c in store.list_coverage(project="p")}
+    assert areas == {"ext-soap", "ext/soap"}
+    assert store.get_coverage("p", "ext-soap").body == "unrelated"

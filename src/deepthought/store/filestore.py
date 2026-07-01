@@ -221,11 +221,19 @@ class FileStore(Store):
     def save_coverage(self, coverage: Coverage) -> Coverage:
         path = self._coverage_path(coverage.project, coverage.area)
         self._write(path, coverage.to_markdown())
-        # Migrate: drop a stale record this area wrote under the old slug, so an
-        # upgraded store does not keep two files (and two list entries) for it.
+        # Migrate: drop a stale record THIS area wrote under the old slug, so an
+        # upgraded store does not keep two files for it. Only remove the legacy
+        # file if it genuinely holds this same area — never a different area whose
+        # own (new-slug) filename happens to equal this area's legacy filename
+        # (e.g. real `ext-soap` vs legacy of `ext/soap`).
         legacy = self._legacy_coverage_path(coverage.project, coverage.area)
         if legacy != path and legacy.exists():
-            legacy.unlink()
+            try:
+                existing = Coverage.from_markdown(self._read(legacy))
+            except Exception:
+                existing = None
+            if existing is not None and existing.area == coverage.area:
+                legacy.unlink()
         return coverage
 
     def get_coverage(self, project: str, area: str) -> Coverage | None:

@@ -361,7 +361,9 @@ class DiscoverSession(BaseSession):
         # load, outcome 'blocked') nothing was surveyed, so recording the areas
         # as read would corrupt the coverage signal operators rely on before
         # VERIFY. Nothing outside the scope allowlist is ever covered.
-        inputs_read = self.sarif_path is not None and envelope.outcome.value != "blocked"
+        # bool(): a blank sarif_path ("" / "--sarif '' ") is no input, matching
+        # the worker's `if sarif_path` check — so it records no coverage.
+        inputs_read = bool(self.sarif_path) and envelope.outcome.value != "blocked"
         if inputs_read:
             coverage_refs = self._write_read_coverage(store, project, session_id, root)
         else:
