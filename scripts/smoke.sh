@@ -8,9 +8,21 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY="${ROOT}/.venv/bin/python"
 DT="${ROOT}/.venv/bin/deepthought"
 STATE="$(mktemp -d)/state"
 export DEEPTHOUGHT_STATE="$STATE"
+
+# Self-heal: a cold/stale editable install can drop src from sys.path. Ensure
+# the package is importable before running anything through the console script.
+if ! "$PY" -c "import deepthought" >/dev/null 2>&1; then
+  echo "deepthought not importable — (re)installing editable..."
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install --python "${ROOT}/.venv" -e "$ROOT" >/dev/null
+  else
+    "$PY" -m pip install -e "$ROOT" >/dev/null
+  fi
+fi
 
 say() { printf '\n=== %s ===\n' "$1"; }
 
