@@ -32,6 +32,11 @@ class IngestResult:
     hints: tuple[str, ...] = ()
     detail_ref: str | None = None
     reason: str | None = None
+    # The validated Envelope on success, None on rejection. The orchestrator
+    # reads teach-back fields from THIS, never from the raw payload it handed in
+    # — so a worker that returns an untyped dict is only ever seen through the
+    # Conductor's validated view.
+    envelope: Envelope | None = None
 
 
 @dataclass
@@ -69,6 +74,7 @@ class Conductor:
             primitives_added=added,
             hints=tuple(envelope.next_step_hints),
             detail_ref=envelope.detail_ref,
+            envelope=envelope,
         )
 
     def _validate(self, raw: Envelope | dict) -> Envelope | None:

@@ -67,6 +67,11 @@ from ..store import NotFoundError, Store
 _ENVELOPE_VERSION = "1.0"
 _WORKER_ID = "marvin-discover"
 
+# The envelope's CoverageDelta.area is a length-capped Short field. Scope
+# allowlist entries are uncapped, so an over-long area is omitted from the
+# envelope delta (the full Coverage record is still written to the Store).
+_COVERAGE_AREA_MAX = 128
+
 _FINDING_ID = re.compile(r"^F-(\d+)$")
 
 
@@ -182,9 +187,14 @@ def _run_marvin_worker(
         # method is CoverageMethod.read for every 002 coverage record), not
         # 'static' (a tooling pass) and never 'fuzz' (needs the sandbox). Depth is
         # 'touched': a static reasoning pass surveyed but did not exhaust the area.
+        # The envelope's area field is length-capped; a scope entry longer than
+        # the cap is omitted from the delta here (the orchestrator still records
+        # the full, uncapped Coverage record for it in _write_read_coverage), so
+        # an over-long scope path never fails the whole envelope's validation.
         coverage_delta=[
             {"area": area, "method": "read", "depth": "touched"}
             for area in project.scope_allowlist
+            if len(area) <= _COVERAGE_AREA_MAX
         ],
         next_step_hints=_hints(findings, primitives),
         detail_ref=detail_ref,
@@ -284,7 +294,12 @@ class DiscoverSession(BaseSession):
         conductor = Conductor()
         result = conductor.ingest(envelope)
         self.conductor = conductor
-        self.envelope = envelope
+        # Read the VALIDATED envelope back from the Conductor, never the raw
+        # payload we handed in. If the worker returned an untyped dict, `envelope`
+        # is still a dict here; `result.envelope` is the schema-validated view
+        # (None on rejection). This is the firewall: the orchestrator only ever
+        # touches typed, validated fields.
+        self.envelope = result.envelope
 
         if not result.ok:
             # A rejected envelope updates no ledger and writes no coverage; the
@@ -302,9 +317,10 @@ class DiscoverSession(BaseSession):
                 ),
             )
 
-        # Past ingest, ``envelope`` is a validated Envelope. Everything the
-        # orchestrator teaches back is derived from the typed envelope it
-        # ingested — not from any worker free-text.
+        # Past ingest, ``result.envelope`` is the validated Envelope. Everything
+        # the orchestrator teaches back is derived from that typed envelope — not
+        # from any worker free-text and not from the raw payload.
+        envelope = result.envelope
         n_findings = len(envelope.findings_written)
         n_primitives = len(envelope.primitives)
 

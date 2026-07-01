@@ -134,11 +134,15 @@ def load_sarif(path: str) -> dict:
     that is not valid JSON, not a SARIF-shaped object, or not version 2.1.0
     raises :class:`SarifError`.
     """
-    with open(path, encoding="utf-8") as handle:
-        try:
+    try:
+        with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
-        except json.JSONDecodeError as exc:
-            raise SarifError(f"file is not valid JSON: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SarifError(f"file is not valid JSON: {exc}") from exc
+    except OSError as exc:
+        # Missing file, a directory, a permission error — a read failure is a
+        # blocked worker, not an orchestrator crash. Callers handle SarifError.
+        raise SarifError(f"could not read SARIF file {path!r}: {exc}") from exc
     if not isinstance(data, dict):
         raise SarifError("SARIF document must be a JSON object")
     if data.get("version") != SARIF_VERSION:
@@ -159,9 +163,21 @@ def _runs(sarif: dict) -> list:
 
 
 def _rules_index(run: dict) -> dict:
-    """Map ruleId -> rule object for a run, so tags and helpUri resolve."""
-    driver = (run.get("tool") or {}).get("driver") or {}
-    rules = driver.get("rules") or []
+    """Map ruleId -> rule object for a run, so tags and helpUri resolve.
+
+    SARIF is untrusted: every nested access is type-checked. A ``tool``,
+    ``driver``, or ``rules`` of the wrong type yields an empty index rather than
+    an ``AttributeError``.
+    """
+    tool = run.get("tool")
+    if not isinstance(tool, dict):
+        return {}
+    driver = tool.get("driver")
+    if not isinstance(driver, dict):
+        return {}
+    rules = driver.get("rules")
+    if not isinstance(rules, list):
+        return {}
     index: dict = {}
     for rule in rules:
         if isinstance(rule, dict) and isinstance(rule.get("id"), str):
@@ -170,7 +186,9 @@ def _rules_index(run: dict) -> dict:
 
 
 def _message_text(result: dict) -> str | None:
-    message = result.get("message") or {}
+    message = result.get("message")
+    if not isinstance(message, dict):
+        return None
     text = message.get("text")
     if isinstance(text, str) and text.strip():
         return text.strip()
@@ -178,14 +196,26 @@ def _message_text(result: dict) -> str | None:
 
 
 def _first_location(result: dict) -> tuple[str | None, int | None]:
-    """Return (uri, startLine) from the first physicalLocation, if any."""
-    locations = result.get("locations") or []
+    """Return (uri, startLine) from the first physicalLocation, if any.
+
+    Every nested structure is type-checked: a malformed ``locations`` list (e.g.
+    ``["not an object"]``) is skipped rather than dereferenced.
+    """
+    locations = result.get("locations")
+    if not isinstance(locations, list):
+        return None, None
     for loc in locations:
-        physical = (loc or {}).get("physicalLocation") or {}
-        artifact = physical.get("artifactLocation") or {}
+        if not isinstance(loc, dict):
+            continue
+        physical = loc.get("physicalLocation")
+        if not isinstance(physical, dict):
+            continue
+        artifact = physical.get("artifactLocation")
+        if not isinstance(artifact, dict):
+            continue
         uri = artifact.get("uri")
-        region = physical.get("region") or {}
-        start_line = region.get("startLine")
+        region = physical.get("region")
+        start_line = region.get("startLine") if isinstance(region, dict) else None
         if isinstance(uri, str) and uri:
             line = start_line if isinstance(start_line, int) else None
             return uri, line
@@ -193,16 +223,21 @@ def _first_location(result: dict) -> tuple[str | None, int | None]:
 
 
 def _rule_help_uri(rule: dict | None) -> str | None:
-    if not rule:
+    if not isinstance(rule, dict):
         return None
     uri = rule.get("helpUri")
     return uri if isinstance(uri, str) and uri else None
 
 
 def _rule_tags(rule: dict | None) -> list[str]:
-    if not rule:
+    if not isinstance(rule, dict):
         return []
-    tags = (rule.get("properties") or {}).get("tags") or []
+    properties = rule.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    tags = properties.get("tags")
+    if not isinstance(tags, list):
+        return []
     return [t for t in tags if isinstance(t, str)]
 
 
@@ -216,7 +251,10 @@ def _accepted_results(sarif: dict):
         if not isinstance(run, dict):
             continue
         index = _rules_index(run)
-        for result in run.get("results") or []:
+        results = run.get("results")
+        if not isinstance(results, list):
+            continue
+        for result in results:
             if not isinstance(result, dict):
                 continue
             if _message_text(result) is None:
@@ -246,9 +284,13 @@ def sarif_to_findings(sarif: dict, *, project: str, id_start: int = 1) -> list[F
         rule_id = result.get("ruleId")
         rule_id = rule_id if isinstance(rule_id, str) else None
 
-        summary = message
+        # OSV summaries are single-line. SARIF message.text may be multi-line
+        # (untrusted), so take only its first line into the summary; the full
+        # message still goes into the body below.
+        first_line = message.splitlines()[0] if message.splitlines() else message
+        summary = first_line
         if rule_id:
-            summary = f"{rule_id}: {message}"
+            summary = f"{rule_id}: {first_line}"
         summary = summary[:_SUMMARY_MAX]
 
         references: list[Reference] = []

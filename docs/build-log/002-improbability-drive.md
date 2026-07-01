@@ -58,6 +58,27 @@ and a PR opened with `@codex review` / `/gemini review` requested. Per the
 directive, silence / quota / error is an incomplete review, never a pass — so the
 merge and the advance to 003 wait on a real review clearing **and** Mahdi's go.
 
+## Review round 1 — PR #1 (gemini-code-assist + chatgpt-codex-connector)
+
+Both external review bots ran on push. Every finding was legitimate hardening of
+the untrusted-input surface (SARIF ingest and the MAP walk) and was addressed
+test-first. No safety regression; the envelope firewall and read-only posture are
+unchanged. **pytest 151 → 169** (+18 hardening tests; none weakened). Both smokes
+still green; 002 acceptance intact (MAP coverage=1, DISCOVER=3 candidates, check
+OK, ledger=2 primitives).
+
+| Finding (severity) | Resolution |
+| --- | --- |
+| MAP path traversal / scope widening — an absolute or `../` scope entry walked outside root (security-critical) | `MapSession._contained_area` resolves each area under the root and refuses anything escaping it; refused areas are never walked or recorded, and are surfaced in the summary/next-steps. |
+| DISCOVER crashes if the worker returns a valid untyped `dict` (high) | `Conductor.ingest` now returns the validated `Envelope` (`IngestResult.envelope`); the orchestrator reads teach-back fields only from that validated view, never the raw payload. |
+| SARIF walkers crash on wrong-typed fields — `tool`/`driver`/`message`/`locations`/`results`/`properties`/`tags` (high) | Every nested access in `sarif.py` is `isinstance`-checked; malformed entries are skipped, never dereferenced. |
+| `load_sarif` doesn't handle `OSError` (medium) | File I/O wrapped; a missing file / directory / permission error raises `SarifError` (a blocked worker), not an unhandled crash. |
+| OSV `summary` may be multi-line (medium) | Summary takes only the first line of `message.text`; full message still goes to the body. |
+| Over-long scope path breaks the whole envelope — `CoverageDelta.area` capped at 128 (P2) | Areas beyond the cap are omitted from the envelope delta; the full, uncapped `Coverage` record is still written to the Store. |
+
+Pushed; `@codex review` / `/gemini review` re-requested. Still **not merged** —
+awaiting a clean external review pass and Mahdi's go.
+
 ## Next feature
 
 **003 — Execution sandbox and VERIFY.** HARD STOP: the sandbox (ephemeral microVM,

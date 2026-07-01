@@ -87,10 +87,18 @@ class MapSession(BaseSession):
             )
 
         coverage_refs: list[str] = []
+        refused: list[str] = []
         explored = 0
         touched = 0
         for area in project.scope_allowlist:
-            files_found = self._walk_area(root, area)
+            contained_path = self._contained_area(root, area)
+            if contained_path is None:
+                # The area resolves outside the repository root (absolute path or
+                # a ../ escape). Refuse it: never walk it, never record it as
+                # covered. Least privilege — MAP cannot widen scope beyond root.
+                refused.append(area)
+                continue
+            files_found = self._count_files(contained_path)
             depth = CoverageDepth.explored if files_found else CoverageDepth.touched
             if files_found:
                 explored += 1
@@ -107,25 +115,47 @@ class MapSession(BaseSession):
             store.save_coverage(coverage)
             coverage_refs.append(coverage.ref)
 
+        refused_note = ""
+        if refused:
+            refused_note = (
+                f" Refused {len(refused)} area(s) that resolve outside the root "
+                f"(containment): {', '.join(refused)}."
+            )
         summary = (
             f"Mapped {len(coverage_refs)} in-scope area(s) of {project.id!r} "
             f"under {str(root)!r}, read-only: {explored} explored, {touched} "
-            f"touched. No code executed; scope unchanged."
+            f"touched. No code executed; scope unchanged.{refused_note}"
         )
         return SessionOutcome(
             summary=summary,
-            next_steps=self._suggest_next(project.scope_allowlist),
+            next_steps=self._suggest_next(project.scope_allowlist, refused),
             coverage_changed=coverage_refs,
         )
 
     @staticmethod
-    def _walk_area(root: Path, area: str) -> int:
-        """Count files under ``root/area``, READ-ONLY. Zero if it is missing.
+    def _contained_area(root: Path, area: str) -> Path | None:
+        """Resolve ``area`` under ``root`` iff it stays inside ``root``.
+
+        Returns the resolved path when it is strictly within the repository root,
+        else None. An absolute ``area`` (``/etc``) or a parent-traversal
+        (``../secret``) resolves outside the root and is refused — MAP never
+        reads or records a surface beyond the authorized target root.
+        """
+        resolved_root = root.resolve()
+        try:
+            area_root = resolved_root.joinpath(area).resolve()
+            area_root.relative_to(resolved_root)
+        except (ValueError, RuntimeError, OSError):
+            return None
+        return area_root
+
+    @staticmethod
+    def _count_files(area_root: Path) -> int:
+        """Count files under a contained area, READ-ONLY. Zero if it is missing.
 
         Walks with :meth:`pathlib.Path.rglob`; it lists directory entries only
         and never opens or executes any target file.
         """
-        area_root = root / area
         if not area_root.exists():
             return 0
         return sum(1 for p in area_root.rglob("*") if p.is_file())
@@ -143,9 +173,15 @@ class MapSession(BaseSession):
         )
 
     @staticmethod
-    def _suggest_next(scope_allowlist: list[str]) -> str:
+    def _suggest_next(scope_allowlist: list[str], refused: list[str]) -> str:
         areas = ", ".join(scope_allowlist) or "(none)"
-        return (
+        step = (
             f"Run a DISCOVER session over the mapped in-scope areas ({areas}) to "
             f"reason over code and any SARIF for candidate findings."
         )
+        if refused:
+            step += (
+                f" Fix {len(refused)} scope entry(ies) that resolve outside the "
+                f"root and were refused: {', '.join(refused)}."
+            )
+        return step
