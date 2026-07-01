@@ -830,3 +830,35 @@ def test_locationless_result_dropped_when_scope_empty():
     assert sarif_to_findings(sarif, project="p", scope=["  "]) == []
     assert len(sarif_to_findings(sarif, project="p", scope=["app"])) == 1
     assert len(sarif_to_findings(sarif, project="p", scope=None)) == 1
+
+
+def test_ruleid_capability_takes_precedence_over_tag():
+    # ruleId maps to deserialize:untrusted; a cwe-89 tag would map to inject:sql,
+    # but tags are only a fallback when the ruleId matches nothing.
+    def sarif(rule_id, tags):
+        return {
+            "version": "2.1.0",
+            "runs": [
+                {
+                    "tool": {"driver": {"rules": [{"id": rule_id, "properties": {"tags": tags}}]}},
+                    "results": [
+                        {
+                            "ruleId": rule_id,
+                            "message": {"text": "x"},
+                            "locations": [{"physicalLocation": {"artifactLocation": {"uri": "app/a.py"}, "region": {"startLine": 1}}}],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    s = sarif("java/unsafe-deserialization", ["external/cwe/cwe-89"])
+    f = sarif_to_findings(s, project="p")
+    p = sarif_to_primitives(s, finding_ids=[x.id for x in f])
+    assert p and p[0].kind == "deserialize:untrusted"
+
+    # A ruleId that maps to nothing falls back to the tag.
+    s2 = sarif("py/style-only", ["external/cwe/cwe-89"])
+    f2 = sarif_to_findings(s2, project="p")
+    p2 = sarif_to_primitives(s2, finding_ids=[x.id for x in f2])
+    assert p2 and p2[0].kind == "inject:sql"

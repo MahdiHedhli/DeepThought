@@ -462,13 +462,25 @@ def _match_capability(rule_id: str | None, tags: list[str]) -> str | None:
     # Normalise underscores to hyphens so `\b` (which treats `_` as a word char)
     # still tokenises underscore-style ids: sql_injection, path_traversal,
     # unsafe_deserialization all match their hyphen/word needles.
-    haystacks = [
-        h.lower().replace("_", "-") for h in ([rule_id] if rule_id else []) + list(tags)
-    ]
-    for pattern, capability in _HEURISTIC_RE:
-        for hay in haystacks:
-            if pattern.search(hay):
+    def _match(hay: str) -> str | None:
+        norm = hay.lower().replace("_", "-")
+        for pattern, capability in _HEURISTIC_RE:
+            if pattern.search(norm):
                 return capability
+        return None
+
+    # The ruleId takes precedence: tags are only consulted when the ruleId maps
+    # to nothing (per the sarif-ingest contract). Otherwise a broad tag (e.g. a
+    # cwe-89 tag on a `unsafe-deserialization` rule) could override the ruleId's
+    # own, more specific capability.
+    if rule_id:
+        cap = _match(rule_id)
+        if cap is not None:
+            return cap
+    for tag in tags:
+        cap = _match(tag)
+        if cap is not None:
+            return cap
     return None
 
 
