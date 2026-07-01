@@ -105,7 +105,9 @@ class SandboxSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     image: Ref
-    command: list[Short]
+    # At least one argv token: an empty command would run the image's default
+    # entrypoint/cmd — not the minimized repro. A repro must be explicit.
+    command: list[Short] = Field(min_length=1)
     repro_ref: Ref
     workdir: PathStr = "/work"
     env: dict[Short, Short] = Field(default_factory=dict)

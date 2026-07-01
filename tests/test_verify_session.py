@@ -36,6 +36,7 @@ from deepthought.protocol.session import SessionOutcome
 from deepthought.sandbox import (
     NoopSandbox,
     Sandbox,
+    SandboxError,
     SandboxPolicy,
     SandboxResult,
     SandboxSpec,
@@ -443,6 +444,22 @@ def test_verify_tears_down_the_sandbox_even_if_run_raises(state_dir):
 
     assert events == ["run", "teardown"]
     # The finding was never promoted by a failed run.
+    assert store.get_finding("F-0007").status is FindingStatus.candidate
+
+
+def test_verify_raises_if_sandbox_returns_no_result(state_dir):
+    """Defensive: a buggy backend that returns None instead of a SandboxResult must
+    raise, not AttributeError on result.reproduced. The finding is not promoted."""
+
+    class _NoneSandbox(NoopSandbox):
+        def run(self, spec):
+            super().run(spec)
+            return None
+
+    store = _seeded_store(state_dir)
+    with pytest.raises(SandboxError):
+        run_session(store, GATE, _verify(_NoneSandbox(make_result())))
+
     assert store.get_finding("F-0007").status is FindingStatus.candidate
 
 

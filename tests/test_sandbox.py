@@ -120,6 +120,12 @@ def test_spec_command_must_be_argv_list_not_shell_string():
         make_spec(command="/repro/run --input /work/case && curl evil.example")
 
 
+def test_spec_requires_a_non_empty_command():
+    # An empty command would run the image's default entrypoint, not the repro.
+    with pytest.raises(ValidationError):
+        make_spec(command=[])
+
+
 def test_spec_forbids_unknown_fields():
     with pytest.raises(ValidationError):
         make_spec(shell=True)
@@ -271,13 +277,39 @@ def test_build_command_strips_image_whitespace():
     assert padded not in argv          # the padded form never is
 
 
-def test_build_command_renders_stop_timeout_grace():
-    """--stop-timeout (the SIGKILL grace period on stop) is rendered from
-    wall_timeout_seconds. The wall-clock EXECUTION limit is enforced externally by
-    the runner, not by this flag — but the flag is still present and bounded."""
-    argv = DockerSandbox().build_command(make_spec())
+def test_build_command_refuses_empty_user():
+    """An empty / whitespace / ':gid' user has no uid part; it would render an
+    empty --user and let docker fall back to the image user (maybe root). Refused."""
+    for bad in ("", "   ", ":100", " :100"):
+        with pytest.raises(SandboxError):
+            DockerSandbox().build_command(make_spec(policy=SandboxPolicy(user=bad)))
+
+
+def test_build_command_refuses_invalid_env_key():
+    """A malformed env key ('=', whitespace, dash, leading digit) is refused —
+    it would produce a broken --env token."""
+    for bad in ("BAD-KEY", "1BAD", "FOO=X", "FOO BAR", ""):
+        with pytest.raises(SandboxError):
+            DockerSandbox().build_command(make_spec(env={bad: "x"}))
+
+
+def test_build_command_accepts_valid_env_keys():
+    argv = DockerSandbox().build_command(make_spec(env={"LANG": "C", "_X9": "y"}))
+    assert "LANG=C" in argv
+    assert "_X9=y" in argv
+
+
+def test_build_command_stop_timeout_is_a_short_fixed_grace():
+    """--stop-timeout is a small FIXED teardown grace, decoupled from
+    wall_timeout_seconds (a large wall timeout must not block teardown for
+    minutes). The wall-clock execution limit is enforced externally by the runner."""
+    argv = DockerSandbox().build_command(
+        make_spec(policy=SandboxPolicy(wall_timeout_seconds=300))
+    )
     assert "--stop-timeout" in argv
-    assert argv[argv.index("--stop-timeout") + 1] == str(SandboxPolicy().wall_timeout_seconds)
+    grace = int(argv[argv.index("--stop-timeout") + 1])
+    assert 0 < grace <= 10                 # short and fixed
+    assert grace != 300                    # NOT the wall timeout
 
 
 def test_build_command_renders_no_host_mount():

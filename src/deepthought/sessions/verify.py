@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from ..protocol.gate import GateContext
 from ..protocol.session import BaseSession, SessionOutcome
-from ..sandbox import Sandbox, SandboxResult, SandboxSpec
+from ..sandbox import Sandbox, SandboxError, SandboxResult, SandboxSpec
 from ..schema import (
     Finding,
     FindingStatus,
@@ -162,6 +162,12 @@ class VerifySession(BaseSession):
         # target code here.
         with self.sandbox as sandbox:
             result = sandbox.run(self.spec)
+        if result is None:
+            # Defensive: the Sandbox contract returns a typed SandboxResult. A
+            # buggy backend returning None must not AttributeError downstream.
+            raise SandboxError(
+                f"sandbox {type(self.sandbox).__name__} returned no SandboxResult"
+            )
         self.sandbox_result = result
 
         # --- page the evidence artifact (the firewall boundary) ---

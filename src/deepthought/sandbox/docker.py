@@ -21,6 +21,8 @@ Two surfaces:
 
 from __future__ import annotations
 
+import re
+
 from .base import (
     Sandbox,
     SandboxError,
@@ -29,6 +31,18 @@ from .base import (
     SandboxResult,
     SandboxSpec,
 )
+
+# A short, FIXED grace period (seconds) for --stop-timeout: the window docker
+# waits after SIGTERM before SIGKILL when tearing a container down. It is
+# deliberately NOT policy.wall_timeout_seconds — coupling the teardown grace to a
+# large wall timeout would block the runner for minutes when killing a hung
+# container. The wall-clock EXECUTION limit is enforced externally by the runner.
+_STOP_GRACE_SECONDS = 2
+
+# POSIX-style environment variable name: an ASCII letter/underscore then letters,
+# digits, underscores. Rejects names with '=', whitespace, dashes, a leading
+# digit, unicode, or empties — which would malform the rendered --env token.
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 # The uid/name spellings docker runs as root. Only the part BEFORE ':' (the
 # user/uid) determines privilege, so we match against that, case-folded and
@@ -80,6 +94,14 @@ class DockerSandbox(Sandbox):
         if policy.run_as_non_root:
             user = policy.user
             uid_part = user.split(":", 1)[0].strip().casefold()
+            if not uid_part:
+                # An empty user/uid part (empty, whitespace, or ":gid") would
+                # render an empty --user and let docker fall back to the image's
+                # user (possibly root). Refuse it.
+                raise SandboxError(
+                    f"run_as_non_root is set but user {user!r} has no uid/name part;"
+                    " refusing to render a run with an empty --user"
+                )
             if uid_part in _ROOT_UIDS:
                 raise SandboxError(
                     f"run_as_non_root is set but user {user!r} resolves to root;"
@@ -87,17 +109,17 @@ class DockerSandbox(Sandbox):
                 )
             argv += ["--user", user]
 
-        # Resource + wall-time bounds. Presence is fixed and tested.
+        # Resource bounds. Presence is fixed and tested.
         argv += ["--pids-limit", str(policy.pids_limit)]
         argv += ["--memory", f"{policy.memory_mib}m"]
         argv += ["--cpus", _format_cpus(policy.cpus)]
-        # NOTE: --stop-timeout only sets the SIGKILL grace period after a stop
-        # signal; it does NOT cap total run time or terminate a hung container. The
-        # wall-clock EXECUTION limit (wall_timeout_seconds) must be enforced
-        # externally by the runner when a real backend is wired (a distinct,
-        # signed-off change). It is rendered here so the ephemeral container is
-        # still bounded on teardown.
-        argv += ["--stop-timeout", str(policy.wall_timeout_seconds)]
+        # --stop-timeout is a short, FIXED teardown grace (SIGKILL delay after a
+        # stop signal) — NOT policy.wall_timeout_seconds, which would block the
+        # runner for minutes when killing a hung container. The wall-clock
+        # EXECUTION limit (wall_timeout_seconds) is enforced externally by the
+        # runner when a real backend is wired (a distinct, signed-off change); it
+        # is not a docker run flag.
+        argv += ["--stop-timeout", str(_STOP_GRACE_SECONDS)]
 
         argv += ["--workdir", spec.workdir]
 
@@ -107,8 +129,15 @@ class DockerSandbox(Sandbox):
         # (Deliberately: no -v / --volume / --mount is appended.)
 
         # Only spec.env — explicit and bounded. No host env leaks in. With an
-        # empty env nothing is rendered.
+        # empty env nothing is rendered. Each key must be a valid POSIX env name:
+        # a malformed key ('=', whitespace, dash, leading digit) would produce a
+        # broken --env token and could fail or confuse the container startup.
         for key in sorted(spec.env):
+            if not _ENV_KEY_RE.fullmatch(key):
+                raise SandboxError(
+                    f"invalid environment variable name {key!r}: must match"
+                    " [A-Za-z_][A-Za-z0-9_]*"
+                )
             argv += ["--env", f"{key}={spec.env[key]}"]
 
         # The image, then the untrusted argv as separate tokens (never joined

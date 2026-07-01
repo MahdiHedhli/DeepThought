@@ -113,7 +113,7 @@ user                 str   = "65534:65534" # -> --user <uid>:<gid>  (never root 
 pids_limit           int   = 128         # -> --pids-limit 128
 memory_mib           int   = 512         # -> --memory 512m
 cpus                 float = 1.0         # -> --cpus 1
-wall_timeout_seconds int   = 30          # -> --stop-timeout 30 (SIGKILL grace only; wall-clock EXECUTION limit is runner-enforced)
+wall_timeout_seconds int   = 30          # NOT a docker flag; the wall-clock EXECUTION limit is enforced externally by the runner
 ephemeral            bool  = True        # -> --rm   (built fresh per run, torn down after)
 ```
 
@@ -150,12 +150,12 @@ docker run
   --pids-limit <N>                       # policy.pids_limit
   --memory <N>m                          # policy.memory_mib
   --cpus <N>                             # policy.cpus
-  --stop-timeout <N>                     # policy.wall_timeout_seconds (SIGKILL grace on stop)
+  --stop-timeout <grace>                 # SHORT FIXED teardown grace (NOT wall_timeout_seconds)
   --workdir <spec.workdir>               # spec.workdir
   # (NO -v / --mount host bind — allow_host_mounts enforced off)
-  # (NO --env from host; only spec.env, explicit and bounded)
-  <spec.image>                           # validated: refused if it starts with '-'
-  <spec.command ...>                     # argv, never a shell string
+  # (NO --env from host; only spec.env — keys validated [A-Za-z_][A-Za-z0-9_]*)
+  <spec.image>                           # validated: stripped; refused if empty or starts with '-'
+  <spec.command ...>                     # argv (>= 1 token), never a shell string
 ```
 
 Argv discipline:
@@ -165,11 +165,13 @@ Argv discipline:
   with this (or any untrusted) input anywhere in 003.
 - **Every hardening clause is present or the build fails a test.** A missing
   `--network=none`, a `root` user (in any spelling — `root:root`, `root:0`, a
-  padded/upper-case variant), an absent limit, a rendered host mount, or an image
-  ref beginning with `-` (argument injection) is a test failure. `--stop-timeout`
-  renders `wall_timeout_seconds` as the SIGKILL grace on the ephemeral (`--rm`)
-  container; the wall-clock EXECUTION limit itself is enforced externally by the
-  runner when a real backend is wired, not by this flag.
+  padded/upper-case variant), an empty `--user`, an absent limit, a rendered host
+  mount, an image ref that is empty or begins with `-` (argument injection), an
+  empty command, or a malformed env-var name is a test failure. `--stop-timeout`
+  renders a short FIXED teardown grace (a large wall timeout must not block
+  teardown for minutes); the wall-clock EXECUTION limit itself is enforced
+  externally by the runner when a real backend is wired, not by any `docker run`
+  flag.
 - **`run()` is the hard stop.** `DockerSandbox.run` is guarded by
   `execution_enabled` (default `False`). With the flag off — the only shipped state
   — `run()` raises `SandboxExecutionDisabled` and executes nothing. No test, smoke,

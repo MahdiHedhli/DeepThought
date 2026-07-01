@@ -106,10 +106,12 @@ policy renderer behind the `build_command` convenience wrapper):
 - `pids_limit` — a positive integer cap, default `128` (renders `--pids-limit`).
 - `memory_mib` — a positive MiB cap, default `512` (renders `--memory 512m`).
 - `cpus` — a positive fractional CPU cap, default `1.0` (renders `--cpus`).
-- `wall_timeout_seconds` — a positive wall-clock timeout, default `30`. Renders
-  `--stop-timeout` (the SIGKILL grace period on stop); the wall-clock EXECUTION
-  limit itself is enforced externally by the runner when a real backend is wired,
-  not by this flag. The ephemeral container is `--rm`, torn down after.
+- `wall_timeout_seconds` — a positive wall-clock timeout, default `30`. This is
+  **not** rendered as a `docker run` flag: the wall-clock EXECUTION limit is
+  enforced externally by the runner when a real backend is wired. (`--stop-timeout`
+  is rendered separately as a short, fixed teardown grace so killing a hung
+  container never blocks the runner for minutes.) The ephemeral container is
+  `--rm`, torn down after.
 - `ephemeral` — default `True` (renders `--rm`; built fresh per run, torn down
   after; no persistence of target code or side effects beyond the paged evidence).
 
