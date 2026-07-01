@@ -487,113 +487,90 @@ class SiblingHuntSession(BaseSession):
         ``local_path``, never the source's checkout root.
         """
         assert gated  # only ever called for a proceed-at-gate target
+        # PER-TARGET ISOLATION: ALL fallible per-target work is inside ONE guard, so
+        # ANY failure for one target — a bad checkout path, a Store read OR write
+        # error, envelope validation, the firewall filter, or ingest — is contained
+        # to that target, recorded, surfaced in the teach-back, and never aborts the
+        # multi-target hunt. saved_ids / saved_cov accumulate what actually reached
+        # disk so a mid-batch failure still reports exactly the persisted set.
+        # BaseException (KeyboardInterrupt/SystemExit) still propagates.
+        saved_ids: list[str] = []
+        saved_cov: list[str] = []
         try:
-            # ALL fallible per-target work is inside this guard so one target's
-            # failure (a bad checkout path -> OSError, a Store read error, or an
-            # over-cap field the Envelope rejects -> ValidationError) is isolated
-            # to that target and never aborts the whole multi-target hunt. --root
-            # applies to the source only; a named sibling uses its own local_path.
+            # --root applies to the source only; a named sibling uses its own
+            # local_path. Allocate ids authoritatively from persisted Store state,
+            # re-read per target; a failed/rejected target persists nothing, so its
+            # ids stay free and are never reused across targets.
             root = _resolve_checkout(
                 (self.root if is_source else None) or target.local_path
             )
-            # Allocate finding ids authoritatively from persisted Store state,
-            # re-read per target. A rejected target persists nothing (below), so its
-            # ids stay free and are never reused or overwritten across targets.
             id_start = _next_finding_index(store)
             envelope, findings, detail_body = _run_marvin_worker(
                 session_id, target, signature, self.sarif_path, root, id_start
             )
-        except Exception as exc:
-            # PER-TARGET ISOLATION (broad by design): ANY failure processing one
-            # target — a bad checkout path, a Store read error, an over-cap field
-            # the Envelope rejects, etc. — is contained to that target and never
-            # aborts the multi-target hunt. It is recorded and surfaced distinctly
-            # in the teach-back (never silently swallowed). BaseException
-            # (KeyboardInterrupt/SystemExit) still propagates.
-            self.target_outcomes.append(
-                TargetOutcome(
-                    project_id=target.id,
-                    gate_outcome="proceed",
-                    proceeded=True,
-                    reason=f"worker failed for {target.id}: {type(exc).__name__}",
+
+            # VALIDATE the envelope WITHOUT ledgering yet (the firewall runs first).
+            validated = self.conductor._validate(envelope)
+            if validated is None:
+                # MUTATE-ONLY-ON-ACCEPT: a rejected envelope ledgers nothing,
+                # persists nothing, writes no detail or coverage. Its ids stay free.
+                self.target_outcomes.append(
+                    TargetOutcome(
+                        project_id=target.id,
+                        gate_outcome="proceed",
+                        proceeded=True,
+                        reason=(
+                            "worker envelope rejected at ingest "
+                            f"({self.conductor.errors[-1] if self.conductor.errors else 'invalid'})"
+                        ),
+                    )
                 )
+                return
+
+            # ENVELOPE FIREWALL over the side channel. The worker returns the
+            # `findings` OBJECTS alongside the envelope (the envelope carries only
+            # ids). A buggy/out-of-process/compromised worker could return a benign
+            # envelope yet include extra Finding objects. Keep ONLY findings that are
+            # ALL of: attested by the validated envelope (id in findings_written);
+            # bound to THIS target (no cross-project write); NEW (not already in the
+            # Store — no overwrite/hijack by id reuse); DISTINCT within this batch
+            # (dedupe by id — else two same-id objects both pass the not-in-store
+            # check and overwrite each other); and in scope (claimed location inside
+            # the target's allowlist).
+            attested = set(validated.findings_written)
+            kept: list = []
+            seen: set[str] = set()
+            for f in findings:
+                if (
+                    f.id in attested
+                    and f.project == target.id
+                    and f.id not in seen
+                    and store.get_finding(f.id) is None
+                    and _finding_location_in_scope(f, target.scope_allowlist, root)
+                ):
+                    seen.add(f.id)
+                    kept.append(f)
+            kept_ids = seen
+
+            # Ingest a FILTERED envelope so the LEDGER holds only primitives binding
+            # to a KEPT finding — a dropped finding leaves NO dangling ledger
+            # primitive. Coverage deltas are per-area (re-validated against scope
+            # below), not per-finding, so they are unchanged.
+            filtered = validated.model_copy(
+                update={
+                    "findings_written": [
+                        fid for fid in validated.findings_written if fid in kept_ids
+                    ],
+                    "primitives": [
+                        p for p in validated.primitives if p.finding_ref in kept_ids
+                    ],
+                }
             )
-            return
+            validated = self.conductor.ingest(filtered).envelope
+            self.envelopes.append(validated)  # the FILTERED, ledgered envelope
 
-        # VALIDATE the envelope WITHOUT ledgering yet (the firewall runs first).
-        validated = self.conductor._validate(envelope)
-        if validated is None:
-            # MUTATE-ONLY-ON-ACCEPT. A rejected envelope ledgers nothing, persists
-            # nothing, writes no detail or coverage. Its ids stay free.
-            self.target_outcomes.append(
-                TargetOutcome(
-                    project_id=target.id,
-                    gate_outcome="proceed",
-                    proceeded=True,
-                    reason=(
-                        "worker envelope rejected at ingest "
-                        f"({self.conductor.errors[-1] if self.conductor.errors else 'invalid'})"
-                    ),
-                )
-            )
-            return
-
-        # ENVELOPE FIREWALL over the side channel. The worker returns the `findings`
-        # OBJECTS alongside the envelope (the envelope itself carries only ids). A
-        # buggy/out-of-process/compromised worker could return a benign envelope yet
-        # include extra Finding objects. Keep ONLY findings that are, ALL of:
-        #   * attested by the validated envelope (id in findings_written),
-        #   * bound to THIS target (project == target.id) — no cross-project write,
-        #   * NEW (not already in the Store) — never overwrite/hijack an existing
-        #     finding (e.g. a verified one) by id reuse,
-        #   * DISTINCT within this batch (dedupe by id — two same-id objects would
-        #     otherwise both pass the not-in-store check and overwrite each other),
-        #   * in scope (claimed location inside the target's allowlist).
-        attested = set(validated.findings_written)
-        kept: list = []
-        seen: set[str] = set()
-        for f in findings:
-            if (
-                f.id in attested
-                and f.project == target.id
-                and f.id not in seen
-                and store.get_finding(f.id) is None
-                and _finding_location_in_scope(f, target.scope_allowlist, root)
-            ):
-                seen.add(f.id)
-                kept.append(f)
-        kept_ids = seen
-        findings = kept
-
-        # Ingest a FILTERED envelope so the LEDGER holds only primitives that bind
-        # to a KEPT finding — a dropped finding (unattested / cross-project / id
-        # reuse / out-of-scope) leaves NO dangling primitive in the ledger. Coverage
-        # deltas are per-area (re-validated against scope below), not per-finding, so
-        # they are unchanged.
-        filtered = validated.model_copy(
-            update={
-                "findings_written": [
-                    fid for fid in validated.findings_written if fid in kept_ids
-                ],
-                "primitives": [
-                    p for p in validated.primitives if p.finding_ref in kept_ids
-                ],
-            }
-        )
-        result = self.conductor.ingest(filtered)
-        validated = result.envelope
-        self.envelopes.append(validated)  # the FILTERED, ledgered envelope
-        saved_ids: list[str] = []
-        saved_cov: list[str] = []
-        try:
-            # Accepted: ONLY NOW mutate the Store — persist the variant findings and
-            # page the detail, from the worker's built (now validated) output. These
-            # writes are ALSO inside the per-target isolation guard: a Store write
-            # failure (permission/disk) for THIS target is recorded and surfaced as
-            # that target's failure and the hunt continues to the next target — it
-            # never aborts the whole session. saved_ids / saved_cov accumulate what
-            # actually reached disk so a mid-batch failure still reports it.
-            for finding in findings:
+            # Accepted: ONLY NOW mutate the Store, accumulating what reaches disk.
+            for finding in kept:
                 store.save_finding(finding)
                 saved_ids.append(finding.id)
             store.write_detail(session_id, f"{target.id}-sibling-hunt.txt", detail_body)
@@ -601,21 +578,18 @@ class SiblingHuntSession(BaseSession):
                 store, target, session_id, validated, root, saved_cov
             )
         except Exception as exc:
-            # A write failure mid-batch may have already persisted SOME variants
-            # and/or SOME coverage. Report EXACTLY those (findings=saved_ids,
-            # coverage=saved_cov) so the session log matches Store state — nothing
-            # persisted is left unreported — and surface the partial failure
-            # distinctly. The hunt continues to the next target.
+            # Any failure above may have persisted SOME findings/coverage already;
+            # report EXACTLY those so the session log matches Store state, surface the
+            # failure distinctly, and continue to the next target.
             self.target_outcomes.append(
                 TargetOutcome(
                     project_id=target.id,
                     gate_outcome="proceed",
                     proceeded=True,
                     reason=(
-                        f"worker failed for {target.id}: {type(exc).__name__} "
-                        f"(store write); {len(saved_ids)} variant(s) and "
-                        f"{len(saved_cov)} coverage record(s) persisted before the "
-                        f"failure"
+                        f"worker failed for {target.id}: {type(exc).__name__}; "
+                        f"{len(saved_ids)} variant(s) and {len(saved_cov)} coverage "
+                        f"record(s) persisted before the failure"
                     ),
                     findings=saved_ids,
                     coverage=saved_cov,
@@ -628,9 +602,8 @@ class SiblingHuntSession(BaseSession):
                 gate_outcome="proceed",
                 proceeded=True,
                 reason=validated.outcome.value,
-                # Report EXACTLY what was persisted (the attested, target-bound,
-                # written set) so the teach-back matches Store state, never the raw
-                # envelope id list.
+                # Report EXACTLY what was persisted so the teach-back matches Store
+                # state, never the raw envelope id list.
                 findings=saved_ids,
                 coverage=saved_cov,
             )

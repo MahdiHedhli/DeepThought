@@ -452,6 +452,50 @@ def test_nonexistent_sarif_surfaces_a_blocked_target_not_silent_zero(state_dir):
     assert variants == []
 
 
+def test_store_read_failure_during_firewall_is_isolated(state_dir, monkeypatch):
+    """A Store READ error during the firewall (store.get_finding) — which runs
+    inside the consolidated per-target guard — is isolated: the target is recorded
+    failed and the OTHER authorized targets still run (no whole-session crash)."""
+    store = FileStore(state_dir)
+    _seed_source(store)
+    _register_sibling(store, "sib-proj")
+
+    real_get = store.get_finding
+    calls = {"n": 0}
+
+    def _flaky_get(fid):
+        # run() reads the source finding F-0007 first; the FIRST firewall novelty
+        # check for a variant id then raises (the source target), the sibling's
+        # later checks succeed.
+        if fid != "F-0007":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("transient store read error")
+        return real_get(fid)
+
+    monkeypatch.setattr(store, "get_finding", _flaky_get)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007",
+        sibling_project_ids=["sib-proj"], sarif_path=SIBLINGS,
+    )
+    record = run_session(store, GATE, session)
+
+    assert record.close_state.value == "clean"   # did NOT crash the whole hunt
+    src_variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    sib_variants = [
+        f for f in store.list_findings(project="sib-proj") if f.status is FindingStatus.candidate
+    ]
+    assert src_variants == []             # source firewall read failed
+    assert len(sib_variants) == 2         # sibling unaffected
+    src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
+    assert "worker failed" in (src_out.reason or "")
+
+
 def test_post_ingest_store_write_failure_is_isolated_and_surfaced(state_dir, monkeypatch):
     """A Store write failure AFTER a successful ingest (e.g. a disk/permission error
     persisting a variant) must be contained to that target — recorded and surfaced
@@ -491,7 +535,7 @@ def test_post_ingest_store_write_failure_is_isolated_and_surfaced(state_dir, mon
     surfaced = (record.body + record.next_steps()).upper()
     assert "FAILED" in surfaced or "BLOCKED" in surfaced
     src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
-    assert "store write" in (src_out.reason or "")
+    assert "persisted before the failure" in (src_out.reason or "")
 
 
 def test_partial_store_write_failure_reports_the_persisted_variants(state_dir, monkeypatch):
@@ -530,7 +574,7 @@ def test_partial_store_write_failure_reports_the_persisted_variants(state_dir, m
     assert persisted_id in record.findings_touched
     src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
     assert src_out.findings == [persisted_id]
-    assert "store write" in (src_out.reason or "")
+    assert "persisted before the failure" in (src_out.reason or "")
     surfaced = (record.body + record.next_steps()).upper()
     assert "FAILED" in surfaced or "BLOCKED" in surfaced
 
