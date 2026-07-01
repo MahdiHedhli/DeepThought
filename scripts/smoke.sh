@@ -13,16 +13,11 @@ DT="${ROOT}/.venv/bin/deepthought"
 STATE="$(mktemp -d)/state"
 export DEEPTHOUGHT_STATE="$STATE"
 
-# Self-heal: a cold/stale editable install can drop src from sys.path. Ensure
-# the package is importable before running anything through the console script.
-if ! "$PY" -c "import deepthought" >/dev/null 2>&1; then
-  echo "deepthought not importable — (re)installing editable..."
-  if command -v uv >/dev/null 2>&1; then
-    uv pip install --python "${ROOT}/.venv" -e "$ROOT" >/dev/null
-  else
-    "$PY" -m pip install -e "$ROOT" >/dev/null
-  fi
-fi
+# Robustness: a cold/stale editable .pth can drop src from sys.path (seen on
+# Python 3.14). Put the package source on PYTHONPATH so every invocation below —
+# the console script and any in-process python — imports deepthought reliably,
+# independent of the editable install's state.
+export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:$PYTHONPATH}"
 
 say() { printf '\n=== %s ===\n' "$1"; }
 

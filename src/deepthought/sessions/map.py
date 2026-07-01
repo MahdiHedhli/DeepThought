@@ -1,0 +1,151 @@
+"""MAP session — record the in-scope attack surface, READ-ONLY (feature 002).
+
+MAP is the first half of the Improbability Drive's reasoning: it walks the
+project's in-scope areas on disk and records what surface exists and how deeply
+it was looked at, as ``Coverage`` records. It is strictly read-only:
+
+* It executes nothing. It walks the filesystem with :meth:`pathlib.Path.rglob`
+  and never runs, imports, or opens target code as anything but a directory
+  listing. There is no code execution and no network transmission here
+  (feature 002 is READ-ONLY per the constitution's sequencing).
+* It never widens scope. It walks only the areas already in
+  ``project.scope_allowlist``; a directory outside the allowlist is never
+  visited. An empty allowlist is held at the gate, so ``run`` only ever sees a
+  project the gate let proceed.
+
+The output is one ``Coverage`` per in-scope area with ``method='read'`` and a
+depth of ``explored`` when files were found or ``touched`` when the area exists
+but is empty. The next session (DISCOVER) reasons over the mapped areas.
+
+A project with no resolvable root (no ``root`` argument and no ``local_path``,
+or a path that does not exist) must not crash the harness: MAP records the gap
+in its next steps and closes clean, so the operator can supply a checkout.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from ..protocol.gate import GateContext
+from ..protocol.session import BaseSession, SessionOutcome
+from ..schema import (
+    Coverage,
+    CoverageDepth,
+    CoverageMethod,
+    Project,
+    SessionType,
+)
+from ..store import NotFoundError, Store
+
+
+class MapSession(BaseSession):
+    type = SessionType.map
+
+    def __init__(self, project_id: str, root: str | None = None):
+        self.project_id = project_id
+        # An explicit root overrides the project's local_path (e.g. a fresh
+        # checkout at a different location). When None, run() falls back to the
+        # project's local_path.
+        self.root = root
+
+    def _project(self, store: Store) -> Project:
+        project = store.get_project(self.project_id)
+        if project is None:
+            raise NotFoundError(f"project {self.project_id!r} not found")
+        return project
+
+    def build_gate_context(self, store: Store) -> GateContext:
+        return GateContext.from_project(self._project(store), self.type)
+
+    def _resolve_root(self, project: Project) -> Path | None:
+        """The directory to walk, or None when there is nothing resolvable."""
+        candidate = self.root or project.local_path
+        if not candidate:
+            return None
+        path = Path(candidate)
+        if not path.exists():
+            return None
+        return path
+
+    def run(self, store: Store, session_id: str) -> SessionOutcome:
+        project = self._project(store)
+        root = self._resolve_root(project)
+
+        # No resolvable checkout: record the gap and close clean. Do not crash.
+        if root is None:
+            requested = self.root or project.local_path or "(none)"
+            return SessionOutcome(
+                summary=(
+                    f"Project {project.id!r}: no readable root to map "
+                    f"(requested {requested!r}). Recorded no coverage."
+                ),
+                next_steps=(
+                    f"Provide a local checkout for {project.id!r} (set the "
+                    f"project's local_path or pass a root), then re-run MAP over "
+                    f"the in-scope areas: {', '.join(project.scope_allowlist) or '(none)'}."
+                ),
+            )
+
+        coverage_refs: list[str] = []
+        explored = 0
+        touched = 0
+        for area in project.scope_allowlist:
+            files_found = self._walk_area(root, area)
+            depth = CoverageDepth.explored if files_found else CoverageDepth.touched
+            if files_found:
+                explored += 1
+            else:
+                touched += 1
+            coverage = Coverage(
+                project=project.id,
+                area=area,
+                method=CoverageMethod.read,
+                depth=depth,
+                last_session=session_id,
+                body=self._area_body(area, files_found),
+            )
+            store.save_coverage(coverage)
+            coverage_refs.append(coverage.ref)
+
+        summary = (
+            f"Mapped {len(coverage_refs)} in-scope area(s) of {project.id!r} "
+            f"under {str(root)!r}, read-only: {explored} explored, {touched} "
+            f"touched. No code executed; scope unchanged."
+        )
+        return SessionOutcome(
+            summary=summary,
+            next_steps=self._suggest_next(project.scope_allowlist),
+            coverage_changed=coverage_refs,
+        )
+
+    @staticmethod
+    def _walk_area(root: Path, area: str) -> int:
+        """Count files under ``root/area``, READ-ONLY. Zero if it is missing.
+
+        Walks with :meth:`pathlib.Path.rglob`; it lists directory entries only
+        and never opens or executes any target file.
+        """
+        area_root = root / area
+        if not area_root.exists():
+            return 0
+        return sum(1 for p in area_root.rglob("*") if p.is_file())
+
+    @staticmethod
+    def _area_body(area: str, files_found: int) -> str:
+        if files_found:
+            return (
+                f"Read-only map of `{area}`: {files_found} file(s) present. "
+                f"Surface recorded; nothing executed. DISCOVER next."
+            )
+        return (
+            f"Read-only map of `{area}`: no files found (area missing or empty). "
+            f"Touched only."
+        )
+
+    @staticmethod
+    def _suggest_next(scope_allowlist: list[str]) -> str:
+        areas = ", ".join(scope_allowlist) or "(none)"
+        return (
+            f"Run a DISCOVER session over the mapped in-scope areas ({areas}) to "
+            f"reason over code and any SARIF for candidate findings."
+        )

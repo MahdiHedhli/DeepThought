@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from deepthought.protocol import GateContext, GateDecision, HermesUltraCodeGate
+from deepthought.protocol import (
+    DefaultGate,
+    GateContext,
+    GateDecision,
+    HermesUltraCodeGate,
+)
+from deepthought.protocol.gate import Gate
 from deepthought.schema import (
     AuthorizationBasis,
     GateOutcome,
@@ -80,3 +86,54 @@ def test_every_hold_and_refuse_carries_a_reason():
         GateDecision(GateOutcome.hold)
     # proceed needs none.
     assert GateDecision(GateOutcome.proceed).reason is None
+
+
+# --- Slice 4: DefaultGate honesty (phase-0 decision 0.1) --------------------
+
+
+def test_default_gate_holds_the_authorization_and_scope_rules():
+    """DefaultGate is a concrete Gate carrying the local rules directly."""
+    assert issubclass(DefaultGate, Gate)
+    gate = DefaultGate()
+    ctx = GateContext.from_project(make_project(), SessionType.status)
+    assert gate.evaluate(ctx).outcome is GateOutcome.proceed
+
+
+def test_hermes_ultra_code_gate_subclasses_default_gate():
+    """The named HermesUltraCode seam delegates to DefaultGate until the real
+    interface is confirmed (phase-0 decision 0.1). It is a thin subclass."""
+    assert issubclass(HermesUltraCodeGate, DefaultGate)
+
+
+def test_default_and_hermes_gates_agree_on_every_outcome():
+    """The seam changes nothing observable: both gates return the same decision
+    for proceed, hold, and refuse cases."""
+    default = DefaultGate()
+    hermes = HermesUltraCodeGate()
+    cases = [
+        GateContext.from_project(make_project(), SessionType.status),
+        GateContext.from_project(
+            make_project(authorization_basis=None), SessionType.status
+        ),
+        GateContext.from_project(
+            make_project(scope_allowlist=[]), SessionType.status
+        ),
+        GateContext(
+            session_type=SessionType.status,
+            source_type=SourceType.blackbox,
+            authorization_basis=AuthorizationBasis.scoped_engagement,
+            authorization_ref=None,
+            scope_allowlist=["x"],
+        ),
+    ]
+    for ctx in cases:
+        d, h = default.evaluate(ctx), hermes.evaluate(ctx)
+        assert d.outcome is h.outcome
+        assert d.reason == h.reason
+
+
+def test_default_gate_refuses_missing_basis_like_hermes():
+    ctx = GateContext.from_project(
+        make_project(authorization_basis=None), SessionType.status
+    )
+    assert DefaultGate().evaluate(ctx).outcome is GateOutcome.refuse
