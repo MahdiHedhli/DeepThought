@@ -520,6 +520,46 @@ def test_promotion_failure_reverts_evidence_ref(state_dir):
     assert not finding.evidence_ref
 
 
+# --- dry-run: report the verdict, mutate the finding nowhere ----------------
+
+
+def test_dry_run_mutates_the_finding_nowhere(state_dir):
+    """A dry-run VERIFY reports the verdict but changes the finding NOWHERE: no
+    status change, no evidence_ref, and NO transition_log entry — a canned,
+    no-execution verdict must not pollute a real candidate's audit history."""
+    store = _seeded_store(state_dir)
+    before = store.get_finding("F-0007")
+    session = VerifySession(
+        "php-src", "F-0007", spec=make_spec(),
+        sandbox=NoopSandbox(make_result(reproduced=False)), dry_run=True,
+    )
+    record = run_session(store, GATE, session)
+
+    after = store.get_finding("F-0007")
+    assert after.status is FindingStatus.candidate
+    assert not after.evidence_ref
+    assert len(after.transition_log) == len(before.transition_log)  # no new entry
+    assert record.findings_touched == []
+    assert record.close_state is CloseState.clean
+    assert "unchanged" in session.outcome.summary.lower()
+
+
+def test_dry_run_does_not_promote_even_on_a_reproducing_result(state_dir):
+    """A dry-run never mutates — even a reproducing canned result leaves the
+    candidate a candidate (the finding lifecycle is untouched)."""
+    store = _seeded_store(state_dir)
+    session = VerifySession(
+        "php-src", "F-0007", spec=make_spec(),
+        sandbox=NoopSandbox(make_result(reproduced=True)), dry_run=True,
+    )
+    run_session(store, GATE, session)
+
+    finding = store.get_finding("F-0007")
+    assert finding.status is FindingStatus.candidate
+    assert not finding.evidence_ref
+    assert finding.transition_log == []
+
+
 # --- unknown finding --------------------------------------------------------
 
 

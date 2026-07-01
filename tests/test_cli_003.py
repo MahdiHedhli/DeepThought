@@ -90,6 +90,25 @@ def test_verify_dry_run_leaves_candidate_a_candidate(tmp_path):
     assert store.get_finding("F-0007").status is FindingStatus.candidate
 
 
+def test_verify_dry_run_does_not_record_a_failed_attempt(tmp_path):
+    """The default dry-run must not pollute the candidate's audit history: with no
+    real execution, no transition_log entry (a false-negative attempt) is written,
+    and no evidence_ref is set — the finding is genuinely unchanged."""
+    state, store = _seeded_state(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["playbook", "verify", "--state", str(state),
+         "--project", "php-src", "--finding", "F-0007"],
+    )
+
+    assert result.exit_code == 0, result.output
+    finding = store.get_finding("F-0007")
+    assert finding.status is FindingStatus.candidate
+    assert finding.transition_log == []   # no false-negative attempt recorded
+    assert not finding.evidence_ref
+
+
 def test_verify_dry_run_never_spawns_a_subprocess(tmp_path, monkeypatch):
     def _boom(*a, **k):  # pragma: no cover - must never run
         raise AssertionError("playbook verify must not spawn a subprocess")

@@ -77,6 +77,8 @@ class VerifySession(BaseSession):
         finding_id: str,
         spec: SandboxSpec,
         sandbox: Sandbox,
+        *,
+        dry_run: bool = False,
     ) -> None:
         self.project_id = project_id
         self.finding_id = finding_id
@@ -87,6 +89,13 @@ class VerifySession(BaseSession):
         # and returns a canned result without executing anything. This session
         # never constructs a real executing backend.
         self.sandbox = sandbox
+        # A demonstration run that mutates the finding NOWHERE: it exercises the
+        # gate + the (Noop) sandbox seam and reports the typed verdict, but pages
+        # no evidence, attempts no transition, and writes no audit entry — so the
+        # finding is left exactly as it was. The CLI's default `playbook verify`
+        # uses this so a dry-run cannot pollute a real candidate's lifecycle or
+        # audit history with a canned, no-execution verdict.
+        self.dry_run = dry_run
         # Exposed after run() for inspection: the typed SandboxResult (never raw
         # output) and the teach-back outcome.
         self.sandbox_result: SandboxResult | None = None
@@ -169,6 +178,14 @@ class VerifySession(BaseSession):
                 f"sandbox {type(self.sandbox).__name__} returned no SandboxResult"
             )
         self.sandbox_result = result
+
+        # --- dry-run: report the verdict, mutate the finding NOWHERE ---
+        # A demonstration only (the CLI's default). The sandbox executed nothing;
+        # we page no evidence, attempt no transition, and write no audit entry, so
+        # the finding is unchanged. This keeps a canned, no-execution verdict from
+        # polluting a real candidate's lifecycle or transition_log.
+        if self.dry_run:
+            return self._record(self._dry_run_outcome(finding, result))
 
         # --- page the evidence artifact (the firewall boundary) ---
         # Page a short, typed summary of the run to the Store. Only the pointers
@@ -300,6 +317,29 @@ class VerifySession(BaseSession):
             next_steps=next_steps,
             findings_touched=[finding.id],
         )
+
+    def _dry_run_outcome(
+        self, finding: Finding, result: SandboxResult
+    ) -> SessionOutcome:
+        """A demonstration outcome that changes the finding NOWHERE.
+
+        The (Noop) sandbox executed nothing; this reports the typed verdict but
+        pages no evidence, attempts no transition, and writes no audit entry, so
+        ``findings_touched`` is empty and the finding is left exactly as it was.
+        """
+        summary = (
+            f"VERIFY dry-run on {self.project_id!r}: the sandbox executed nothing "
+            f"(NoopSandbox; reproduced={result.reproduced}, "
+            f"exit_code={result.exit_code}). The finding {finding.id!r} is UNCHANGED "
+            f"— no evidence paged, no lifecycle transition, no audit entry. Real "
+            f"execution is the hard stop (sandbox sign-off pending)."
+        )
+        next_steps = (
+            f"When a signed-off sandbox backend is wired, run VERIFY for real to "
+            f"reproduce {finding.id!r} in isolation and promote it through the Store "
+            f"lifecycle guard on resolving evidence."
+        )
+        return SessionOutcome(summary=summary, next_steps=next_steps, findings_touched=[])
 
     def _record(self, outcome: SessionOutcome) -> SessionOutcome:
         """Store the teach-back outcome for inspection, then return it."""

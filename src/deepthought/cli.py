@@ -250,6 +250,12 @@ def playbook_verify(
         finding_id=finding,
         spec=_dry_run_spec(),
         sandbox=sandbox,
+        # The plain dry-run mutates the finding NOWHERE — it must not pollute a
+        # real candidate's lifecycle or audit history with a canned, no-execution
+        # verdict. --noop-reproduced is the explicit dev path that demonstrates
+        # promotion through the guard (the 003 smoke drives it), so it runs the
+        # real (mutating) VERIFY.
+        dry_run=not noop_reproduced,
     )
     try:
         record = run_session(_store(state), HermesUltraCodeGate(), session)

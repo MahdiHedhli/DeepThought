@@ -77,6 +77,12 @@ class DockerSandbox(Sandbox):
         # Default-deny egress. The only network value in this slice is "none".
         argv.append(f"--network={policy.network}")
 
+        # Never pull from a registry. A missing image would otherwise trigger a
+        # host-side registry fetch (network egress) BEFORE --network=none takes
+        # effect, breaking default-deny / no-transmission. The image must be
+        # preloaded; a real signed-off backend fails closed if it is absent.
+        argv.append("--pull=never")
+
         if policy.read_only_rootfs:
             argv.append("--read-only")
 

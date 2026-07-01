@@ -312,6 +312,13 @@ def test_build_command_stop_timeout_is_a_short_fixed_grace():
     assert grace != 300                    # NOT the wall timeout
 
 
+def test_build_command_renders_pull_never():
+    """--pull=never: a missing image must not trigger a host-side registry fetch
+    (network egress) before --network=none applies. Default-deny / no-transmission."""
+    argv = DockerSandbox().build_command(make_spec())
+    assert "--pull=never" in argv
+
+
 def test_build_command_renders_no_host_mount():
     # No -v / --mount host bind is EVER rendered: host_mounts are enforced off.
     argv = DockerSandbox().build_command(make_spec())

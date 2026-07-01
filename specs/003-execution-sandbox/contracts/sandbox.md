@@ -143,6 +143,7 @@ present:
 docker run
   --rm                                   # policy.ephemeral
   --network=none                         # policy.network == "none"
+  --pull=never                           # never fetch from a registry (no pre-sandbox egress)
   --read-only                            # policy.read_only_rootfs
   --cap-drop=ALL                         # policy.drop_all_caps
   --security-opt=no-new-privileges       # policy.no_new_privileges
@@ -164,7 +165,8 @@ Argv discipline:
   assert over the list; nothing runs it in this slice. `subprocess` is never called
   with this (or any untrusted) input anywhere in 003.
 - **Every hardening clause is present or the build fails a test.** A missing
-  `--network=none`, a `root` user (in any spelling — `root:root`, `root:0`, a
+  `--network=none`, a missing `--pull=never` (a registry fetch is pre-sandbox
+  egress), a `root` user (in any spelling — `root:root`, `root:0`, a
   padded/upper-case variant), an empty `--user`, an absent limit, a rendered host
   mount, an image ref that is empty or begins with `-` (argument injection), an
   empty command, or a malformed env-var name is a test failure. `--stop-timeout`
