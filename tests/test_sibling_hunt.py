@@ -535,6 +535,49 @@ def test_partial_store_write_failure_reports_the_persisted_variants(state_dir, m
     assert "FAILED" in surfaced or "BLOCKED" in surfaced
 
 
+def test_partial_coverage_write_failure_reports_the_persisted_coverage(state_dir, monkeypatch):
+    """Symmetric to variants: if save_coverage fails MID-batch (some areas saved),
+    the persisted coverage refs are reported (coverage_changed matches Store state)
+    and the target is surfaced as a partial failure."""
+    store = FileStore(state_dir)
+    # Source with TWO in-scope areas -> two coverage deltas.
+    store.save_project(
+        make_project(
+            id="src-proj", git_url="https://example.test/src-proj",
+            authorization_basis="permissive_oss", scope_allowlist=["app", "lib"],
+        )
+    )
+    finding = _verified_sql_finding(project="src-proj")
+    finding.evidence_ref = store.write_detail("S-seed", "evidence.txt", "seed")
+    store.save_finding(finding)
+
+    real_cov = store.save_coverage
+    calls = {"n": 0}
+
+    def _fail_second_cov(coverage):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise OSError("disk full on the 2nd coverage area")
+        return real_cov(coverage)
+
+    monkeypatch.setattr(store, "save_coverage", _fail_second_cov)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS
+    )
+    record = run_session(store, GATE, session)
+
+    persisted_cov = store.list_coverage(project="src-proj")
+    assert len(persisted_cov) == 1                       # one area saved pre-failure
+    # The persisted coverage is REPORTED — coverage_changed matches Store state.
+    assert len(record.coverage_changed) == 1
+    src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
+    assert len(src_out.coverage) == 1
+    assert "coverage record(s) persisted" in (src_out.reason or "")
+
+
 def test_siblings_are_gated_by_the_harness_gate_not_a_hardcoded_default(state_dir):
     """AUTHORITY EDGE: a sibling is gated by the SAME gate the harness ran the
     source through (injected as self.harness_gate), not a hardcoded DefaultGate —

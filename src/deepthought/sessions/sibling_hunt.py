@@ -501,25 +501,28 @@ class SiblingHuntSession(BaseSession):
         validated = result.envelope
         self.envelopes.append(validated)  # ingested into the ledger (in-memory)
         saved_ids: list[str] = []
+        saved_cov: list[str] = []
         try:
             # Accepted: ONLY NOW mutate the Store — persist the variant findings and
             # page the detail, from the worker's built (now validated) output. These
             # writes are ALSO inside the per-target isolation guard: a Store write
             # failure (permission/disk) for THIS target is recorded and surfaced as
             # that target's failure and the hunt continues to the next target — it
-            # never aborts the whole session.
+            # never aborts the whole session. saved_ids / saved_cov accumulate what
+            # actually reached disk so a mid-batch failure still reports it.
             for finding in findings:
                 store.save_finding(finding)
                 saved_ids.append(finding.id)
             store.write_detail(session_id, f"{target.id}-sibling-hunt.txt", detail_body)
-            coverage_refs = self._write_read_coverage(
-                store, target, session_id, validated, root
+            self._write_read_coverage(
+                store, target, session_id, validated, root, saved_cov
             )
         except Exception as exc:
-            # A write failure mid-batch may have already persisted SOME variants.
-            # Report EXACTLY those (findings=saved_ids) so the session log matches
-            # Store state — no persisted variant is left unreported — and surface the
-            # partial failure distinctly. The hunt continues to the next target.
+            # A write failure mid-batch may have already persisted SOME variants
+            # and/or SOME coverage. Report EXACTLY those (findings=saved_ids,
+            # coverage=saved_cov) so the session log matches Store state — nothing
+            # persisted is left unreported — and surface the partial failure
+            # distinctly. The hunt continues to the next target.
             self.target_outcomes.append(
                 TargetOutcome(
                     project_id=target.id,
@@ -527,10 +530,12 @@ class SiblingHuntSession(BaseSession):
                     proceeded=True,
                     reason=(
                         f"worker failed for {target.id}: {type(exc).__name__} "
-                        f"(store write); {len(saved_ids)} variant(s) persisted before "
-                        f"the failure"
+                        f"(store write); {len(saved_ids)} variant(s) and "
+                        f"{len(saved_cov)} coverage record(s) persisted before the "
+                        f"failure"
                     ),
                     findings=saved_ids,
+                    coverage=saved_cov,
                 )
             )
             return
@@ -541,7 +546,7 @@ class SiblingHuntSession(BaseSession):
                 proceeded=True,
                 reason=validated.outcome.value,
                 findings=list(validated.findings_written),
-                coverage=coverage_refs,
+                coverage=saved_cov,
             )
         )
 
@@ -552,7 +557,8 @@ class SiblingHuntSession(BaseSession):
         session_id: str,
         envelope: Envelope,
         root: Path | None,
-    ) -> list[str]:
+        refs: list[str],
+    ) -> None:
         """Persist coverage from the validated envelope, RE-VALIDATED against the
         TARGET's own authorization (the same firewall DISCOVER applies).
 
@@ -560,10 +566,14 @@ class SiblingHuntSession(BaseSession):
         its method is ``read`` AND its depth is legal — so a worker cannot record
         coverage for an out-of-scope area or a non-read method through the
         coverage channel. Coverage is bound to the target project.
+
+        Each written ref is appended to ``refs`` (the caller's accumulator) as it
+        is persisted, so a partial write — some coverage saved, then a Store error —
+        still leaves the caller with EXACTLY the refs that made it to disk. The
+        session log then matches Store state even on a mid-batch coverage failure.
         """
         allowed_areas = set(_coverage_areas(target, root))
         legal_depths = {d.value for d in CoverageDepth}
-        refs: list[str] = []
         for delta in envelope.coverage_delta:
             if (
                 delta.area not in allowed_areas
@@ -584,7 +594,6 @@ class SiblingHuntSession(BaseSession):
             )
             store.save_coverage(coverage)
             refs.append(coverage.ref)
-        return refs
 
     # --- teach back / refuse ----------------------------------------------
 
