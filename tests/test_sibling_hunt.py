@@ -973,6 +973,38 @@ def test_worker_verified_finding_is_dropped_not_promoted(state_dir, monkeypatch)
     assert store.get_finding("F-8000") is None   # worker-verified finding dropped
 
 
+def test_off_class_primitive_is_not_ledgered(state_dir, monkeypatch):
+    """The ledger holds only SAME-CLASS sibling primitives: an off-class primitive
+    (kind != signature.capability) a worker binds to a kept finding is not ledgered."""
+    from deepthought.schema.envelope import Primitive
+
+    store = FileStore(state_dir)
+    _seed_source(store)   # signature capability is inject:sql
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+
+    def _off_class(session_id, target, signature, sarif_path, root, id_start):
+        env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
+        legit_id = env.findings_written[0]  # an in-scope kept finding
+        off = Primitive(kind="write:arbitrary-file", target_locus="app/x.py",
+                        preconditions=[], grants=["write:arbitrary-file"],
+                        confidence="suspected", finding_ref=legit_id)
+        env = env.model_copy(update={"primitives": list(env.primitives) + [off]})
+        return env, findings, detail
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _off_class)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS)
+    run_session(store, GATE, session)
+
+    ledger_kinds = {n.kind for n in session.conductor.ledger.nodes()}
+    assert "write:arbitrary-file" not in ledger_kinds   # off-class primitive dropped
+
+
 def test_out_of_scope_primitive_is_not_ledgered(state_dir, monkeypatch):
     """A same-class primitive bound to an in-scope KEPT finding but whose own
     target_locus is OUT of scope is not carried into the ledger — the finding check

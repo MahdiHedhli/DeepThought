@@ -624,6 +624,10 @@ class SiblingHuntSession(BaseSession):
                         p
                         for p in validated.primitives
                         if p.finding_ref in kept_ids
+                        # Same-class only: the ledger must hold sibling primitives of
+                        # the signature's capability, never an off-class primitive a
+                        # worker bound to a kept finding.
+                        and p.kind == signature.capability
                         # Scope-check the primitive's own locus too — the finding
                         # location check does not cover the primitive channel, so a
                         # worker could otherwise ledger an out-of-scope sibling
