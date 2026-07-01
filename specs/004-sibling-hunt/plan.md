@@ -8,7 +8,7 @@
 
 Add the read-only half of variant analysis on top of the 001–003 harness: a
 `SIBLING HUNT` session that takes a *verified* finding, derives a variant
-`Signature` from its `Primitive`/capability and its location/pattern shape, gates
+`Signature` from its typed summary (closed lookup) and its location/pattern shape, gates
 each target (the source project and every named, pre-registered sibling project)
 independently, dispatches a stub Marvin per gated-proceed target, ingests only the
 typed `Envelope` through the `Conductor`, writes the sibling instances as candidate
@@ -29,11 +29,13 @@ single confirmed bug find its whole family, safely.
    state on disk. Added structure that does not buy a capability or a safety
    property does not earn its place (Article IX).
 2. **The signature is derived, never authored.** The variant `Signature` is built
-   from *typed fields* of the source finding and its ledger primitives: the
-   `Primitive.kind` (a `CAPABILITY_TAXONOMY` member), the finding's location shape,
-   and the closed-lookup `match_terms` drawn from the same `ingest.sarif` heuristic
-   vocabulary. The finding's free-text body is **never** read as a hunt
-   instruction. This is the injection boundary applied to the *input* side of the
+   from *typed fields* of the source finding: `capability` from the finding's typed
+   summary (closed lookup) — a `CAPABILITY_TAXONOMY` member — the finding's location
+   shape, and the closed-lookup `match_terms` drawn from the same `ingest.sarif`
+   heuristic vocabulary. (`signature_from_finding` also supports a bound-`Primitive.kind`
+   path for direct callers/tests, but primitives are not persisted across sessions,
+   so the session derives from the summary.) The finding's free-text body is
+   **never** read as a hunt instruction. This is the injection boundary applied to the *input* side of the
    hunt: a hostile source finding can, at worst, fail to derive a usable signature —
    it can never mint a capability or a command.
 3. **Scope and authorization are gated per target — never widened.** The source
@@ -73,7 +75,8 @@ single confirmed bug find its whole family, safely.
   contract from 001 is the worker boundary, unchanged. The `Signature` is a new
   runtime Pydantic model with `extra='forbid'`, not a `Record`.
 - **New module:** `deepthought.sibling.signature` with the `Signature` model and
-  `signature_from_finding(finding, primitives) -> Signature`.
+  `signature_from_finding(finding, primitives=None) -> Signature` (the session
+  derives from the typed summary; the bound-primitive path stays for direct callers).
 - **New session:** `deepthought.sessions.sibling_hunt.SiblingHuntSession`,
   subclassing `BaseSession` and run through `run_session`.
 - **Reused modules:** `deepthought.scope` (`resolve_within`/`area_in_scope`),
@@ -138,9 +141,10 @@ Each of the nine articles, and how this design satisfies it.
   - *The source finding as input.* The finding that seeds the hunt is
     attacker-influenceable (its body narrative came from untrusted SARIF in
     DISCOVER). The `Signature` is derived from **typed fields only** — the
-    `Primitive.kind` (a taxonomy member), the location shape, and closed-lookup
-    `match_terms`. The finding body is never read as a hunt instruction. A hostile
-    finding can, at worst, fail to yield a usable signature.
+    finding's typed summary (closed lookup, yielding a taxonomy member), the
+    location shape, and closed-lookup `match_terms`. The finding body is never read
+    as a hunt instruction. A hostile finding can, at worst, fail to yield a usable
+    signature.
   - *SARIF as untrusted input.* Reused unchanged from DISCOVER: every SARIF string
     is data, copied only into finding fields, length-bounded, and the `ruleId` →
     capability mapping is a closed lookup an injected rule can only miss.
@@ -212,9 +216,12 @@ project or a scope. See Complexity Tracking.
 ### The signature boundary (input firewall)
 
 The source finding and its SARIF-derived body are untrusted. The `Signature` is
-built from typed fields only: `capability = Primitive.kind`, `locus_pattern` from
-the finding's location shape, and `match_terms` drawn from the same closed
-heuristic vocabulary `ingest.sarif` uses. No free-text is interpreted. Full model,
+built from typed fields only: `capability` from the finding's typed summary
+(closed lookup, a `CAPABILITY_TAXONOMY` member), `locus_pattern` from the finding's
+location shape, and `match_terms` drawn from the same closed heuristic vocabulary
+`ingest.sarif` uses. (The bound-`Primitive.kind` path stays supported for direct
+callers/tests, but primitives are not persisted across sessions, so the session
+derives from the summary.) No free-text is interpreted. Full model,
 derivation, and outputs are in `contracts/sibling-hunt.md`.
 
 ### The per-target gate (authority firewall)

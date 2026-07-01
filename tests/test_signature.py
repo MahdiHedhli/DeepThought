@@ -223,3 +223,23 @@ def test_falls_back_to_closed_lookup_on_summary_when_no_primitive():
     sig = signature_from_finding(finding, [])
     assert sig is not None
     assert sig.capability == "inject:sql"
+
+
+def test_primitives_defaults_to_none_and_derives_from_summary():
+    # The session calls signature_from_finding(finding) with no primitives — the
+    # summary closed lookup is the real, documented derivation path. Omitting the
+    # argument (None) behaves identically to passing []: capability from the typed
+    # summary.
+    finding = make_finding(
+        id="F-0007",
+        status="verified",
+        summary="py/sql-injection: user input reaches a query",
+        references=[],
+        evidence_ref=None,
+    )
+    from_default = signature_from_finding(finding)
+    from_empty = signature_from_finding(finding, [])
+    assert from_default is not None
+    assert from_default.capability == "inject:sql"
+    # None and [] derive the identical signature.
+    assert from_default.model_dump() == from_empty.model_dump()

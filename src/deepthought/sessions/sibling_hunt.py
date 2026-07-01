@@ -12,10 +12,13 @@ SARIF, writes candidate findings, pages detail, and returns exactly one
 :class:`Conductor`), and reuses DISCOVER's firewalls unchanged. Three firewalls
 make it safe as a *security* feature:
 
-1. **Input firewall (the signature).** The signature is DERIVED from typed fields
-   (:mod:`deepthought.sibling.signature`), never authored from the source
-   finding's untrusted free-text body. A hostile source finding can at worst fail
-   to yield a signature — the hunt then reports it has no class to look for.
+1. **Input firewall (the signature).** The session derives capability from the
+   finding's TYPED summary via the closed lookup (:mod:`deepthought.sibling.signature`),
+   never authored from the source finding's untrusted free-text body. Primitives
+   are not persisted across sessions, so the bound-primitive path — still supported
+   by ``signature_from_finding`` for direct callers/tests — is not exercised by the
+   session. A hostile source finding can at worst fail to yield a signature — the
+   hunt then reports it has no class to look for.
 
 2. **Authority firewall (per-target gate).** Cross-project reach is only ever
    downward through the SAME gate: the source project and each NAMED sibling are
@@ -47,6 +50,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from ..ingest.sarif import (
     SarifError,
@@ -106,28 +111,6 @@ class TargetOutcome:
     coverage: list[str] = field(default_factory=list)
 
 
-def _source_primitives(finding, signature: Signature | None) -> list[Primitive]:
-    """Reconstruct the source finding's suspected primitive from typed fields.
-
-    The source finding's primitive is not a persisted record; it is re-derived
-    here from the finding's own SARIF-derived signal via the SAME closed lookup
-    the signature uses. This is used only to describe the source class in the
-    paged detail — never to widen authority. Returns at most one primitive.
-    """
-    if signature is None:
-        return []
-    return [
-        Primitive(
-            kind=signature.capability,
-            target_locus=(signature.locus_pattern or finding.id)[:256],
-            preconditions=[],
-            grants=[signature.capability],
-            confidence="suspected",
-            finding_ref=finding.id[:128],
-        )
-    ]
-
-
 def _same_class(
     findings: list, primitives: list[Primitive], capability: str
 ) -> tuple[list, list[Primitive]]:
@@ -155,12 +138,15 @@ def _run_marvin_worker(
     sarif_path: str | None,
     root: Path | None,
     id_start: int,
-) -> tuple[Envelope | dict, int]:
+) -> Envelope | dict:
     """One stub Marvin per target. Reads SARIF, keeps same-class in-scope
     siblings, writes variant findings, pages detail, returns ONE envelope.
 
-    Returns ``(envelope, next_id_start)`` so the orchestrator can allocate fresh,
-    non-colliding finding ids across multiple targets in one hunt. All variant
+    Finding ids are allocated from ``id_start``, which the orchestrator computes
+    fresh from persisted Store state right before dispatching this worker. Because
+    this worker persists its findings before returning, the NEXT target's
+    allocation already reflects them — so ids are never reused across targets, on
+    success OR rejection, regardless of what this worker returns. All variant
     detail is paged to the Store; nothing is inlined into the return value beyond
     the typed envelope. The worker mutates the Store only AFTER the envelope
     validates, so an over-cap field can never strand persisted findings.
@@ -179,24 +165,21 @@ def _run_marvin_worker(
                 f"{target.id}-{detail_name}",
                 f"SIBLING HUNT worker for {target.id}: SARIF load failed: {exc}\n",
             )
-            return (
-                Envelope(
-                    envelope_version=_ENVELOPE_VERSION,
-                    session_ref=session_id,
-                    worker_id=_WORKER_ID,
-                    task_ref=f"hunt {signature.capability} siblings in {target.id}"[:512],
-                    outcome="blocked",
-                    primitives=[],
-                    findings_written=[],
-                    coverage_delta=[],
-                    next_step_hints=[],
-                    detail_ref=detail_ref,
-                    gate_attestation={
-                        "scope_ok": True,
-                        "authorization_ref": _attestation_ref(target),
-                    },
-                ),
-                id_start,
+            return Envelope(
+                envelope_version=_ENVELOPE_VERSION,
+                session_ref=session_id,
+                worker_id=_WORKER_ID,
+                task_ref=f"hunt {signature.capability} siblings in {target.id}"[:512],
+                outcome="blocked",
+                primitives=[],
+                findings_written=[],
+                coverage_delta=[],
+                next_step_hints=[],
+                detail_ref=detail_ref,
+                gate_attestation={
+                    "scope_ok": True,
+                    "authorization_ref": _attestation_ref(target),
+                },
             )
 
         # Reuse the DISCOVER/SARIF path with the TARGET's own scope/root
@@ -216,7 +199,6 @@ def _run_marvin_worker(
             raw_findings, raw_primitives, signature.capability
         )
 
-    next_id_start = id_start + len(findings)
     outcome = "resolved" if findings else "empty"
     detail_ref = f"detail/{session_id}/{target.id}-{detail_name}"
 
@@ -228,13 +210,18 @@ def _run_marvin_worker(
         outcome=outcome,
         primitives=primitives,
         findings_written=[f.id for f in findings],
+        # A target SCANNED with SARIF attests read coverage for its in-scope
+        # areas even when zero same-class variants survive the filter — a scanned
+        # empty target is still read coverage (mirroring DISCOVER's `if sarif_path`
+        # gate). The orchestrator re-validates each delta against the target's own
+        # scope, so this cannot widen authority.
         coverage_delta=(
             [
                 {"area": area, "method": "read", "depth": "touched"}
                 for area in contained_scope
                 if len(area) <= _COVERAGE_AREA_MAX
             ]
-            if sarif_path and findings
+            if sarif_path
             else []
         ),
         next_step_hints=_hints(signature, findings),
@@ -253,7 +240,7 @@ def _run_marvin_worker(
         f"{target.id}-{detail_name}",
         _detail_body(target, signature, sarif_path, findings, primitives),
     )
-    return envelope, next_id_start
+    return envelope
 
 
 def _hints(signature: Signature, findings: list) -> list[str]:
@@ -363,16 +350,22 @@ class SiblingHuntSession(BaseSession):
                 "(behind the sandbox), then hunt its siblings.",
             )
 
-        # --- derive the variant signature from TYPED fields only ---
-        signature = signature_from_finding(finding, _source_primitives(finding, None))
+        # --- derive the variant signature from the finding's TYPED summary ---
+        # The session derives capability from the finding's typed summary via the
+        # closed lookup (the same one DISCOVER uses). Primitives are not persisted
+        # across sessions, so the session passes none; the bound-primitive path in
+        # signature_from_finding stays supported for direct callers/tests but is
+        # not exercised here.
+        signature = signature_from_finding(finding)
         if signature is None:
-            # No class could be derived from typed fields. The hunt never invents
-            # a capability; it stops cleanly.
+            # No class could be derived from the typed summary. The hunt never
+            # invents a capability; it stops cleanly.
             return self._refuse(
                 f"no variant class could be derived from {finding.id!r}'s typed fields",
                 "The verified finding maps to no known capability via the closed "
-                "lookup, so there is no bug class to hunt. Re-derive after binding "
-                "a primitive to the finding, or hunt from a different finding.",
+                "lookup over its typed summary, so there is no bug class to hunt. "
+                "Hunt from a different verified finding whose summary maps to a "
+                "known capability.",
             )
         self.signature = signature
 
@@ -382,11 +375,11 @@ class SiblingHuntSession(BaseSession):
         # and logged, never created.
         conductor = Conductor()
         self.conductor = conductor
-        id_start = _next_finding_index(store)
 
-        # 1) the source project (already gated by the harness -> proceed).
-        id_start = self._hunt_target(
-            store, session_id, source_project, signature, id_start, gated=True
+        # 1) the source project (already gated by the harness -> proceed). Only the
+        #    source uses the CLI --root; siblings resolve against their own path.
+        self._hunt_target(
+            store, session_id, source_project, signature, gated=True, is_source=True
         )
 
         # 2) each named sibling, gated INDEPENDENTLY at its own gate.
@@ -406,9 +399,7 @@ class SiblingHuntSession(BaseSession):
                     )
                 )
                 continue
-            id_start = self._hunt_sibling(
-                store, session_id, sibling, signature, id_start
-            )
+            self._hunt_sibling(store, session_id, sibling, signature)
 
         return self._teach_back(source_project, signature)
 
@@ -420,8 +411,7 @@ class SiblingHuntSession(BaseSession):
         session_id: str,
         sibling: Project,
         signature: Signature,
-        id_start: int,
-    ) -> int:
+    ) -> None:
         """Gate a NAMED sibling INDEPENDENTLY, then hunt only on proceed.
 
         The sibling is gated with its OWN ``GateContext.from_project`` through the
@@ -441,9 +431,9 @@ class SiblingHuntSession(BaseSession):
                     reason=decision.reason,
                 )
             )
-            return id_start
-        return self._hunt_target(
-            store, session_id, sibling, signature, id_start, gated=True
+            return
+        self._hunt_target(
+            store, session_id, sibling, signature, gated=True, is_source=False
         )
 
     def _hunt_target(
@@ -452,26 +442,53 @@ class SiblingHuntSession(BaseSession):
         session_id: str,
         target: Project,
         signature: Signature,
-        id_start: int,
         *,
         gated: bool,
-    ) -> int:
+        is_source: bool,
+    ) -> None:
         """Dispatch one worker for a gated-proceed target and ingest its envelope.
 
         Binds the variant findings and read coverage to the TARGET project. The
         orchestrator ingests only the typed envelope through the shared Conductor
         and re-validates the coverage delta against the target's own contained
         scope — a worker cannot widen scope through the coverage channel.
+
+        The CLI ``--root`` applies ONLY to the source project (``is_source``); a
+        named sibling always resolves its SARIF/coverage against its OWN
+        ``local_path``, never the source's checkout root.
         """
         assert gated  # only ever called for a proceed-at-gate target
-        root = _resolve_checkout(self.root or target.local_path)
-        envelope, next_id_start = _run_marvin_worker(
-            store, session_id, target, signature, self.sarif_path, root, id_start
-        )
+        root = _resolve_checkout((self.root if is_source else None) or target.local_path)
+        # Allocate finding ids authoritatively from persisted Store state, re-read
+        # per target. The previous worker persisted its findings before returning,
+        # so this already reflects them — ids are never reused across targets.
+        id_start = _next_finding_index(store)
+        try:
+            envelope = _run_marvin_worker(
+                store, session_id, target, signature, self.sarif_path, root, id_start
+            )
+        except (ValidationError, SarifError, OSError) as exc:
+            # PER-TARGET ISOLATION. One target's data-driven worker failure (e.g. a
+            # SARIF result that yields an over-cap field the Envelope rejects) must
+            # NOT abort the whole multi-target hunt and deny service to the other
+            # authorized targets. Record it as blocked and move on; id allocation
+            # re-reads the Store per target, so nothing is reused.
+            self.target_outcomes.append(
+                TargetOutcome(
+                    project_id=target.id,
+                    gate_outcome="proceed",
+                    proceeded=True,
+                    reason=f"worker failed for {target.id}: {type(exc).__name__}",
+                )
+            )
+            return
 
         result = self.conductor.ingest(envelope)
         if not result.ok:
-            # A rejected envelope updates no ledger and writes no coverage.
+            # The worker persisted its findings before returning; id allocation
+            # re-reads the Store per target, so nothing is reused even though this
+            # envelope is rejected. A rejected envelope contributes no ledger entry
+            # and no coverage.
             self.target_outcomes.append(
                 TargetOutcome(
                     project_id=target.id,
@@ -480,7 +497,7 @@ class SiblingHuntSession(BaseSession):
                     reason=f"worker envelope rejected at ingest ({result.reason})",
                 )
             )
-            return id_start  # no ids consumed if nothing was written
+            return
 
         validated = result.envelope
         self.envelopes.append(validated)
@@ -497,7 +514,6 @@ class SiblingHuntSession(BaseSession):
                 coverage=coverage_refs,
             )
         )
-        return next_id_start
 
     @staticmethod
     def _write_read_coverage(
@@ -548,6 +564,10 @@ class SiblingHuntSession(BaseSession):
         all_findings = [fid for t in proceeded for fid in t.findings]
         all_coverage = [cref for t in proceeded for cref in t.coverage]
         n_variants = len(all_findings)
+        # A proceed-at-gate target whose worker was BLOCKED (e.g. its SARIF failed
+        # to load) is NOT a clean empty run — surface it distinctly, mirroring
+        # DISCOVER, so the operator does not read a block as "no variants found".
+        blocked = [t for t in proceeded if t.reason == "blocked"]
 
         parts = [
             f"SIBLING HUNT on {source.id!r} (READ-ONLY): derived a "
@@ -558,6 +578,13 @@ class SiblingHuntSession(BaseSession):
             f"{len(self.conductor.ledger)} sibling primitive(s) now in the ledger. "
             f"No code executed; scope unchanged."
         ]
+        if blocked:
+            blocked_ids = ", ".join(t.project_id for t in blocked)
+            parts.append(
+                f"BLOCKED target(s) (no findings or coverage recorded): {blocked_ids} "
+                f"— the worker could not read its input (e.g. a malformed or "
+                f"unsupported SARIF). See the paged detail for the block reason."
+            )
         if refused:
             gated_off = ", ".join(
                 f"{t.project_id} ({t.gate_outcome})" for t in refused
@@ -568,7 +595,16 @@ class SiblingHuntSession(BaseSession):
             )
         summary = " ".join(parts)
 
-        if n_variants:
+        if blocked and not n_variants:
+            # SARIF was supplied but a target's worker was blocked — point at the
+            # paged detail for the reason, not at "provide SARIF".
+            next_steps = (
+                f"A SIBLING HUNT worker was BLOCKED. Inspect the paged detail "
+                f"(detail/<session>/<target>-sibling-hunt.txt in the state store) "
+                f"for the block reason (e.g. a malformed or unsupported SARIF), fix "
+                f"it, and re-run SIBLING HUNT on {source.id!r}."
+            )
+        elif n_variants:
             next_steps = (
                 f"{n_variants} same-class variant candidate(s) recorded. Queue a "
                 f"VERIFY session for each behind the egress-controlled sandbox "

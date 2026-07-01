@@ -21,6 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from deepthought.export.osv import finding_to_osv, validate_osv
 from deepthought.protocol import HermesUltraCodeGate, run_session
@@ -189,6 +190,53 @@ def test_refuses_when_source_is_not_verified(state_dir):
     assert ids_after == ids_before
 
 
+def test_refuses_when_no_signature_can_be_derived(state_dir):
+    # FIX 6: a VERIFIED source finding whose typed summary maps to no capability
+    # in the closed lookup yields NO signature. The session closes clean, runs no
+    # worker, and writes nothing.
+    store = FileStore(state_dir)
+    store.save_project(
+        make_project(
+            id="src-proj",
+            git_url="https://example.test/x",
+            authorization_basis="permissive_oss",
+            scope_allowlist=["app"],
+        )
+    )
+    finding = make_finding(
+        id="F-0007",
+        project="src-proj",
+        status="verified",
+        summary="a nondescript confirmed issue",
+        body="## Root cause\n\nnothing that maps to a capability.",
+        references=[],
+        evidence_ref=None,
+    )
+    ref = store.write_detail("S-seed", "evidence.txt", "seed evidence")
+    finding.evidence_ref = ref
+    store.save_finding(finding)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=SIBLINGS
+    )
+    record = run_session(store, GATE, session)
+
+    assert record.close_state is CloseState.clean
+    # No signature derived -> no class to hunt.
+    assert session.signature is None
+    # No worker ran: no envelope was ingested.
+    assert session.envelopes == []
+    # Nothing written for the project beyond the seeded source finding.
+    variants = [
+        f for f in store.list_findings(project="src-proj")
+        if f.status is FindingStatus.candidate
+    ]
+    assert variants == []
+    assert store.list_coverage(project="src-proj") == []
+
+
 # --- the hunt: variants, same-class filter, scope containment ----------------
 
 
@@ -331,6 +379,59 @@ def _register_sibling(store, sibling_id="sib-proj", *, basis="permissive_oss", s
             scope_allowlist=list(scope),
         )
     )
+
+
+def test_one_target_worker_failure_does_not_abort_the_whole_hunt(state_dir, monkeypatch):
+    """PER-TARGET ISOLATION: if a worker raises for one target (e.g. an over-cap
+    field the Envelope rejects), that target is recorded blocked and the OTHER
+    authorized targets still run — one target must not deny service to the rest."""
+    import deepthought.sessions.sibling_hunt as sh
+
+    store = FileStore(state_dir)
+    _seed_source(store)
+    _register_sibling(store, "sib-proj")
+
+    real_worker = sh._run_marvin_worker
+
+    def _flaky(store_, session_id, target, signature, sarif_path, root, id_start):
+        if target.id == "src-proj":
+            raise ValidationError.from_exception_data("Envelope", [])
+        return real_worker(store_, session_id, target, signature, sarif_path, root, id_start)
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", _flaky)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007",
+        sibling_project_ids=["sib-proj"], sarif_path=SIBLINGS,
+    )
+    record = run_session(store, GATE, session)
+
+    # The session closed cleanly; the source is recorded as a failed/blocked target
+    # while the sibling still produced its variants.
+    assert record.close_state.value == "clean"
+    src_variants = [
+        f for f in store.list_findings(project="src-proj") if f.status is FindingStatus.candidate
+    ]
+    sib_variants = [
+        f for f in store.list_findings(project="sib-proj") if f.status is FindingStatus.candidate
+    ]
+    assert src_variants == []            # the failing target wrote nothing
+    assert len(sib_variants) == 2        # the healthy sibling still ran
+    reasons = " ".join(o.reason or "" for o in session.target_outcomes)
+    assert "worker failed" in reasons
+
+
+def test_locus_derivation_tolerates_none_references():
+    """Defensive: a finding whose references is None (not a list) must not crash
+    signature derivation — the reference loop is guarded."""
+    from deepthought.sibling.signature import _locus_pattern
+
+    finding = _verified_sql_finding()
+    object.__setattr__(finding, "references", None)
+    object.__setattr__(finding, "body", "no location line here")
+    assert _locus_pattern(finding) is None   # falls through, does not raise
 
 
 def test_authorized_in_scope_sibling_is_hunted_and_variants_bound_to_it(state_dir):
@@ -483,6 +584,185 @@ def test_authority_invariant_never_widens_scope_or_creates_projects(state_dir, m
     assert written_projects <= {"src-proj", "sib-proj"}
     cov_projects = {c.project for c in store.list_coverage()}
     assert cov_projects <= {"src-proj", "sib-proj"}
+
+
+def test_rejected_target_envelope_does_not_reuse_ids_or_lose_findings(state_dir, monkeypatch):
+    # FIX 2: a target whose worker envelope is REJECTED at ingest must not cause a
+    # later target to reuse ids or overwrite stranded findings. Ids are allocated
+    # authoritatively from persisted Store state (re-read per target), so the
+    # worker persisting its findings before returning is enough to keep ids fresh.
+    store = FileStore(state_dir)
+    _seed_source(store)
+    _register_sibling(store, "sib-proj")
+
+    import deepthought.sessions.sibling_hunt as sh
+
+    real_worker = sh._run_marvin_worker
+    seen = {"targets": []}
+
+    def flaky_worker(store, session_id, target, signature, sarif_path, root, id_start):
+        seen["targets"].append(target.id)
+        env = real_worker(store, session_id, target, signature, sarif_path, root, id_start)
+        # For the SOURCE target, corrupt the returned envelope into a malformed
+        # dict so the Conductor REJECTS it at ingest — AFTER the worker persisted
+        # its findings to the Store.
+        if target.id == "src-proj":
+            return {"garbage": "not a valid envelope", "outcome": "???"}
+        return env
+
+    monkeypatch.setattr(sh, "_run_marvin_worker", flaky_worker)
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj",
+        finding_id="F-0007",
+        sibling_project_ids=["sib-proj"],
+        sarif_path=SIBLINGS,
+    )
+    run_session(store, GATE, session)
+
+    # The source worker persisted its 2 variant findings (F-0008, F-0009) even
+    # though its envelope was rejected. The sibling's worker re-reads the Store for
+    # id allocation, so it MUST get fresh ids past those — never reusing them and
+    # never overwriting the stranded source findings.
+    src_variants = [
+        f for f in store.list_findings(project="src-proj")
+        if f.status is FindingStatus.candidate
+    ]
+    sib_variants = [
+        f for f in store.list_findings(project="sib-proj")
+        if f.status is FindingStatus.candidate
+    ]
+    assert len(src_variants) == 2  # stranded source findings not overwritten
+    assert len(sib_variants) == 2
+    all_ids = [f.id for f in src_variants + sib_variants]
+    # Every id is distinct: no reuse across the rejected + accepted targets.
+    assert len(all_ids) == len(set(all_ids))
+    # The rejected source target proceeded-but-was-rejected at ingest.
+    src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
+    assert src_out.proceeded and "rejected" in (src_out.reason or "")
+
+
+def test_root_is_source_only_sibling_resolves_against_its_own_local_path(state_dir, tmp_path):
+    # FIX 3: the CLI --root applies ONLY to the source project. A named sibling
+    # resolves its SARIF/coverage against its OWN local_path, not the shared root.
+    store = FileStore(state_dir)
+
+    # A real checkout for the SOURCE that DOES have an app/ dir.
+    src_root = tmp_path / "src-checkout"
+    (src_root / "app").mkdir(parents=True)
+    # A separate checkout for the SIBLING that also has app/.
+    sib_root = tmp_path / "sib-checkout"
+    (sib_root / "app").mkdir(parents=True)
+
+    store.save_project(
+        make_project(
+            id="src-proj",
+            git_url="https://example.test/src-proj",
+            local_path=str(src_root),
+            authorization_basis="permissive_oss",
+            scope_allowlist=["app"],
+        )
+    )
+    finding = _verified_sql_finding(project="src-proj")
+    ref = store.write_detail("S-seed", "evidence.txt", "seed evidence")
+    finding.evidence_ref = ref
+    store.save_finding(finding)
+
+    store.save_project(
+        make_project(
+            id="sib-proj",
+            name="Sibling",
+            git_url="https://example.test/sib-proj",
+            local_path=str(sib_root),
+            authorization_basis="permissive_oss",
+            scope_allowlist=["app"],
+        )
+    )
+
+    from deepthought.sessions import SiblingHuntSession
+
+    # --root points at the SOURCE checkout. If it were (wrongly) applied to the
+    # sibling, the sibling's `app` area would resolve against src_root — but the
+    # sibling must resolve against its OWN local_path (sib_root), which has app/.
+    session = SiblingHuntSession(
+        project_id="src-proj",
+        finding_id="F-0007",
+        sibling_project_ids=["sib-proj"],
+        sarif_path=SIBLINGS,
+        root=str(src_root),
+    )
+    run_session(store, GATE, session)
+
+    # The sibling resolved against its own local_path and recorded coverage +
+    # variants for its own in-scope app/ area.
+    assert store.list_coverage(project="sib-proj")
+    sib_variants = [
+        f for f in store.list_findings(project="sib-proj")
+        if f.status is FindingStatus.candidate
+    ]
+    assert len(sib_variants) == 2
+
+
+def test_blocked_target_is_surfaced_in_teach_back(state_dir, tmp_path):
+    # FIX 4: a target whose SARIF fails to load yields a `blocked` worker outcome;
+    # the teach-back must surface it distinctly (not read it as a clean empty run),
+    # mirroring DISCOVER.
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    bad_sarif = tmp_path / "malformed.sarif"
+    bad_sarif.write_text("{ this is not valid json ", encoding="utf-8")
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj", finding_id="F-0007", sarif_path=str(bad_sarif)
+    )
+    record = run_session(store, GATE, session)
+
+    # The source target was blocked (SARIF failed to load).
+    src_out = next(t for t in session.target_outcomes if t.project_id == "src-proj")
+    assert src_out.reason == "blocked"
+    # The teach-back surfaces the block distinctly and points at the paged detail.
+    blob = (record.body + " " + record.next_steps()).lower()
+    assert "block" in blob
+    assert "detail" in blob
+
+
+def test_scanned_but_empty_target_records_read_coverage(state_dir, tmp_path):
+    # FIX 5: a pre-authorized target scanned with SARIF but ZERO same-class
+    # variants still attests read Coverage for its in-scope areas (mirroring
+    # DISCOVER's `if sarif_path` coverage gate).
+    store = FileStore(state_dir)
+    _seed_source(store)
+
+    # A sibling scoped to an area the SARIF has NO in-scope same-class results for,
+    # so the worker runs, finds nothing, but must still record read coverage.
+    _register_sibling(store, "sib-proj", scope=("lib",))
+
+    from deepthought.sessions import SiblingHuntSession
+
+    session = SiblingHuntSession(
+        project_id="src-proj",
+        finding_id="F-0007",
+        sibling_project_ids=["sib-proj"],
+        sarif_path=SIBLINGS,
+    )
+    run_session(store, GATE, session)
+
+    # No variants for the sibling (its `lib` scope holds none of the SARIF's app/*
+    # results), but its in-scope `lib` area is attested as read coverage.
+    sib_variants = [
+        f for f in store.list_findings(project="sib-proj")
+        if f.status is FindingStatus.candidate
+    ]
+    assert sib_variants == []
+    sib_cov = store.list_coverage(project="sib-proj")
+    assert sib_cov
+    assert all(c.method is CoverageMethod.read for c in sib_cov)
+    assert {c.area for c in sib_cov} == {"lib"}
 
 
 def test_cross_project_variants_are_all_osv_valid(state_dir):

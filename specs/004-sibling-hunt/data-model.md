@@ -40,20 +40,21 @@ Constraints (all enforced by the model or its constructor):
   dropped at derivation. An injected term can, at worst, be dropped — it can never
   become an instruction.
 
-## Derivation: `signature_from_finding(finding, primitives) -> Signature`
+## Derivation: `signature_from_finding(finding, primitives=None) -> Signature`
 
 The signature is **derived from typed fields only** — this is the input-side
 injection boundary (Article VIII):
 
-- `capability` comes from the source finding's `Primitive.kind` (the primitive(s)
-  bound to the finding via `finding_ref`, read from the ledger or the passed list).
-  When several primitives are present, the derivation picks the primitive whose
-  `finding_ref` equals the source finding id; ties resolve deterministically (first
-  in taxonomy order). If no primitive is bound, the derivation MAY fall back to the
-  closed-lookup match of the finding's `summary`/`references` (the same
-  `_match_capability` path DISCOVER uses) — still a closed lookup, never free-text.
-  If that also yields nothing, **no signature is derived** and the hunt reports
-  that it has no class to hunt (it never invents a capability).
+- `capability` comes from the closed-lookup match of the finding's typed `summary`
+  (the same `_match_capability` path DISCOVER uses) — a closed lookup, never
+  free-text. A direct caller MAY pass `primitives` bound to the finding (via
+  `finding_ref`), and the bound `Primitive.kind` then takes precedence (ties
+  resolve deterministically, first in taxonomy order); this bound-primitive path
+  stays supported for callers/tests. But primitives are **not persisted across
+  sessions**, so the SIBLING HUNT session passes none and derives capability from
+  the summary. If neither yields a taxonomy capability, **no signature is derived**
+  and the hunt reports that it has no class to hunt (it never invents a
+  capability).
 - `locus_pattern` comes from the finding's location shape — the `**Location:**`
   reference or `references[]` url stem — normalized and length-bounded. It is a
   match hint only; it is never resolved, opened, or executed.

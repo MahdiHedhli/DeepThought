@@ -142,7 +142,7 @@ def _locus_pattern(finding: Finding) -> str | None:
         locus = match.group(1).strip()
         if locus:
             return locus[:256]
-    for ref in finding.references:
+    for ref in finding.references or []:
         url = (ref.url or "").strip()
         if url:
             return url[:256]
@@ -161,25 +161,37 @@ def _match_terms(capability: str) -> list[str]:
 
 
 def signature_from_finding(
-    finding: Finding, primitives: list[Primitive]
+    finding: Finding, primitives: list[Primitive] | None = None
 ) -> Signature | None:
     """Derive a variant :class:`Signature` from a verified finding, or ``None``.
 
     Typed-fields-only derivation (the input firewall):
 
-    1. ``capability`` is the ``kind`` of the primitive bound to ``finding``. If
-       none is bound, fall back to the SAME closed lookup DISCOVER uses over the
-       finding's ``summary`` (and known-key ruleId tokens) — still a closed
-       lookup, never free-text interpretation. If that also yields nothing,
-       return ``None``: the hunt has no class to look for and never invents one.
+    1. ``capability`` is derived from the finding's TYPED ``summary`` via the SAME
+       closed lookup DISCOVER uses (and known-key ruleId tokens) — never free-text
+       interpretation. If a caller passes ``primitives`` bound to ``finding`` (by
+       ``finding_ref``), the bound ``Primitive.kind`` takes precedence; this
+       bound-primitive path stays supported for direct callers and tests. But
+       primitives are NOT persisted in the Store across sessions, so the SIBLING
+       HUNT session calls this with no ``primitives`` (``None``, treated as ``[]``)
+       and derives capability from the summary alone. If neither the bound
+       primitive nor the summary lookup yields a taxonomy capability, return
+       ``None``: the hunt has no class to look for and never invents one.
     2. ``locus_pattern`` is the finding's typed location reference, normalized.
     3. ``match_terms`` are the closed-lookup keys that map to ``capability``.
 
     The finding's free-text ``body`` is never parsed for instructions. A source
     finding whose body carries an injected instruction derives the identical
     signature as one without.
+
+    This is a PURE derivation over typed fields; it does not itself check the
+    finding's lifecycle status. The contract's "derive from a VERIFIED finding"
+    rule is enforced by the CALLER: :meth:`SiblingHuntSession.run` refuses a
+    non-verified source finding before it ever calls this. Keeping the check at
+    the session boundary (a real refusal, not a strippable ``assert``) lets the
+    function stay usable in unit tests over any finding shape.
     """
-    capability = _bound_capability(finding, primitives)
+    capability = _bound_capability(finding, primitives or [])
     if capability is None:
         # Closed-lookup fallback over the TYPED summary only (the same
         # _match_capability path the SARIF ingest uses). The summary is a

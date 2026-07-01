@@ -12,9 +12,10 @@ lacks its own authorization basis.**
 Four properties make this session safe:
 
 1. **The signature is derived from typed fields, never authored.** The bug class is
-   described by the source finding's `Primitive.kind` (a `CAPABILITY_TAXONOMY`
-   member), its location shape, and closed-lookup `match_terms` — not by any
-   free-text. A hostile source finding can, at worst, fail to yield a signature.
+   described by the source finding's typed summary (closed lookup) — a
+   `CAPABILITY_TAXONOMY` member — its location shape, and closed-lookup
+   `match_terms` — not by any free-text. A hostile source finding can, at worst,
+   fail to yield a signature.
 2. **Every target is gated independently, and the target set never grows.** The
    source project and each *named* sibling project are gated through the same
    three-outcome `DefaultGate` on a `GateContext.from_project`. A sibling must
@@ -37,8 +38,11 @@ class Signature(BaseModel):
     """The variant signature: a typed description of a confirmed bug class.
 
     A runtime value (extra='forbid'), NOT a persisted Record. Derived from a
-    verified Finding and its bound Primitive(s); the finding's free-text body is
-    never read. ``capability`` must be a CAPABILITY_TAXONOMY member."""
+    verified Finding's typed summary (closed lookup); the finding's free-text body
+    is never read. (``signature_from_finding`` also supports a bound-Primitive
+    path for direct callers/tests, but primitives are not persisted across
+    sessions, so the SESSION derives from the summary.) ``capability`` must be a
+    CAPABILITY_TAXONOMY member."""
     source_finding: str
     source_project: str
     capability: str          # == source Primitive.kind; a CAPABILITY_TAXONOMY member
@@ -46,12 +50,15 @@ class Signature(BaseModel):
     match_terms: list[str] = []
 
 def signature_from_finding(
-    finding: Finding, primitives: list[Primitive]
+    finding: Finding, primitives: list[Primitive] | None = None
 ) -> Signature | None:
-    """Derive a variant Signature from a VERIFIED finding and its primitives.
+    """Derive a variant Signature from a VERIFIED finding.
 
-    Reads typed fields only: the bound Primitive.kind (via finding_ref), the
-    finding's location reference, and closed-lookup terms. Returns None when no
+    Reads typed fields only: the finding's typed summary (closed lookup), its
+    location reference, and closed-lookup terms. A caller MAY pass primitives bound
+    to the finding (via finding_ref) and the bound Primitive.kind takes precedence
+    — but primitives are not persisted across sessions, so the SESSION calls this
+    with none and derives capability from the summary. Returns None when no
     capability can be derived (the hunt then has no class to hunt); never invents
     a capability and never parses the finding body as instruction."""
 ```
@@ -89,10 +96,10 @@ class SiblingHuntSession(BaseSession):
      - its status is not `verified` (there is no confirmed class to hunt).
    A refusal closes the session clean with a next step; no worker runs.
 
-2. DERIVE the signature: signature_from_finding(finding, primitives-for-finding).
-     - primitives are the ones bound to the finding (finding_ref == finding.id),
-       read from the ledger the source DISCOVER produced, or re-derived by the
-       closed lookup over the finding's typed fields.
+2. DERIVE the signature: signature_from_finding(finding).
+     - capability is derived from the finding's typed summary (closed lookup) — the
+       same `_match_capability` table DISCOVER uses. Primitives are not persisted
+       across sessions, so the session passes none.
      - If no capability can be derived, close clean: "no huntable class"; no worker.
 
 3. BUILD the target list (fixed here; never grows later):
@@ -154,10 +161,11 @@ Hard invariants (asserted by tests):
 
 The signature derivation is the input-side injection firewall:
 
-- `capability` = the source finding's `Primitive.kind`. When no primitive is bound,
-  the closed-lookup match of the finding's typed `summary`/`references` may supply
-  it (the same `_match_capability` closed table `ingest.sarif` uses). Never a
-  free-text read.
+- `capability` = the closed-lookup match of the finding's typed `summary` (the same
+  `_match_capability` closed table `ingest.sarif` uses). Never a free-text read.
+  (`signature_from_finding` also supports a bound-`Primitive.kind` path for direct
+  callers/tests, but primitives are not persisted across sessions, so the session
+  derives from the summary.)
 - `locus_pattern` = the normalized stem of the finding's location reference — a
   match hint, never a path opened or executed.
 - `match_terms` = the closed-lookup keys that map to `capability`, plus any
@@ -173,7 +181,7 @@ mint a capability.
 ## Flow to the Store and the Ledger
 
 ```
-signature_from_finding(finding, primitives) ──▶ Signature (typed; capability ∈ TAXONOMY)
+signature_from_finding(finding) ──▶ Signature (typed summary lookup; capability ∈ TAXONOMY)
         │
         ▼   for each PROCEED target:
    worker reasons over signature + target in-scope areas (+ SARIF)

@@ -40,7 +40,7 @@ and reuses its firewall, its scope containment, and its OSV guarantee wholesale.
 Add one session type on top of the 001–003 harness:
 
 - **SIBLING HUNT** — take a `verified` finding, derive a variant `Signature` from
-  its `Primitive`/capability and its location/pattern shape, gate each target,
+  its typed summary (closed lookup) and its location/pattern shape, gate each target,
   dispatch a stub Marvin worker per target that reasons over static signals (and
   an optional SARIF) for sibling instances, ingest exactly one `Envelope` per
   worker through the `Conductor`, write the new candidate `Finding`s (the
@@ -60,14 +60,16 @@ transmission, and — critically — no authorization or scope widening.
 **In scope**
 
 - A **variant `Signature`** model (`deepthought.sibling.signature`): a runtime
-  (non-`Record`) type derived from a verified `Finding` and its suspected/verified
-  `Primitive`(s). It carries the bug class's `capability` (the `Primitive.kind`,
-  a `CAPABILITY_TAXONOMY` member), the location/pattern shape (a normalized
-  `locus_pattern` and the source `ruleId`/tag hints where present), and a bounded
-  set of `match_terms` (the closed lookup keys the hunt matches on). The signature
-  is **derived**, never free-text authored — it is built from typed fields of the
-  source finding and its ledger primitives, so a hostile finding body can never
-  become a hunt instruction.
+  (non-`Record`) type derived from a verified `Finding`'s typed summary (closed
+  lookup). It carries the bug class's `capability` (a `CAPABILITY_TAXONOMY`
+  member), the location/pattern shape (a normalized `locus_pattern` and the source
+  `ruleId`/tag hints where present), and a bounded set of `match_terms` (the closed
+  lookup keys the hunt matches on). (`signature_from_finding` also supports a
+  bound-`Primitive.kind` path for direct callers/tests, but primitives are not
+  persisted across sessions, so the session derives from the summary.) The
+  signature is **derived**, never free-text authored — it is built from the typed
+  summary via a closed lookup, so a hostile finding body can never become a hunt
+  instruction.
 - The **`SiblingHuntSession`** (`deepthought.sessions.sibling_hunt`): subclasses
   `BaseSession`, `.type = SessionType.sibling_hunt` (already in the enum), runs
   through the unchanged `run_session` harness and Gate. It loads a *verified*
@@ -107,9 +109,9 @@ transmission, and — critically — no authorization or scope widening.
 
 1. **Derive a signature from a confirmed bug.** An operator runs a SIBLING HUNT
    session naming a project and one of its `verified` findings. The session
-   derives a variant `Signature` from the finding's `Primitive`/capability and its
-   location/pattern shape — a typed, bounded structure. The signature is built
-   from typed fields only; the finding's free-text body is never read as an
+   derives a variant `Signature` from the finding's typed summary (closed lookup)
+   and its location/pattern shape — a typed, bounded structure. The signature is
+   built from typed fields only; the finding's free-text body is never read as an
    instruction. A finding that is not `verified` is refused (there is no confirmed
    class to hunt).
 2. **Hunt siblings in the finding's own project.** The session gates the source
@@ -191,7 +193,7 @@ Each requirement names the constitution article it serves.
 The criteria for 004, each a check the 004 smoke and test suite assert:
 
 1. A **SIBLING HUNT** session started from a `verified` finding **derives a
-   variant `Signature`** from the finding's `Primitive`/capability and its
+   variant `Signature`** from the finding's typed summary (closed lookup) and its
    location/pattern shape (typed fields only).
 2. The session **produces new candidate variant findings** for sibling instances
    in the source project's in-scope areas (status `candidate`, fresh ids).
@@ -210,8 +212,9 @@ The criteria for 004, each a check the 004 smoke and test suite assert:
 ## Open questions
 
 - **Signature fidelity.** The variant signature is derived conservatively: it uses
-  the source finding's capability (`Primitive.kind`) and its location/pattern shape
-  as the `match_terms` for the closed lookup, reusing the `ingest.sarif` heuristic
+  the source finding's capability (from its typed summary via the closed lookup)
+  and its location/pattern shape as the `match_terms` for the closed lookup,
+  reusing the `ingest.sarif` heuristic
   vocabulary so a variant is only ever matched to a capability the taxonomy already
   defines. How rich the pattern shape becomes (AST/structural signatures vs. the
   ruleId/tag/CWE terms used here) is refined against real runs. The *shape* of the

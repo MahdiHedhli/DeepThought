@@ -59,12 +59,12 @@ find none.
     to a different project, or is **not `verified`** (there is no confirmed class to
     hunt). Assert each refusal's summary/next-steps and that no finding/coverage was
     written.
-  - With a `verified` source finding carrying a bound primitive and the
-    `siblings.sarif` fixture: the session derives a `Signature` (`self.signature`),
-    dispatches one stub Marvin, writes candidate **variant** `Finding`s (status
-    `candidate`, fresh ids past the store max, `project == source`), and the ledger
-    holds the sibling primitives (`self.conductor`). `self.envelopes` holds the
-    validated envelope(s).
+  - With a `verified` source finding whose typed summary maps to a capability
+    (closed lookup) and the `siblings.sarif` fixture: the session derives a
+    `Signature` (`self.signature`), dispatches one stub Marvin, writes candidate
+    **variant** `Finding`s (status `candidate`, fresh ids past the store max,
+    `project == source`), and the ledger holds the sibling primitives
+    (`self.conductor`). `self.envelopes` holds the validated envelope(s).
   - The **same-class filter** holds: a SARIF instance mapping to a *different*
     capability than the signature is NOT written as a variant; only same-capability
     instances become variants.
