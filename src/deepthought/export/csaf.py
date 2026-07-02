@@ -12,8 +12,11 @@ This exporter is DRAFT-ONLY and must never fabricate authority:
   sentinel ``CVE-XXXX-XXXXX`` therefore never becomes a ``cve`` member.
 * Placeholder publisher identity only — never a real CNA/vendor. The publisher is
   a ``vendor`` named ``PLACEHOLDER`` under a ``.local`` placeholder namespace.
-* Optional blocks are omitted, never faked. If ``finding.severity`` is ``None``
-  the ``scores`` block is omitted entirely.
+* Optional blocks are omitted, never faked. If ``finding.severity`` has no
+  well-formed CVSS v3 vector the ``scores`` block is omitted entirely.
+* Full scope. EVERY affected package/version becomes its own product in the
+  product tree and ``product_status.known_affected`` — the draft never
+  under-reports the affected scope.
 * Injection inertness. Finding free-text (summary/body/downstream_impact) is
   carried ONLY as inert string VALUES in text leaves (title / note text). It is
   never used as a document key, structure, or ``$ref``.
@@ -31,6 +34,7 @@ import jsonschema
 from referencing import Registry, Resource
 
 from ..schema.common import iso_z, utcnow
+from ._cvss import cvss3_metric, cvss3_schema
 from .osv import _details, osv_id_for
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -39,9 +43,6 @@ if TYPE_CHECKING:  # pragma: no cover
 # Pinned CSAF specification version. The bundled csaf_schema.json is the validator.
 CSAF_VERSION = "2.0"
 
-# Placeholder product id. Draft advisories reference a single synthetic product.
-_PLACEHOLDER_PID = "CSAFPID-0001"
-
 # Placeholder publisher identity — deliberately not a real CNA/vendor.
 _PLACEHOLDER_NAMESPACE = "https://deepthought.local/placeholder"
 
@@ -49,91 +50,17 @@ _PLACEHOLDER_NAMESPACE = "https://deepthought.local/placeholder"
 # purpose so a draft can never be mistaken for a real, submittable CVE.
 _CVE_RE = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$")
 
+# Finding reference types that name the finding's OWN source/detection location
+# (CSAF category "self"); everything else (advisory, fix, report, web, …) is an
+# "external" reference — including the published advisory/fix links a disclosed or
+# patched finding carries.
+_SELF_REF_TYPES = frozenset({"self", "source", "detection", "location"})
+
 
 @lru_cache(maxsize=1)
 def _csaf_schema() -> dict:
     text = resources.files("deepthought.export").joinpath("csaf_schema.json").read_text()
     return json.loads(text)
-
-
-# The CSAF schema references the FIRST.org CVSS schemas by remote URL. We supply
-# faithful local copies so validation is hermetic (no network, deterministic) —
-# mirroring the offline OSV validator. These reproduce the official FIRST.org
-# CVSS 3.x property/enum/pattern set for the fields any CSAF producer may emit.
-def _cvss3_schema(minor: str) -> dict:
-    """Build the FIRST.org CVSS v3.<minor> JSON schema (draft-07)."""
-    cia = {"type": "string", "enum": ["NONE", "LOW", "HIGH"]}
-    mod_cia = {"type": "string", "enum": ["NONE", "LOW", "HIGH", "NOT_DEFINED"]}
-    cia_req = {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "NOT_DEFINED"]}
-    score = {"type": "number", "minimum": 0, "maximum": 10}
-    severity = {"type": "string", "enum": ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]}
-    # The official FIRST.org CVSS 3.x vectorString pattern: the EIGHT base metrics
-    # are mandatory and ORDERED (AV/AC/PR/UI/S/C/I/A), followed by the optional
-    # temporal + environmental metrics. A permissive "(token/)*token" would wrongly
-    # accept a partial vector like "CVSS:3.1/AV:N", so `check` must key on the real
-    # shape.
-    _base = "AV:[NALP]/AC:[LH]/PR:[NLH]/UI:[NR]/S:[UC]/C:[NLH]/I:[NLH]/A:[NLH]"
-    _opt = (
-        "(/E:[XUPFH])?(/RL:[XOTWU])?(/RC:[XURC])?(/CR:[XLMH])?(/IR:[XLMH])?"
-        "(/AR:[XLMH])?(/MAV:[XNALP])?(/MAC:[XLH])?(/MPR:[XNLH])?(/MUI:[XNR])?"
-        "(/MS:[XUC])?(/MC:[XNLH])?(/MI:[XNLH])?(/MA:[XNLH])?"
-    )
-    return {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "type": "object",
-        "properties": {
-            "version": {"type": "string", "enum": [f"3.{minor}"]},
-            "vectorString": {
-                "type": "string",
-                "pattern": rf"^CVSS:3[.]{minor}/{_base}{_opt}$",
-            },
-            "attackVector": {
-                "type": "string",
-                "enum": ["NETWORK", "ADJACENT_NETWORK", "LOCAL", "PHYSICAL"],
-            },
-            "attackComplexity": {"type": "string", "enum": ["HIGH", "LOW"]},
-            "privilegesRequired": {"type": "string", "enum": ["HIGH", "LOW", "NONE"]},
-            "userInteraction": {"type": "string", "enum": ["NONE", "REQUIRED"]},
-            "scope": {"type": "string", "enum": ["UNCHANGED", "CHANGED"]},
-            "confidentialityImpact": cia,
-            "integrityImpact": cia,
-            "availabilityImpact": cia,
-            "baseScore": score,
-            "baseSeverity": severity,
-            "exploitCodeMaturity": {
-                "type": "string",
-                "enum": [
-                    "UNPROVEN",
-                    "PROOF_OF_CONCEPT",
-                    "FUNCTIONAL",
-                    "HIGH",
-                    "NOT_DEFINED",
-                ],
-            },
-            "remediationLevel": {
-                "type": "string",
-                "enum": [
-                    "OFFICIAL_FIX",
-                    "TEMPORARY_FIX",
-                    "WORKAROUND",
-                    "UNAVAILABLE",
-                    "NOT_DEFINED",
-                ],
-            },
-            "reportConfidence": {
-                "type": "string",
-                "enum": ["UNKNOWN", "REASONABLE", "CONFIRMED", "NOT_DEFINED"],
-            },
-            "temporalScore": score,
-            "temporalSeverity": severity,
-            "confidentialityRequirement": cia_req,
-            "integrityRequirement": cia_req,
-            "availabilityRequirement": cia_req,
-            "environmentalScore": score,
-            "environmentalSeverity": severity,
-        },
-        "required": ["version", "vectorString", "baseScore", "baseSeverity"],
-    }
 
 
 # A permissive draft-07 stub. Used for the CVSS v2 branch: this exporter never
@@ -149,84 +76,91 @@ def _cvss_registry() -> Registry:
     """A referencing Registry that resolves every CSAF CVSS ref locally.
 
     The bundled CSAF schema references FIRST.org CVSS v2.0/v3.0/v3.1 by URL.
-    v3.0/v3.1 get faithful in-code schemas (the versions this exporter emits);
-    v2.0 gets a permissive stub so an external CSAF with a v2 score validates
-    (its other fields strictly) rather than raising.
+    v3.0/v3.1 get the faithful shared in-code schemas (the versions this exporter
+    emits); v2.0 gets a permissive stub so an external CSAF with a v2 score
+    validates (its other fields strictly) rather than raising.
     """
     resources_by_uri = {
         "https://www.first.org/cvss/cvss-v2.0.json": _PERMISSIVE_STUB,
-        "https://www.first.org/cvss/cvss-v3.0.json": _cvss3_schema("0"),
-        "https://www.first.org/cvss/cvss-v3.1.json": _cvss3_schema("1"),
+        "https://www.first.org/cvss/cvss-v3.0.json": cvss3_schema("0"),
+        "https://www.first.org/cvss/cvss-v3.1.json": cvss3_schema("1"),
     }
     return Registry().with_resources(
         (uri, Resource.from_contents(schema)) for uri, schema in resources_by_uri.items()
     )
 
 
-def _base_severity(score: float) -> str:
-    """CVSS 3.x qualitative severity band for a base score."""
-    if score <= 0.0:
-        return "NONE"
-    if score < 4.0:
-        return "LOW"
-    if score < 7.0:
-        return "MEDIUM"
-    if score < 9.0:
-        return "HIGH"
-    return "CRITICAL"
+def _products(finding: "Finding") -> tuple[dict, list[str]]:
+    """Build the product tree and the list of ALL product ids it defines.
 
-
-def _cvss3_version(vector: str) -> str | None:
-    """The CVSS 3.x minor version a vector declares, or ``None``.
-
-    CSAF's ``cvss_v3`` is ``oneOf: [v3.0, v3.1]``, and each branch pins both the
-    ``version`` enum and the ``vectorString`` prefix. Emitting the wrong version
-    (e.g. ``3.1`` for a ``CVSS:3.0/...`` vector) fails BOTH branches, which would
-    turn ``check`` red. Only v3.0/v3.1 have bundled schemas; any other version
-    (2.0, 4.0, …) returns ``None`` so the caller omits the score rather than emit
-    an unvalidatable one.
+    One product id per (affected package, recorded version), so the vulnerability
+    can mark every affected product — the draft never collapses multi-package or
+    multi-version scope to the first entry. A finding with no affected package
+    still defines a single ``CSAFPID-0001`` placeholder so ``product_status``
+    never references an undefined id.
     """
-    v = (vector or "").strip()
-    if v.startswith("CVSS:3.0/"):
-        return "3.0"
-    if v.startswith("CVSS:3.1/"):
-        return "3.1"
-    return None
+    if not finding.affected:
+        pid = "CSAFPID-0001"
+        tree = {
+            "branches": [
+                {
+                    "category": "vendor",
+                    "name": "PLACEHOLDER",
+                    "branches": [
+                        {
+                            "category": "product_name",
+                            "name": "PLACEHOLDER",
+                            "branches": [
+                                {
+                                    "category": "product_version",
+                                    "name": "unspecified",
+                                    "product": {
+                                        "name": "PLACEHOLDER unspecified",
+                                        "product_id": pid,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        return tree, [pid]
 
-
-def _product_tree(finding: "Finding") -> dict:
-    """Build a vendor -> product_name -> product_version branch for the finding.
-
-    Each CSAF branch object must have exactly three properties, so leaf branches
-    carry ``product`` and inner branches carry ``branches``. This tree ALWAYS
-    defines ``CSAFPID-0001`` — including a placeholder for a finding with no
-    affected package — so the vulnerability's ``product_status`` never references
-    an undefined product id.
-    """
-    pkg = finding.affected[0] if finding.affected else None
-    version = (pkg.versions[0] if pkg and pkg.versions else "unspecified")
-    product_name = pkg.package if pkg else "PLACEHOLDER"
-    vendor_name = pkg.ecosystem if pkg else "PLACEHOLDER"
-
-    version_branch = {
-        "category": "product_version",
-        "name": version,
-        "product": {
-            "name": f"{product_name} {version}",
-            "product_id": _PLACEHOLDER_PID,
-        },
-    }
-    product_branch = {
-        "category": "product_name",
-        "name": product_name,
-        "branches": [version_branch],
-    }
-    vendor_branch = {
-        "category": "vendor",
-        "name": vendor_name,
-        "branches": [product_branch],
-    }
-    return {"branches": [vendor_branch]}
+    vendor_branches: list[dict] = []
+    pids: list[str] = []
+    counter = 1
+    for pkg in finding.affected:
+        versions = list(pkg.versions) if pkg.versions else ["unspecified"]
+        version_branches = []
+        for version in versions:
+            pid = f"CSAFPID-{counter:04d}"
+            counter += 1
+            pids.append(pid)
+            version_branches.append(
+                {
+                    "category": "product_version",
+                    "name": version,
+                    "product": {
+                        "name": f"{pkg.package} {version}",
+                        "product_id": pid,
+                    },
+                }
+            )
+        vendor_branches.append(
+            {
+                "category": "vendor",
+                "name": pkg.ecosystem or "PLACEHOLDER",
+                "branches": [
+                    {
+                        "category": "product_name",
+                        "name": pkg.package,
+                        "branches": version_branches,
+                    }
+                ],
+            }
+        )
+    return {"branches": vendor_branches}, pids
 
 
 def _notes(finding: "Finding") -> list[dict]:
@@ -239,37 +173,44 @@ def _notes(finding: "Finding") -> list[dict]:
     return [{"category": "summary", "text": text}]
 
 
-def _scores(finding: "Finding") -> list[dict] | None:
-    """CVSS v3 score block, or ``None`` when there is no v3 severity to report.
+def _scores(finding: "Finding", product_ids: list[str]) -> list[dict] | None:
+    """CVSS v3 score block over ALL affected products, or ``None``.
 
-    The ``version`` is derived from the stored vector so a ``CVSS:3.0/...``
-    finding is emitted as v3.0 (and validates against the v3.0 oneOf branch). A
-    non-v3 vector (2.0/4.0) yields no score block rather than a mislabelled one.
+    ``None`` when there is no severity or the vector is not a well-formed v3
+    vector (so a malformed vector never yields a mislabelled/invalid score).
     """
     severity = finding.severity
     if severity is None:
         return None
-    version = _cvss3_version(severity.cvss_vector)
-    if version is None:
+    metric = cvss3_metric(severity.cvss_vector, severity.cvss_score)
+    if metric is None:
         return None
-    return [
-        {
-            "cvss_v3": {
-                "version": version,
-                "vectorString": severity.cvss_vector,
-                "baseScore": severity.cvss_score,
-                "baseSeverity": _base_severity(severity.cvss_score),
-            },
-            "products": [_PLACEHOLDER_PID],
-        }
-    ]
+    return [{"cvss_v3": metric, "products": list(product_ids)}]
 
 
-def _vulnerability(finding: "Finding") -> dict:
+def _references(finding: "Finding") -> list[dict]:
+    """Map EVERY non-empty finding reference into CSAF, categorized.
+
+    Emitting only the first reference would drop a published advisory or fix URL
+    later in the list (e.g. on a disclosed/patched finding). Each is carried as an
+    inert url value; an empty url is skipped (it carries no link and would be
+    non-conformant), and a blank type gets a non-empty default summary.
+    """
+    refs: list[dict] = []
+    for ref in finding.references:
+        if not (ref.url and ref.url.strip()):
+            continue
+        rtype = ref.type.strip()
+        category = "self" if rtype in _SELF_REF_TYPES else "external"
+        refs.append({"category": category, "summary": rtype or "reference", "url": ref.url})
+    return refs
+
+
+def _vulnerability(finding: "Finding", product_ids: list[str]) -> dict:
     vuln: dict = {
         "title": finding.summary,
         "notes": _notes(finding),
-        "product_status": {"known_affected": [_PLACEHOLDER_PID]},
+        "product_status": {"known_affected": list(product_ids)},
     }
 
     # DRAFT-ONLY: emit a real CVE member only for a real CVE; otherwise carry an
@@ -279,7 +220,7 @@ def _vulnerability(finding: "Finding") -> dict:
     else:
         vuln["ids"] = [{"system_name": "DeepThought", "text": osv_id_for(finding.id)}]
 
-    scores = _scores(finding)
+    scores = _scores(finding, product_ids)
     if scores is not None:
         vuln["scores"] = scores
 
@@ -290,40 +231,13 @@ def _vulnerability(finding: "Finding") -> dict:
     return vuln
 
 
-# Finding reference types that name the finding's OWN source/detection location
-# (CSAF category "self"); everything else (advisory, fix, report, web, …) is an
-# "external" reference — including the published advisory/fix links a disclosed or
-# patched finding carries.
-_SELF_REF_TYPES = frozenset({"self", "source", "detection", "location"})
-
-
-def _references(finding: "Finding") -> list[dict]:
-    """Map EVERY finding reference into CSAF, categorized.
-
-    Emitting only the first reference would drop a published advisory or fix URL
-    that appears later in the list (e.g. on a disclosed/patched finding), so the
-    CSAF draft would under-report the disclosure link. All are carried, each as an
-    inert url value.
-    """
-    refs: list[dict] = []
-    for ref in finding.references:
-        # Skip an empty url: a CSAF reference url must be a real URI, and an empty
-        # one carries no disclosure link while making the draft non-conformant.
-        if not (ref.url and ref.url.strip()):
-            continue
-        rtype = ref.type.strip()
-        category = "self" if rtype in _SELF_REF_TYPES else "external"
-        # summary must be a non-empty string; default when the type is blank.
-        refs.append({"category": category, "summary": rtype or "reference", "url": ref.url})
-    return refs
-
-
 def finding_to_csaf(finding: "Finding") -> dict:
     """Map a Finding to a CSAF 2.0 security-advisory document (a plain dict)."""
     now = iso_z(utcnow())
     tracking_id = osv_id_for(finding.id)
+    product_tree, product_ids = _products(finding)
 
-    doc: dict = {
+    return {
         "document": {
             "category": "csaf_security_advisory",
             "csaf_version": CSAF_VERSION,
@@ -348,14 +262,11 @@ def finding_to_csaf(finding: "Finding") -> dict:
                 "version": "1",
             },
         },
-        "vulnerabilities": [_vulnerability(finding)],
+        "vulnerabilities": [_vulnerability(finding, product_ids)],
         # ALWAYS define the product tree (a placeholder product for a finding with
-        # no affected package), so the vulnerability's product_status never points
-        # at an undefined CSAFPID.
-        "product_tree": _product_tree(finding),
+        # no affected package), so product_status never points at an undefined id.
+        "product_tree": product_tree,
     }
-
-    return doc
 
 
 def validate_csaf(doc: dict) -> list[str]:

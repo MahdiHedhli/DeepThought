@@ -32,6 +32,7 @@ from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT7
 
 from ..schema.common import iso_z, utcnow  # noqa: F401  (re-exported timestamp helper)
+from ._cvss import cvss3_metric, cvss3_schema
 from .osv import _details, osv_id_for  # reuse body-prose scraping + id mapping
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -51,12 +52,17 @@ _PLACEHOLDER_VENDOR = "PLACEHOLDER"
 _DESCRIPTION_MAX = 4096
 
 # The official schema pulls CVSS and reference-tag definitions from sibling
-# files via ``file:`` refs that are not bundled. They are resolved to permissive
-# stubs so validation can run; the parts we author are still validated strictly.
-_EXTERNAL_FILE_REFS = (
+# files via ``file:`` refs that are not bundled. The CVSS v3.0/v3.1 refs resolve
+# to the shared, faithful in-code schemas so a metric this exporter emits is
+# actually validated (a malformed v3 vector is caught, not silently accepted);
+# the remaining refs (v2/v4 CVSS, tags) are permissive stubs — this exporter
+# never emits them and they only need to resolve so validation can run.
+_CVSS_REAL_REFS = {
+    "file:imports/cvss/cvss-v3.0.json": cvss3_schema("0"),
+    "file:imports/cvss/cvss-v3.1.json": cvss3_schema("1"),
+}
+_PERMISSIVE_FILE_REFS = (
     "file:imports/cvss/cvss-v2.0.json",
-    "file:imports/cvss/cvss-v3.0.json",
-    "file:imports/cvss/cvss-v3.1.json",
     "file:imports/cvss/cvss-v4.0.json",
     "file:tags/adp-tags.json",
     "file:tags/cna-tags.json",
@@ -90,39 +96,12 @@ def _published_schema() -> dict:
 @lru_cache(maxsize=1)
 def _registry() -> Registry:
     resources_list = [
+        (uri, Resource.from_contents(schema)) for uri, schema in _CVSS_REAL_REFS.items()
+    ] + [
         (uri, Resource.from_contents({}, default_specification=DRAFT7))
-        for uri in _EXTERNAL_FILE_REFS
+        for uri in _PERMISSIVE_FILE_REFS
     ]
     return Registry().with_resources(resources_list)
-
-
-def _base_severity(score: float) -> str:
-    """CVSS v3.x qualitative severity band for a base score."""
-    if score <= 0.0:
-        return "NONE"
-    if score < 4.0:
-        return "LOW"
-    if score < 7.0:
-        return "MEDIUM"
-    if score < 9.0:
-        return "HIGH"
-    return "CRITICAL"
-
-
-def _cvss3_version(vector: str) -> str | None:
-    """The CVSS 3.x minor version a vector declares, or ``None``.
-
-    The CVE metric object keys the score by version (``cvssV3_0`` vs
-    ``cvssV3_1``), so the key and ``version`` are derived from the stored vector.
-    A non-v3 vector (2.0/4.0) returns ``None`` and the caller omits the metric
-    rather than mislabel it.
-    """
-    v = (vector or "").strip()
-    if v.startswith("CVSS:3.0/"):
-        return "3.0"
-    if v.startswith("CVSS:3.1/"):
-        return "3.1"
-    return None
 
 
 def _description_value(finding: "Finding") -> str:
@@ -197,22 +176,16 @@ def finding_to_cve_draft(finding: "Finding") -> dict:
         "affected": _affected(finding),
     }
 
-    # Omit the metrics block entirely when there is no severity — or when the
-    # vector is not CVSS v3 (the metric is keyed by version: cvssV3_0/cvssV3_1).
+    # Emit a metric only for a WELL-FORMED CVSS v3 vector (cvss3_metric validates
+    # it and returns None otherwise), keyed by version (cvssV3_0/cvssV3_1). A
+    # malformed or non-v3 vector yields no metric rather than an invalid one — and
+    # the same shared schema now backs validate_cve_draft, so an external draft
+    # with a bad metric is reported too.
     if finding.severity is not None:
-        version = _cvss3_version(finding.severity.cvss_vector)
-        if version is not None:
-            key = "cvssV3_1" if version == "3.1" else "cvssV3_0"
-            cna["metrics"] = [
-                {
-                    key: {
-                        "version": version,
-                        "vectorString": finding.severity.cvss_vector,
-                        "baseScore": finding.severity.cvss_score,
-                        "baseSeverity": _base_severity(finding.severity.cvss_score),
-                    }
-                }
-            ]
+        metric = cvss3_metric(finding.severity.cvss_vector, finding.severity.cvss_score)
+        if metric is not None:
+            key = "cvssV3_1" if metric["version"] == "3.1" else "cvssV3_0"
+            cna["metrics"] = [{key: metric}]
 
     # references is required (minItems 1) and each url must be non-empty. Carry
     # EVERY non-empty finding reference url (so a later advisory/fix link is not

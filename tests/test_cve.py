@@ -193,6 +193,24 @@ def test_cve_cvss_30_vector_uses_cvssV3_0_key():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_omits_metric_for_a_malformed_v3_vector():
+    """A prefixed-but-partial v3 vector is not well-formed, so no metric is
+    emitted (rather than an invalid one), and the draft still validates."""
+    draft = finding_to_cve_draft(
+        make_finding(severity=Severity(cvss_vector="CVSS:3.1/AV:N", cvss_score=5.0))
+    )
+    assert "metrics" not in draft["containers"]["cna"]
+    assert validate_cve_draft(draft) == []
+
+
+def test_cve_validate_reports_a_malformed_cvss_metric():
+    """validate_cve_draft now validates the CVSS metric against the real schema:
+    an externally-corrupted metric (bad vectorString) is REPORTED, not accepted."""
+    draft = finding_to_cve_draft(make_finding())  # valid cvssV3_1 metric
+    draft["containers"]["cna"]["metrics"][0]["cvssV3_1"]["vectorString"] = "CVSS:3.1/AV:N"
+    assert validate_cve_draft(draft) != []
+
+
 def test_cve_non_v3_vector_omits_metrics():
     """A non-v3 vector (CVSS 4.0) yields no metrics block rather than a
     mislabelled one; the draft still validates structurally."""

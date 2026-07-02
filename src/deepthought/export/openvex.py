@@ -64,27 +64,41 @@ def _vuln_name(finding: "Finding") -> str:
     return finding.id
 
 
-def _purl(finding: "Finding") -> str:
-    """Build a percent-encoded Package-URL ``@id`` from the first affected package.
+def _purl_for(pkg, version: str | None) -> str | None:
+    """A percent-encoded Package-URL for one package/version, or ``None``.
 
-    PURL components are percent-encoded (the package's namespace ``/`` separators
-    kept), so an ecosystem or name with spaces or special characters (e.g. a valid
-    OSV ecosystem like ``GitHub Actions``) still yields a well-formed URI @id
-    instead of a broken ``pkg:github actions/...``. Falls back to a local IRI when
-    the finding has no affected package or no usable identity.
+    Components are percent-encoded (package namespace ``/`` separators kept), so an
+    ecosystem or name with spaces/special characters (e.g. a valid OSV ecosystem
+    like ``GitHub Actions``) still yields a well-formed URI. Returns ``None`` when
+    the package has no usable identity, so the caller can fall back.
+    """
+    if not (pkg.ecosystem and pkg.package):
+        return None
+    ptype = quote(pkg.ecosystem.lower(), safe="")
+    name = quote(pkg.package, safe="/")
+    purl = f"pkg:{ptype}/{name}"
+    if version:
+        purl = f"{purl}@{quote(version, safe='')}"
+    return purl
+
+
+def _products(finding: "Finding") -> list[dict]:
+    """One product ``@id`` per affected package/version — the FULL scope.
+
+    Emitting only the first package/version would silently drop the rest of the
+    affected scope. A finding with no usable affected identity falls back to a
+    single local IRI so ``products`` is never empty.
     """
     local = f"https://deepthought.local/product/{osv_id_for(finding.id)}"
-    if not finding.affected:
-        return local
-    pkg = finding.affected[0]
-    if not (pkg.ecosystem and pkg.package):
-        return local
-    ptype = quote(pkg.ecosystem.lower(), safe="")
-    name = quote(pkg.package, safe="/")  # keep namespace/name separators
-    purl = f"pkg:{ptype}/{name}"
-    if pkg.versions and pkg.versions[0]:
-        purl = f"{purl}@{quote(pkg.versions[0], safe='')}"
-    return purl
+    products: list[dict] = []
+    for pkg in finding.affected or []:
+        versions = list(pkg.versions) if pkg.versions else [None]
+        for version in versions:
+            purl = _purl_for(pkg, version)
+            products.append({"@id": purl or local})
+    if not products:
+        products.append({"@id": local})
+    return products
 
 
 def finding_to_openvex(finding: "Finding") -> dict:
@@ -103,7 +117,7 @@ def finding_to_openvex(finding: "Finding") -> dict:
                 # internal finding id so the draft never appears to name a
                 # non-existent assigned CVE.
                 "vulnerability": {"name": _vuln_name(finding)},
-                "products": [{"@id": _purl(finding)}],
+                "products": _products(finding),
                 # A verified finding is affected; we never assert otherwise.
                 "status": "affected",
                 # affected obliges an action statement; refuse to invent one.

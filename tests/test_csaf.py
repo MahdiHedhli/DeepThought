@@ -142,12 +142,13 @@ def test_csaf_injection_inertness():
 
 
 def test_csaf_product_status_known_affected():
+    # make_finding() has one package with TWO versions -> two products, both known-affected.
     doc = finding_to_csaf(make_finding())
     vuln = doc["vulnerabilities"][0]
-    pid = doc["product_tree"]["branches"][0]["branches"][0]["branches"][0][
-        "product"
-    ]["product_id"]
-    assert vuln["product_status"]["known_affected"] == [pid]
+    version_branches = doc["product_tree"]["branches"][0]["branches"][0]["branches"]
+    pids = [vb["product"]["product_id"] for vb in version_branches]
+    assert len(pids) == 2
+    assert vuln["product_status"]["known_affected"] == pids
 
 
 def test_csaf_corrupt_doc_is_reported():
@@ -174,14 +175,38 @@ def test_csaf_non_v3_vector_omits_scores_and_still_validates():
     assert validate_csaf(doc) == [], validate_csaf(doc)
 
 
-def test_csaf_rejects_an_incomplete_cvss_vector():
-    """A prefixed-but-partial vector (missing mandatory base metrics) must FAIL
-    validation — the vectorString pattern requires the full ordered base, so a
-    finding with a malformed CVSS vector cannot green-light check."""
+def test_csaf_omits_an_incomplete_cvss_vector():
+    """A prefixed-but-partial vector is not a well-formed CVSS v3 vector, so the
+    score is OMITTED (never emitted as a valid-looking-but-invalid score) rather
+    than blocking the whole draft; the doc still validates."""
     doc = finding_to_csaf(
         make_finding(severity=Severity(cvss_vector="CVSS:3.1/AV:N", cvss_score=5.0))
     )
-    assert validate_csaf(doc) != []
+    assert "scores" not in doc["vulnerabilities"][0]
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
+def test_csaf_emits_every_affected_package_and_version():
+    """Multi-package/multi-version scope is preserved: one product per (package,
+    version), all known-affected and all defined in the product tree."""
+    import json as _json
+
+    from deepthought.schema import AffectedPackage
+
+    doc = finding_to_csaf(
+        make_finding(
+            affected=[
+                AffectedPackage(ecosystem="Packagist", package="php/php-src", versions=["8.3.0", "8.3.1"]),
+                AffectedPackage(ecosystem="PyPI", package="foo", versions=["1.0"]),
+            ]
+        )
+    )
+    known = doc["vulnerabilities"][0]["product_status"]["known_affected"]
+    assert len(known) == 3  # 2 + 1 versions
+    tree = _json.dumps(doc["product_tree"])
+    for pid in known:
+        assert pid in tree  # every known-affected id is defined in the tree
+    assert validate_csaf(doc) == [], validate_csaf(doc)
 
 
 def test_csaf_preserves_all_references():

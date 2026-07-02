@@ -159,6 +159,27 @@ def test_product_id_is_a_well_formed_uri_for_ecosystems_with_spaces():
     assert validate_openvex(doc) == []
 
 
+def test_emits_a_product_for_every_affected_package_and_version():
+    """The OpenVEX statement carries one product per (package, version) — the full
+    affected scope, not just the first."""
+    from deepthought.schema import AffectedPackage
+
+    doc = finding_to_openvex(
+        make_finding(
+            affected=[
+                AffectedPackage(ecosystem="Packagist", package="php/php-src", versions=["8.3.0", "8.3.1"]),
+                AffectedPackage(ecosystem="PyPI", package="foo", versions=["1.0"]),
+            ]
+        )
+    )
+    ids = [p["@id"] for p in doc["statements"][0]["products"]]
+    assert len(ids) == 3
+    assert any("8.3.0" in i for i in ids)
+    assert any("8.3.1" in i for i in ids)
+    assert any("foo" in i for i in ids)
+    assert validate_openvex(doc) == []
+
+
 def test_validate_does_not_crash_on_non_list_statements():
     """A truthy-but-non-list statements value must be REPORTED, not raise — the
     validator's list[str] contract holds for any input."""
