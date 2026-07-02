@@ -360,12 +360,20 @@ def playbook_disclose(
     outside this tool; Deep Thought drafts only.
     """
     store = _store(state)
-    # Refuse an unknown project BEFORE entering the harness. Otherwise run_session
-    # would persist an interrupted Session referencing a missing project — an
-    # orphan that makes a later `check` fail until it is hand-deleted.
+    # Refuse an unknown project or finding BEFORE entering the harness, so a typo
+    # never persists a Session record at all. (The session ALSO refuses a missing
+    # finding cleanly for the session-API path, but a CLI typo should write
+    # nothing.) The project check additionally avoids an orphan Session that would
+    # fail a later `check`.
     if store.get_project(project) is None:
         typer.echo(
             f"disclose refused: project {project!r} not found. Nothing was drafted.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if store.get_finding(finding) is None:
+        typer.echo(
+            f"disclose refused: finding {finding!r} not found. Nothing was drafted.",
             err=True,
         )
         raise typer.Exit(code=2)

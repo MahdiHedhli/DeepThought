@@ -65,7 +65,7 @@ def test_disclose_refuses_a_non_verified_finding(tmp_path):
     assert "review the drafts and send" not in result.output
 
 
-def test_disclose_missing_finding_is_a_clean_refusal(tmp_path):
+def test_disclose_missing_finding_is_refused_without_writing_a_session(tmp_path):
     state = tmp_path / "state"
     store = FileStore(state)
     store.save_project(make_project())
@@ -75,9 +75,11 @@ def test_disclose_missing_finding_is_a_clean_refusal(tmp_path):
         ["playbook", "disclose", "--state", str(state),
          "--project", "php-src", "--finding", "F-9999"],
     )
-    assert result.exit_code == 0, result.output   # clean refusal, not a crash
+    assert result.exit_code == 2
     assert "not found" in result.output
     assert "unchanged (still verified)" not in result.output
+    # A CLI typo persists no session record (mirrors the unknown-project refusal).
+    assert FileStore(state).list_sessions() == []
 
 
 def test_disclose_unknown_project_refused_without_dirtying_state(tmp_path):
