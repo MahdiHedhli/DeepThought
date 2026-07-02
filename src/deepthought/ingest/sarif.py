@@ -169,6 +169,15 @@ _SAFE_HTTP_URL_RE = re.compile(r"https?://(?![/?#])[!-~]+", re.IGNORECASE)
 # refused by the scope filter regardless of the allowlist.
 _URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 
+# A SARIF result (or its rule) may carry a `cve` and `cwe` in its properties for a
+# known-vulnerability rediscovery. Both are copied onto the finding ONLY when they
+# match these strict, bounded patterns — so untrusted SARIF cannot inject an
+# arbitrary/oversized string or a sentinel id into persisted state or OSV output.
+# The CVE pattern is the official CVE-Program form (the same one the disclosure
+# exporter uses to reject non-submittable sentinels).
+_CVE_RE = re.compile(r"CVE-[0-9]{4}-[0-9]{4,19}")
+_CWE_RE = re.compile(r"CWE-[0-9]{1,7}")
+
 
 class SarifError(ValueError):
     """Raised when a file is not a valid, accepted SARIF 2.1.0 document."""
@@ -276,6 +285,28 @@ def _rule_help_uri(rule: dict | None) -> str | None:
         return None
     uri = rule.get("helpUri")
     return uri.strip() if isinstance(uri, str) and uri.strip() else None
+
+
+def _known_vuln_ids(result: dict, rule: dict | None) -> tuple[str | None, str | None]:
+    """A validated (cve, cwe) pair from the result's — then the rule's —
+    ``properties``. A value that is not exactly a well-formed CVE / CWE id is
+    dropped (never persisted), so untrusted SARIF cannot smuggle an arbitrary or
+    sentinel string onto the finding. Result properties win over rule properties.
+    """
+    merged: dict = {}
+    for source in (rule, result):
+        if isinstance(source, dict):
+            props = source.get("properties")
+            if isinstance(props, dict):
+                merged.update(props)
+
+    def _match(pattern: re.Pattern[str], key: str) -> str | None:
+        value = merged.get(key)
+        if isinstance(value, str) and pattern.fullmatch(value.strip().upper()):
+            return value.strip().upper()
+        return None
+
+    return _match(_CVE_RE, "cve"), _match(_CWE_RE, "cwe")
 
 
 def _rule_tags(rule: dict | None) -> list[str]:
@@ -453,12 +484,19 @@ def sarif_to_findings(
             # text so an absurdly long uri cannot push the body over _BODY_MAX.
             location = f"\n\n**Location:** `{loc_text[:_LOCATION_MAX]}`"
 
-        # Bound the untrusted SARIF text, but preserve the (now bounded) location:
-        # reserve room for it and truncate the MESSAGE, not the appended location.
-        # The final slice is a backstop; by construction header+location <= budget.
+        # A known-vulnerability rediscovery may carry a validated cve/cwe; the cve
+        # lands on the finding (mirrored into OSV aliases on export) and the cwe is
+        # rendered into the body so the weakness travels with the record.
+        cve, cwe = _known_vuln_ids(result, rule)
+        weakness = f"\n\n**Weakness:** `{cwe}`" if cwe else ""
+
+        # Bound the untrusted SARIF text, but preserve the (now bounded) location
+        # and weakness lines: reserve room for them and truncate the MESSAGE, not
+        # the appended segments. The final slice is a backstop; by construction
+        # header + location + weakness <= budget.
         header = "## Root cause\n\n"
-        msg_budget = max(0, _BODY_MAX - len(header) - len(location))
-        body = f"{header}{message[:msg_budget]}{location}"[:_BODY_MAX]
+        msg_budget = max(0, _BODY_MAX - len(header) - len(location) - len(weakness))
+        body = f"{header}{message[:msg_budget]}{location}{weakness}"[:_BODY_MAX]
 
         findings.append(
             Finding(
@@ -469,6 +507,7 @@ def sarif_to_findings(
                 references=references,
                 affected=[],
                 evidence_ref=None,
+                cve=cve,
                 body=body,
             )
         )

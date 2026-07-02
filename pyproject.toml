@@ -39,6 +39,6 @@ artifacts = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "benchmarks"]
 addopts = "-q"
-pythonpath = ["src"]
+pythonpath = ["src", "benchmarks"]
