@@ -9,7 +9,7 @@ nothing that expands scope, executes target code, or transmits.
 
 from __future__ import annotations
 
-from ..schema import FindingStatus, Project, SessionType
+from ..schema import FindingStatus, GateOutcome, Project, SessionType
 from ..schema.loop import ActionKind, LoopAction
 from ..store import Store
 
@@ -25,13 +25,17 @@ def select_next_action(
     done = done or set()
     pid = project.id
     sessions = store.list_sessions(pid)
-    types_run = {s.type for s in sessions}
+    # Only a session whose gate PROCEEDED counts as completed work: a gate-held/
+    # refused attempt (e.g. authorization temporarily removed) still persists a
+    # session record, but it did no work, so it must not mark its rung done — else
+    # the loop could never resume that step after the operator fixes the gate.
+    succeeded = {s.type for s in sessions if s.gate_outcome is GateOutcome.proceed}
 
     def fresh(kind: ActionKind, target: str) -> bool:
         return (kind.value, target) not in done
 
     # 1. STATUS — a cheap situational baseline, once per project.
-    if SessionType.status not in types_run and fresh(ActionKind.status, pid):
+    if SessionType.status not in succeeded and fresh(ActionKind.status, pid):
         return LoopAction(kind=ActionKind.status, project=pid)
 
     # Progress, not mere session existence, is the completion signal for the recon
@@ -47,21 +51,25 @@ def select_next_action(
         return LoopAction(kind=ActionKind.map, project=pid)
 
     # 3. DISCOVER — produce candidates over the MAPPED surface (gated on Coverage,
-    #    so it never runs in the degenerate pre-map state), once per project.
-    if has_coverage and SessionType.discover not in types_run and fresh(ActionKind.discover, pid):
+    #    so it never runs in the degenerate pre-map state), once per SUCCESSFUL run.
+    if has_coverage and SessionType.discover not in succeeded and fresh(ActionKind.discover, pid):
         return LoopAction(kind=ActionKind.discover, project=pid)
 
     findings = store.list_findings(pid)
     verified = [f for f in findings if f.status is FindingStatus.verified]
 
-    # A verified finding hunted in a PRIOR loop run is recorded in that run's
-    # trace — the cross-run "done" signal, so repeated `deepthought loop`
-    # invocations converge instead of re-hunting the same finding forever.
+    # A verified finding SUCCESSFULLY hunted in a PRIOR loop run is recorded in
+    # that run's trace — the cross-run "done" signal, so repeated `deepthought
+    # loop` invocations converge instead of re-hunting forever. A gate-refused
+    # hunt step is not progress and is excluded, so the loop resumes it once the
+    # gate is fixed.
     hunted_before = {
         step.finding
         for run in store.list_loop_runs(pid)
         for step in run.trace
-        if step.kind is ActionKind.sibling_hunt and step.finding
+        if step.kind is ActionKind.sibling_hunt
+        and step.gate_outcome is GateOutcome.proceed
+        and step.finding
     }
 
     # 4. SIBLING HUNT — variants of the first verified finding not yet hunted.

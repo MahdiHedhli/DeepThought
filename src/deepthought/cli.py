@@ -16,6 +16,7 @@ from typing import Optional
 from urllib.parse import quote
 
 import typer
+from pydantic import ValidationError
 
 from .check import run_check
 from .export.advisory import finding_to_advisory
@@ -582,11 +583,15 @@ def loop(
             "(--max-sessions / --max-seconds / --max-tokens) — it is never unbounded"
         )
         raise typer.Exit(code=2)
-    budget = LoopBudget(
-        max_sessions=max_sessions,
-        max_wall_seconds=max_seconds,
-        max_context_tokens=max_tokens,
-    )
+    try:
+        budget = LoopBudget(
+            max_sessions=max_sessions,
+            max_wall_seconds=max_seconds,
+            max_context_tokens=max_tokens,
+        )
+    except ValidationError:
+        typer.echo("error: every budget limit must be a positive number")
+        raise typer.Exit(code=2)
     try:
         run = run_loop(_store(state), HermesUltraCodeGate(), project, budget)
     except StoreError as exc:

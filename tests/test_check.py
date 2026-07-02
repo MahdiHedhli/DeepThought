@@ -63,6 +63,20 @@ def test_check_validates_loop_run_records(state_dir):
     assert any("schema violation" in e for e in bad.errors)
 
 
+def test_check_does_not_abort_on_a_corrupt_session(state_dir):
+    """A single corrupt session file is reported by the schema pass and does NOT
+    abort the rest of check — the disclosure-draft check iterates already-parsed
+    sessions instead of re-reading (and raising) from disk."""
+    store = _consistent_store(state_dir)
+    (state_dir / "sessions" / "S-bad.md").write_text(
+        "---\nid: S-bad\ntype: bogus_type\nstarted: t\n---\n"
+    )
+    report = run_check(store)
+    assert not report.ok
+    assert any("schema violation" in e for e in report.errors)
+    assert not any("check raised" in e for e in report.errors)
+
+
 def test_check_flags_loop_trace_orphans(state_dir):
     """A LoopRun trace that names a deleted finding/session/project must be reported
     — the audit record cannot silently point at missing state."""

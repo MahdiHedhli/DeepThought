@@ -55,6 +55,18 @@ def test_loop_requires_a_budget(tmp_path):
     assert "budget" in result.output.lower() or "limit" in result.output.lower()
 
 
+def test_loop_rejects_a_non_positive_budget(tmp_path):
+    state = tmp_path / "state"
+    (tmp_path / "repo").mkdir()
+    _register(state, tmp_path / "repo")
+    result = runner.invoke(
+        app, ["loop", "--project", "repo", "--state", str(state), "--max-sessions=-1"]
+    )
+    assert result.exit_code != 0
+    assert "positive" in result.output.lower()
+    assert "Traceback" not in result.output  # a clean message, not a raw crash
+
+
 def test_loop_missing_project_is_a_governed_refusal(tmp_path):
     state = tmp_path / "state"
     (tmp_path / "repo").mkdir()

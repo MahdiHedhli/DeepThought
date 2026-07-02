@@ -68,7 +68,7 @@ def run_check(store: Store) -> CheckReport:
         _check_osv(parsed["finding"], report)
         _check_csaf(parsed["finding"], report)
         _check_openvex(parsed["finding"], report)
-        _check_disclosure_drafts(store, report)
+        _check_disclosure_drafts(parsed["session"], store, report)
     except Exception as exc:  # a check that raises is a failed check
         report.fail(f"check raised: {exc!r}")
     return report
@@ -215,7 +215,9 @@ _DISCLOSURE_SCHEMA_DRAFTS = {
 }
 
 
-def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
+def _check_disclosure_drafts(
+    sessions: list[Session], store: Store, report: CheckReport
+) -> None:
     """Validate the PERSISTED disclosure drafts, not just a re-derivation.
 
     A DISCLOSURE session writes four ``detail/<session>/disclosure-*`` artifacts —
@@ -224,8 +226,12 @@ def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
     every refusal leaves it empty). For such a session ALL four artifacts must
     exist (a missing one fails the gate), and the two JSON drafts must additionally
     be schema-conformant. A refused session is skipped.
+
+    Iterates the ALREADY-PARSED sessions (not a fresh ``store.list_sessions()``)
+    so a single corrupt session file cannot raise here and abort the whole check
+    after the schema pass already reported it cleanly.
     """
-    for session in store.list_sessions():
+    for session in sessions:
         if session.type is not SessionType.disclosure:
             continue
         if not session.findings_touched:

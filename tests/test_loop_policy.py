@@ -22,9 +22,12 @@ def _proj(store):
     return p
 
 
-def _add_session(store, stype, sid, **kw):
+def _add_session(store, stype, sid, gate_outcome="proceed", **kw):
+    # Default to a gate-PROCEEDED session — only a session that proceeded counts as
+    # completed work in the policy (a refused attempt must not mark its rung done).
     store.save_session(Session(id=sid, type=stype, project="php-src",
-                               started="2026-07-02T00:00:00Z", **kw))
+                               started="2026-07-02T00:00:00Z",
+                               gate_outcome=gate_outcome, **kw))
 
 
 def _past_recon(store):
@@ -67,6 +70,40 @@ def test_map_reruns_when_it_produced_no_coverage(state_dir):
     assert select_next_action(store, p).kind is ActionKind.map  # re-proposed
     store.save_coverage(make_coverage())                        # now MAP made progress
     assert select_next_action(store, p).kind is ActionKind.discover
+
+
+def test_refused_discover_attempt_is_not_counted_as_done(state_dir):
+    """A gate-refused DISCOVER (e.g. authorization was temporarily removed) is not
+    progress — after the gate is fixed the loop re-proposes DISCOVER instead of
+    reporting a fixed point without ever discovering."""
+    store = FileStore(state_dir)
+    p = _proj(store)
+    _add_session(store, "status", "S-1")
+    store.save_coverage(make_coverage())
+    _add_session(store, "discover", "S-3", gate_outcome="refuse")  # a REFUSED attempt
+    assert select_next_action(store, p).kind is ActionKind.discover  # re-proposed
+    _add_session(store, "discover", "S-4", gate_outcome="proceed")   # now it succeeds
+    assert select_next_action(store, p) is None
+
+
+def test_refused_sibling_hunt_in_prior_trace_is_not_counted(state_dir):
+    """A gate-refused sibling-hunt step in a prior loop trace is not 'hunted' —
+    after the gate is fixed the next run resumes variant analysis."""
+    from deepthought.loop import LoopBudget
+    from deepthought.schema.loop import LoopRun, LoopStep
+
+    store = FileStore(state_dir)
+    p = _proj(store)
+    _past_recon(store)
+    store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
+    store.save_loop_run(LoopRun(
+        id="L-1", project="php-src", started="t", stop_reason="gate_refused",
+        budget=LoopBudget(max_sessions=5),
+        trace=[LoopStep(kind="sibling_hunt", session_id="S-9", finding="F-1",
+                        gate_outcome="refuse")],
+        body="## Summary\n\nx\n\n## Next steps\n\ny",
+    ))
+    assert select_next_action(store, p).kind is ActionKind.sibling_hunt  # resumed
 
 
 def test_verified_finding_yields_sibling_hunt_then_disclosure(state_dir):

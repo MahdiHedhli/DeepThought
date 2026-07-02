@@ -137,8 +137,9 @@ def run_loop(
         if record.gate_outcome is not GateOutcome.proceed:
             # Carry the gate's own remediation reason into the teach-back rather
             # than falling back to the generic fixed-point message.
+            outcome = record.gate_outcome.value if record.gate_outcome else "unknown"
             outstanding.append(
-                f"Gate {record.gate_outcome.value} on {action.project!r}: "
+                f"Gate {outcome} on {action.project!r}: "
                 f"{record.gate_reason} — resolve authorization/scope, then re-run."
             )
             stop_reason = (
