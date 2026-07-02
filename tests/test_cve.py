@@ -138,6 +138,27 @@ def test_cve_bounds_and_skips_empty_versions():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_dedupes_versions_and_references():
+    """affected[].versions and references are uniqueItems: duplicate stored
+    versions/urls are collapsed so the persisted draft stays conformant."""
+    from deepthought.schema import AffectedPackage, Reference
+
+    draft = finding_to_cve_draft(
+        make_finding(
+            affected=[AffectedPackage(ecosystem="PyPI", package="p", versions=["1.0", "1.0", "2.0"])],
+            references=[
+                Reference(type="web", url="https://example.test/dup"),
+                Reference(type="advisory", url="https://example.test/dup"),
+            ],
+        )
+    )
+    versions = [v["version"] for v in draft["containers"]["cna"]["affected"][0]["versions"]]
+    assert versions == ["1.0", "2.0"]
+    urls = [r["url"] for r in draft["containers"]["cna"]["references"]]
+    assert urls == ["https://example.test/dup"]
+    assert validate_cve_draft(draft) == []
+
+
 def test_validate_cve_draft_handles_multiple_errors_with_mixed_paths():
     """A structurally-broken draft with errors across object keys AND array
     indices sorts and returns a list[str] without raising (paths stringified)."""

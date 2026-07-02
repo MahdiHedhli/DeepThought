@@ -138,13 +138,21 @@ def _affected(finding: "Finding") -> list[dict]:
     """
     entries: list[dict] = []
     for pkg in finding.affected or []:
-        # Only non-empty versions, each bounded to the schema limit (1..1024) — an
-        # empty or over-long version would make the persisted draft non-conformant.
-        versions = [
-            {"version": v.strip()[:_VERSION_MAX], "status": "affected", "versionType": "semver"}
-            for v in (pkg.versions or [])
-            if v and v.strip()
-        ]
+        # Only non-empty versions, each bounded to the schema limit (1..1024) and
+        # DEDUPED (affected[].versions is uniqueItems) — an empty, over-long, or
+        # duplicate version would make the persisted draft non-conformant.
+        versions = []
+        seen_versions: set[str] = set()
+        for v in pkg.versions or []:
+            if not (v and v.strip()):
+                continue
+            value = v.strip()[:_VERSION_MAX]
+            if value in seen_versions:
+                continue
+            seen_versions.add(value)
+            versions.append(
+                {"version": value, "status": "affected", "versionType": "semver"}
+            )
         if not versions:
             versions = [{"version": "0", "status": "affected", "versionType": "semver"}]
         entries.append(
@@ -199,14 +207,17 @@ def finding_to_cve_draft(finding: "Finding") -> dict:
     # EVERY non-empty finding reference url (so a later advisory/fix link is not
     # dropped and an empty first url does not emit an invalid ""), falling back to
     # a stable placeholder only when the finding has no usable url at all.
-    # Only non-empty urls within the schema length limit (an over-long url would
-    # make the draft non-conformant); drop the rest, and fall back to a stable
-    # placeholder when none remain.
-    ref_urls = [
-        r.url
-        for r in finding.references
-        if r.url and r.url.strip() and len(r.url) <= _URL_MAX
-    ]
+    # Only non-empty urls within the schema length limit, DEDUPED (references is
+    # uniqueItems); drop the rest, and fall back to a stable placeholder when none
+    # remain.
+    ref_urls: list[str] = []
+    seen_urls: set[str] = set()
+    for ref in finding.references:
+        url = ref.url
+        if not (url and url.strip()) or len(url) > _URL_MAX or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        ref_urls.append(url)
     if not ref_urls:
         ref_urls = [f"https://deepthought.invalid/finding/{osv_id_for(finding.id)}"]
     cna["references"] = [{"url": url, "tags": ["vdb-entry"]} for url in ref_urls]

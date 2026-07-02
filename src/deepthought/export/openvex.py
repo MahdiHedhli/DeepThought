@@ -97,11 +97,15 @@ def _products(finding: "Finding") -> list[dict]:
     """
     local = f"https://deepthought.local/product/{osv_id_for(finding.id)}"
     products: list[dict] = []
+    seen: set[str] = set()  # OpenVEX statement products must be unique
     for pkg in finding.affected or []:
         versions = list(pkg.versions) if pkg.versions else [None]
         for version in versions:
-            purl = _purl_for(pkg, version)
-            products.append({"@id": purl or local})
+            pid = _purl_for(pkg, version) or local
+            if pid in seen:
+                continue
+            seen.add(pid)
+            products.append({"@id": pid})
     if not products:
         products.append({"@id": local})
     return products
@@ -178,11 +182,16 @@ def validate_openvex(doc: dict) -> list[str]:
             if not isinstance(products, list) or not products:
                 errors.append(f"{base}/products: must be a non-empty list")
             else:
+                product_ids: list[str] = []
                 for j, product in enumerate(products):
                     if not isinstance(product, dict) or not _nonempty_str(product.get("@id")):
                         errors.append(
                             f"{base}/products/{j}/@id: each product requires a non-empty @id"
                         )
+                    else:
+                        product_ids.append(product["@id"])
+                if len(product_ids) != len(set(product_ids)):
+                    errors.append(f"{base}/products: product @ids must be unique")
 
             status = stmt.get("status")
             # isinstance BEFORE the set membership test: a non-string (e.g. a JSON

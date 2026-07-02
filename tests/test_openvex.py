@@ -197,6 +197,22 @@ def test_validate_requires_non_empty_strings_not_truthy_values():
     assert any("@id" in e for e in validate_openvex(doc3))
 
 
+def test_products_are_deduplicated_and_uniqueness_is_validated():
+    """Duplicate affected versions must not yield duplicate product @ids (OpenVEX
+    products must be unique); the validator also reports a hand-built duplicate."""
+    from deepthought.schema import AffectedPackage
+
+    doc = finding_to_openvex(
+        make_finding(affected=[AffectedPackage(ecosystem="PyPI", package="p", versions=["1.0", "1.0"])])
+    )
+    ids = [p["@id"] for p in doc["statements"][0]["products"]]
+    assert len(ids) == len(set(ids)) == 1
+    assert validate_openvex(doc) == []
+    # A hand-built duplicate is reported.
+    doc["statements"][0]["products"] = [{"@id": "pkg:x/y"}, {"@id": "pkg:x/y"}]
+    assert any("unique" in e for e in validate_openvex(doc))
+
+
 def test_validate_does_not_crash_on_non_string_status():
     """A non-string status (JSON object/array — unhashable) is REPORTED, not a
     crash — the set-membership test is guarded by an isinstance check."""
