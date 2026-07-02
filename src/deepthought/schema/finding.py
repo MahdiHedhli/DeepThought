@@ -11,7 +11,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict
 
-from .common import Record
+from .common import Record, RecordId
 
 
 class FindingStatus(str, Enum):
@@ -79,8 +79,8 @@ class TransitionLogEntry(BaseModel):
 
 
 class Finding(Record):
-    id: str
-    project: str
+    id: RecordId
+    project: RecordId  # references a Project.id; also a coverage/path segment
     summary: str
     status: FindingStatus = FindingStatus.candidate
     severity: Severity | None = None

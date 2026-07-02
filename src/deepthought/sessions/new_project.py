@@ -21,7 +21,8 @@ from ..schema import (
     SessionType,
     SourceType,
 )
-from ..store import Store
+from ..schema.common import is_record_id, safe_record_id
+from ..store import DuplicateProjectError, Store
 
 
 def default_verify_git_url(url: str) -> bool:
@@ -32,12 +33,18 @@ def default_verify_git_url(url: str) -> bool:
     """
     if not url:
         return False
+    # A url starting with ``-`` would be parsed by git as an OPTION, not a
+    # repository (argument injection — e.g. ``--upload-pack=<cmd>`` runs a
+    # command). Refuse it outright, and pass the url only after a ``--`` options
+    # terminator so it is always a positional argument.
+    if url.startswith("-"):
+        return False
     local = Path(url)
     if local.exists():
         return True
     try:
         result = subprocess.run(
-            ["git", "ls-remote", "--exit-code", url, "HEAD"],
+            ["git", "ls-remote", "--exit-code", "--", url, "HEAD"],
             capture_output=True,
             timeout=20,
             check=False,
@@ -48,11 +55,15 @@ def default_verify_git_url(url: str) -> bool:
 
 
 def derive_project_id(name: str, git_url: str | None, local_path: str | None) -> str:
+    # The derived id becomes ``Project.id`` (a RecordId), so it must be a single
+    # safe path segment: ``safe_record_id`` normalises the repo/local tail (trims
+    # the leading/trailing punctuation the pattern forbids and bounds the length)
+    # so a tail like ``_repo``/``repo.`` or an over-long name can't crash the NEW
+    # PROJECT flow with a validation error.
     source = git_url or local_path or name
     tail = source.rstrip("/").split("/")[-1]
     tail = re.sub(r"\.git$", "", tail)
-    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", tail).strip("-").lower()
-    return slug or "project"
+    return safe_record_id(tail.lower(), fallback="project")
 
 
 class NewProjectSession(BaseSession):
@@ -100,6 +111,16 @@ class NewProjectSession(BaseSession):
         )
 
     def run(self, store: Store, session_id: str) -> SessionOutcome:
+        # An explicit project id (CLI --project-id) is used verbatim as Project.id
+        # (a RecordId); reject an unsafe value cleanly rather than let Project(...)
+        # raise a bare ValidationError below. A derived id is always normalised
+        # (safe_record_id), so only the explicit override needs this guard.
+        if self.explicit_id is not None and not is_record_id(self.explicit_id):
+            return SessionOutcome(
+                summary=f"Refused: invalid project id {self.explicit_id!r}.",
+                next_steps="Provide a valid project id — a single safe path segment.",
+            )
+
         # Resolve to one project on a repeat — never create a duplicate.
         existing = store.resolve_project(
             git_url=self.git_url, local_path=self.local_path
@@ -134,7 +155,19 @@ class NewProjectSession(BaseSession):
             status=ProjectStatus.active,
             body=self.notes or f"Registered target {identity!r}.",
         )
-        store.save_project(project)
+        try:
+            store.save_project(project)
+        except DuplicateProjectError as exc:
+            # A different project already holds this (derived) id — refuse rather
+            # than clobber it. resolve_project above already handled the same
+            # identity, so this is a genuine id collision.
+            return SessionOutcome(
+                summary=f"Refused: {exc}.",
+                next_steps=(
+                    "Two distinct targets derive the same project id; pass an "
+                    "explicit project_id to disambiguate, then retry."
+                ),
+            )
         return SessionOutcome(
             summary=(
                 f"Registered project {project.id!r} ({self.source_type.value}) with "

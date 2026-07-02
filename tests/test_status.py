@@ -35,6 +35,19 @@ def test_summarizes_findings_and_coverage(state_dir):
     assert "1 coverage area(s)" in record.body
 
 
+def test_unsafe_project_id_is_refused_not_crashed(state_dir):
+    """A raw --project id that is not a safe record id (``../x``, ``org/repo``, a
+    trailing newline) must produce a controlled refusal — never an unhandled
+    Pydantic ValidationError from building the Session record."""
+    store = _seeded_store(state_dir)
+    for bad in ("../x", "org/repo", "a b", "F-0001\n", ".."):
+        record = run_session(store, GATE, StatusSession(bad))
+        assert record.gate_outcome is GateOutcome.refuse, bad
+        assert "invalid project id" in (record.body or "").lower(), bad
+        # the refused session logged nothing about a real project
+        assert record.project is None, bad
+
+
 def test_writes_next_steps(state_dir):
     store = _seeded_store(state_dir)
     record = run_session(store, GATE, StatusSession("php-src"))

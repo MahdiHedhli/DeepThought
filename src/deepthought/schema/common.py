@@ -11,13 +11,56 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # A record file is exactly: a YAML front-matter block delimited by --- lines,
 # then a Markdown body. The body may itself be empty.
 _FRONT_MATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.DOTALL)
+
+# A record id is used VERBATIM as a filename (e.g. ``findings/<id>.md``), so it
+# must be a single safe path segment: it starts and ends with an alphanumeric and
+# in between allows only ``._-``. This forbids path separators, ``..``/``.``,
+# whitespace, control characters, and leading/trailing punctuation — so a crafted
+# id can never traverse out of the store or collide with a special name. Bounded
+# to 128 chars to stay a valid filename. (Existing ids — ``F-0007``, ``php-src``,
+# ``S-2026-07-02-0001`` — all conform.)
+_SAFE_ID_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$"
+RecordId = Annotated[str, StringConstraints(pattern=_SAFE_ID_PATTERN)]
+_SAFE_ID_RE = re.compile(_SAFE_ID_PATTERN)
+
+
+def is_record_id(value: object) -> bool:
+    """Whether ``value`` is a string that is a valid ``RecordId``.
+
+    A cheap predicate for guarding a RAW, user-supplied id BEFORE it is assigned
+    to a ``RecordId`` field — so an unsafe id (``../x``, ``org/repo``, a trailing
+    newline) becomes a controlled refusal instead of an unhandled ValidationError.
+    Uses ``fullmatch`` so a trailing ``\\n`` (which ``$`` would allow) is rejected,
+    keeping this in agreement with the model constraint.
+    """
+    return isinstance(value, str) and _SAFE_ID_RE.fullmatch(value) is not None
+
+# The longest string _SAFE_ID_PATTERN accepts (1 + 126 + 1). A derived id is
+# bounded to this so it stays a valid filename and a valid RecordId.
+_SAFE_ID_MAXLEN = 128
+_UNSAFE_ID_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def safe_record_id(raw: str, *, fallback: str) -> str:
+    """Coerce an arbitrary string into a value that matches ``_SAFE_ID_PATTERN``.
+
+    Any id we *derive* (e.g. a project id from a repo tail) feeds straight into a
+    ``RecordId`` field, so it must be a single safe path segment or the model
+    refuses to construct. This replaces every unsafe run with ``-``, trims the
+    leading/trailing punctuation the pattern forbids, and bounds the length —
+    returning ``fallback`` (which must itself be a valid id) when nothing safe
+    remains. The output is guaranteed to satisfy ``_SAFE_ID_PATTERN``.
+    """
+    slug = _UNSAFE_ID_CHARS.sub("-", raw).strip("._-")[:_SAFE_ID_MAXLEN].strip("._-")
+    return slug or fallback
 
 
 class RecordError(ValueError):

@@ -222,9 +222,12 @@ def test_products_are_deduplicated_and_uniqueness_is_validated():
 
 
 def test_whitespace_finding_id_yields_a_valid_document_id():
-    """A model-valid finding id with whitespace must not produce an invalid @id /
-    product IRI — the id is percent-encoded."""
-    doc = finding_to_openvex(make_finding(id="F 0007", affected=[]))
+    """DEFENCE-IN-DEPTH: the Finding model now forbids a whitespace id, but if one
+    ever bypassed validation the @id / product IRI must still be valid — the id is
+    percent-encoded. Smuggle a bad id past validation to prove it."""
+    f = make_finding(affected=[])
+    object.__setattr__(f, "id", "F 0007")
+    doc = finding_to_openvex(f)
     assert " " not in doc["@id"]
     assert " " not in doc["statements"][0]["products"][0]["@id"]
     assert validate_openvex(doc) == []

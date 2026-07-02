@@ -8,7 +8,7 @@ repository alone. The lifecycle guard is enforced here, at the boundary.
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from ..schema import (
@@ -19,7 +19,16 @@ from ..schema import (
     Project,
     Session,
 )
-from ..schema.common import iso_z, utcnow
+from ..schema.common import is_record_id, iso_z, utcnow
+
+# A record id is a single safe path segment (findings/<id>.md). Record MODELS
+# enforce this on construction, but the ``get_*`` lookups take a RAW string
+# argument that is never model-validated — so an id with ``..`` or a separator
+# would traverse out of the store on READ. This guard refuses such an argument
+# (the lookup returns "not found") — defence in depth at the path boundary. It
+# shares ``is_record_id`` with the schema so the guard and the model agree
+# exactly (including rejecting a trailing newline).
+_safe_id = is_record_id
 from ..schema.finding import TransitionLogEntry
 from .base import (
     BACKWARD_EDGES,
@@ -74,17 +83,28 @@ class FileStore(Store):
 
     # --- Project ---------------------------------------------------------
     def save_project(self, project: Project) -> Project:
-        # Identity resolves on git_url or local_path; never create a duplicate.
+        # Identity resolves on git_url or local_path; never create a duplicate,
+        # and never silently overwrite a DIFFERENT project that happens to share an
+        # id (two distinct identities can derive/claim the same id — e.g. ``_repo``
+        # and ``repo`` both normalise to ``repo``). Same id + same identity is a
+        # normal update and is allowed through.
         for existing in self.list_projects():
             if existing.id != project.id and existing.identity == project.identity:
                 raise DuplicateProjectError(
                     f"project identity {project.identity!r} already registered as "
                     f"{existing.id!r}"
                 )
+            if existing.id == project.id and existing.identity != project.identity:
+                raise DuplicateProjectError(
+                    f"project id {project.id!r} already registered for a different "
+                    f"identity {existing.identity!r}"
+                )
         self._write(self.root / "projects" / f"{project.id}.md", project.to_markdown())
         return project
 
     def get_project(self, project_id: str) -> Project | None:
+        if not _safe_id(project_id):
+            return None
         path = self.root / "projects" / f"{project_id}.md"
         if not path.exists():
             return None
@@ -113,6 +133,8 @@ class FileStore(Store):
         return finding
 
     def get_finding(self, finding_id: str) -> Finding | None:
+        if not _safe_id(finding_id):
+            return None
         path = self.root / "findings" / f"{finding_id}.md"
         if not path.exists():
             return None
@@ -210,6 +232,8 @@ class FileStore(Store):
         return session
 
     def get_session(self, session_id: str) -> Session | None:
+        if not _safe_id(session_id):
+            return None
         path = self.root / "sessions" / f"{session_id}.md"
         if not path.exists():
             return None
@@ -256,6 +280,8 @@ class FileStore(Store):
         return coverage
 
     def get_coverage(self, project: str, area: str) -> Coverage | None:
+        if not _safe_id(project):
+            return None
         path = self._coverage_path(project, area)
         if path.exists():
             return Coverage.from_markdown(self._read(path))
@@ -274,6 +300,11 @@ class FileStore(Store):
         return candidate if (candidate is not None and candidate.area == area) else None
 
     def list_coverage(self, project: str | None = None) -> list[Coverage]:
+        # A project filter is used verbatim as a path segment (coverage/<project>),
+        # so — like get_coverage — refuse a traversal/unsafe value rather than glob
+        # (and try to parse) files outside the coverage directory.
+        if project is not None and not _safe_id(project):
+            return []
         out = []
         base = self.root / "coverage"
         globber = base.glob("*/*.md") if project is None else (base / project).glob("*.md")
@@ -290,6 +321,8 @@ class FileStore(Store):
         return methodology
 
     def get_methodology(self, methodology_id: str) -> Methodology | None:
+        if not _safe_id(methodology_id):
+            return None
         path = self.root / "methodology" / f"{methodology_id}.md"
         if not path.exists():
             return None
@@ -308,22 +341,42 @@ class FileStore(Store):
         return ref
 
     def _detail_path(self, ref: str) -> Path | None:
-        """Resolve a ``detail/...`` ref to a path INSIDE the store, or ``None``.
+        """Resolve a ``detail/...`` ref to a path inside the ``detail/`` tree, or
+        ``None``.
 
-        The ref can be derived from a (possibly tampered) session id, so a ref
-        that escapes the store root via ``..`` or an absolute path is rejected —
-        detail access never reads outside the store boundary.
+        Two independent guards, because the ref can be derived from a (possibly
+        tampered) session id:
+
+        * LEXICAL — the ref must name the ``detail/`` subtree with no ``..``
+          component, so it can neither escape (``detail/../../secret``) nor
+          re-enter another store subtree (``detail/../projects/<id>.md``). This
+          keeps the candidate -> verified evidence gate pointed at real detail
+          artifacts only.
+        * PHYSICAL — the RESOLVED target must stay under the CANONICAL detail dir:
+          the resolved store root joined with ``detail`` WITHOUT following a
+          symlink on that component. This closes the whole symlink class at once —
+          a ``detail`` dir symlinked anywhere (outside the store, an in-store
+          sibling like ``projects``, or the root via ``.``) resolves the target
+          outside the canonical anchor, as does a symlink *inside* detail that
+          re-enters a sibling subtree (``detail/x -> ../projects``).
         """
         rel = ref[len("state/") :] if ref.startswith("state/") else ref
-        base = self.root.resolve()
+        parts = PurePosixPath(rel).parts
+        if not parts or parts[0] != "detail" or ".." in parts:
+            return None
+        detail_base = self.root.resolve() / "detail"
         target = (self.root / rel).resolve()
-        if target != base and base not in target.parents:
+        if target != detail_base and detail_base not in target.parents:
             return None
         return target
 
     def detail_exists(self, ref: str) -> bool:
+        # ``is_file`` (not ``exists``) so a DIRECTORY ref — the detail base or a
+        # session subdir, which exist after any write_detail — is not mistaken for
+        # an artifact. This keeps the check consistent with read_detail, so the
+        # candidate -> verified evidence gate needs a real file, not a directory.
         path = self._detail_path(ref)
-        return path is not None and path.exists()
+        return path is not None and path.is_file()
 
     def read_detail(self, ref: str) -> str | None:
         path = self._detail_path(ref)

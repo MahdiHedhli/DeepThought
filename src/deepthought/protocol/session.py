@@ -27,7 +27,7 @@ from ..schema import (
     Session,
     SessionType,
 )
-from ..schema.common import iso_z, utcnow
+from ..schema.common import is_record_id, iso_z, utcnow
 from ..store import Store
 from .gate import Gate, GateContext
 
@@ -103,6 +103,30 @@ def run_session(
     """Run one session end to end and return the persisted Session record."""
     now = clock()
     sid = session_id or generate_session_id(store, now)
+
+    # A raw, user-supplied project id (CLI ``--project``) that is not a safe
+    # record id would raise a bare ValidationError when the Session record is
+    # built below (``project`` is a RecordId). Refuse it cleanly instead: it can
+    # name no real project (get_project would reject it too), so log a refused
+    # session rather than crash the CLI with a traceback.
+    if session.project_id is not None and not is_record_id(session.project_id):
+        record = Session(
+            id=sid, type=session.type, project=None,
+            started=iso_z(now), close_state=CloseState.interrupted,
+        )
+        store.save_session(record)
+        record.gate_outcome = GateOutcome.refuse
+        record.gate_reason = f"invalid project id {session.project_id!r}"
+        record.body = _render_body(
+            SessionOutcome(
+                summary=f"Refused: invalid project id {session.project_id!r}.",
+                next_steps="Provide a valid project id — a single safe path segment.",
+            )
+        )
+        record.closed = iso_z(clock())
+        record.close_state = CloseState.clean
+        store.save_session(record)
+        return record
 
     # A session starts life interrupted, and is persisted immediately, so an
     # interruption before a clean close is detectable and resumable.

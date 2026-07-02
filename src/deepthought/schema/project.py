@@ -12,7 +12,7 @@ from enum import Enum
 
 from pydantic import model_validator
 
-from .common import Record
+from .common import Record, RecordId
 
 
 class SourceType(str, Enum):
@@ -33,7 +33,7 @@ class ProjectStatus(str, Enum):
 
 
 class Project(Record):
-    id: str
+    id: RecordId
     name: str
     source_type: SourceType
     git_url: str | None = None

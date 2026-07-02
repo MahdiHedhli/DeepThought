@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from enum import Enum
 
-from .common import ContextCost, Record
+from .common import ContextCost, Record, RecordId
 
 
 class SessionType(str, Enum):
@@ -39,9 +39,9 @@ _NEXT_STEPS = re.compile(r"^##\s+Next steps\s*$(.*?)(?=^##\s|\Z)", re.MULTILINE 
 
 
 class Session(Record):
-    id: str
+    id: RecordId
     type: SessionType
-    project: str | None = None
+    project: RecordId | None = None
     started: str
     closed: str | None = None
     gate_outcome: GateOutcome | None = None

@@ -861,7 +861,10 @@ def test_finding_without_a_same_class_primitive_is_dropped(state_dir, monkeypatc
 def test_worker_finding_id_with_path_separators_is_dropped(state_dir, monkeypatch):
     """FIREWALL: a worker-returned finding id is used by the Store as a FILENAME, so
     an id with path separators (traversal, e.g. ../../tmp/pwn) is refused — only
-    F-NNNN ids are persisted, so a worker cannot write outside state/findings."""
+    F-NNNN ids are persisted, so a worker cannot write outside state/findings. The
+    Finding model now forbids such an id, so this smuggles one past validation (as
+    an out-of-process worker's dict could) to prove the orchestrator re-validation
+    firewall STILL drops it."""
     from deepthought.schema.envelope import Primitive
 
     store = FileStore(state_dir)
@@ -874,8 +877,9 @@ def test_worker_finding_id_with_path_separators_is_dropped(state_dir, monkeypatc
 
     def _traversal(session_id, target, signature, sarif_path, root, id_start):
         env, findings, detail = real_worker(session_id, target, signature, sarif_path, root, id_start)
-        rogue = make_finding(id=bad_id, project=target.id, status="candidate", evidence_ref=None,
+        rogue = make_finding(id="F-9000", project=target.id, status="candidate", evidence_ref=None,
                              summary="traversal", body="**Location:** `app/x.py:1`")
+        object.__setattr__(rogue, "id", bad_id)  # smuggle a traversal id past validation
         prim = Primitive(kind=signature.capability, target_locus="app/x.py", preconditions=[],
                          grants=[signature.capability], confidence="suspected", finding_ref=bad_id)
         env = env.model_copy(update={

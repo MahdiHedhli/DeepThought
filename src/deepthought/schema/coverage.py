@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from .common import Record
+from .common import Record, RecordId
 
 
 class CoverageMethod(str, Enum):
@@ -21,7 +21,7 @@ class CoverageDepth(str, Enum):
 
 
 class Coverage(Record):
-    project: str
+    project: RecordId  # a coverage/<project>/ path segment
     area: str
     method: CoverageMethod
     depth: CoverageDepth

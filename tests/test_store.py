@@ -258,3 +258,123 @@ def test_detail_access_rejects_path_traversal(state_dir, tmp_path):
     assert store.read_detail(f"detail/../../{secret.name}") is None
     assert store.detail_exists(f"detail/../../{secret.name}") is False
     assert store.read_detail(f"detail/S-1/../../../{secret.name}") is None
+
+
+def test_get_lookups_reject_traversal_ids(state_dir):
+    """The get_* lookups take a RAW string id (never model-validated), so a
+    traversal id must be refused (returns not-found) — a crafted id can never read
+    a record outside the store. A trailing newline/CR must be rejected too: the
+    guard has to agree with the model, which forbids control characters (a naive
+    ``re.match`` against a ``$``-anchored pattern would wrongly accept ``id\\n``)."""
+    store = FileStore(state_dir)
+    for bad in ("../../etc/passwd", "a/b", "a\\b", "..", ".", "with space", "",
+                "F-0007\n", "F-0007\r\n", "F-0007\t", "\nF-0007", "ok\x00"):
+        assert store.get_finding(bad) is None, bad
+        assert store.get_project(bad) is None, bad
+        assert store.get_session(bad) is None, bad
+        assert store.get_methodology(bad) is None, bad
+        assert store.get_coverage(bad, "some/area") is None, bad
+
+
+def test_list_coverage_rejects_traversal_project(state_dir):
+    """``list_coverage(project=...)`` globs ``coverage/<project>/*.md`` with the raw
+    project arg, so — like ``get_coverage`` — it must refuse a traversal project
+    rather than glob (and try to parse) files outside the coverage directory."""
+    store = FileStore(state_dir)
+    # A real record proves the happy path still works.
+    store.save_coverage(make_coverage())
+    assert len(store.list_coverage(project="php-src")) == 1
+    # Plant a non-coverage record two levels up from coverage/<project>.
+    (state_dir / "projects" / "decoy.md").write_text(make_project(id="decoy").to_markdown())
+    for bad in ("../../projects", "../projects", "..", "a/b", "with space", ""):
+        assert store.list_coverage(project=bad) == [], bad
+
+
+def test_detail_access_stays_within_the_detail_directory(state_dir):
+    """``read_detail``/``detail_exists`` must resolve ONLY inside ``detail/`` — a ref
+    that names another store subtree (e.g. ``projects/<id>.md``) is not a detail
+    artifact and must not be readable through the detail API (else the candidate ->
+    verified evidence gate could be satisfied by a non-evidence store file)."""
+    store = FileStore(state_dir)
+    store.save_project(make_project(id="secret"))
+    store.save_finding(make_finding(id="F-1", project="secret"))
+    ref = store.write_detail("S-1", "note.txt", "real evidence")
+    # Legitimate detail access is unaffected.
+    assert store.read_detail(ref) == "real evidence"
+    assert store.detail_exists(ref)
+    # A ref pointing at another store subtree is refused.
+    for outside in ("projects/secret.md", "findings/F-1.md", "sessions/S-1.md",
+                    "state/projects/secret.md", "methodology/x.md"):
+        assert store.read_detail(outside) is None, outside
+        assert store.detail_exists(outside) is False, outside
+    # A DIRECTORY ref (the detail base or a session subdir) is not an artifact:
+    # detail_exists must agree with read_detail (is_file), else the candidate ->
+    # verified evidence gate could be satisfied by a directory, not real evidence.
+    for directory in ("detail", "detail/S-1", "state/detail/S-1"):
+        assert store.detail_exists(directory) is False, directory
+        assert store.read_detail(directory) is None, directory
+    # A ref that names the detail prefix but re-enters another subtree via ``..``
+    # (``detail/../projects/secret.md``) must be refused — it is not under detail/.
+    assert store.read_detail("detail/../projects/secret.md") is None
+    assert store.detail_exists("detail/../projects/secret.md") is False
+
+
+def test_detail_access_rejects_a_symlinked_detail_dir(state_dir, tmp_path):
+    """If ``detail`` itself is a SYMLINK — to anywhere: outside the store, OR an
+    in-store sibling subtree (``projects``), OR the store root (``.``) — refs must
+    not resolve through it. Detail access is anchored to the CANONICAL detail dir
+    (resolved-root/detail), so a relocated detail dir always lands outside it."""
+    import os
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("EXFIL")
+
+    def _fresh_store(link_target):
+        root = state_dir / f"linked-{abs(hash(str(link_target)))}"
+        for sub in ("projects", "findings", "sessions", "coverage", "methodology"):
+            (root / sub).mkdir(parents=True)
+        (root / "projects" / "secret.md").write_text("SENSITIVE PROJECT RECORD")
+        os.symlink(link_target, root / "detail")
+        return FileStore(root)
+
+    # detail -> outside the store
+    s_out = _fresh_store(outside)
+    assert s_out.read_detail("detail/secret.txt") is None
+    assert s_out.detail_exists("detail/secret.txt") is False
+    # detail -> an in-store sibling subtree
+    s_sib = _fresh_store("projects")
+    assert s_sib.read_detail("detail/secret.md") is None
+    assert s_sib.detail_exists("detail/secret.md") is False
+    # detail -> the store root itself
+    s_dot = _fresh_store(".")
+    assert s_dot.read_detail("detail/projects/secret.md") is None
+    assert s_dot.detail_exists("detail/projects/secret.md") is False
+
+
+def test_detail_access_rejects_a_symlink_reentering_another_subtree(state_dir):
+    """A symlink INSIDE detail/ pointing at a sibling store subtree
+    (``detail/x -> ../projects``) must not let a ref re-enter it: the resolved
+    target has to stay physically under the resolved detail/ directory, not merely
+    under the store root (which a sibling subtree also satisfies)."""
+    import os
+
+    store = FileStore(state_dir)
+    (state_dir / "projects" / "secret.md").write_text("SENSITIVE PROJECT RECORD")
+    os.symlink("../projects", state_dir / "detail" / "reenter")
+    assert store.read_detail("detail/reenter/secret.md") is None
+    assert store.detail_exists("detail/reenter/secret.md") is False
+
+
+def test_save_project_refuses_same_id_for_a_different_identity(state_dir):
+    """Two DISTINCT identities can claim the same id (e.g. ``_repo`` and ``repo``
+    both normalise to ``repo``); saving the second must NOT silently overwrite the
+    first project's record — the id collision is refused, not clobbered."""
+    store = FileStore(state_dir)
+    store.save_project(make_project(id="repo", git_url="https://x.test/_repo"))
+    with pytest.raises(DuplicateProjectError):
+        store.save_project(make_project(id="repo", git_url="https://x.test/other"))
+    # Same id + same identity is a normal update and must still work.
+    store.save_project(make_project(id="repo", git_url="https://x.test/_repo", status="paused"))
+    assert store.get_project("repo").status.value == "paused"
+    assert len(store.list_projects()) == 1
