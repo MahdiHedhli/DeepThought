@@ -121,11 +121,11 @@ def finding_to_advisory(finding: "Finding") -> str:
     parts.append("## Details")
     details = _details(finding)
     # ``_details`` scrapes body prose that may itself contain "##" sub-headings
-    # (Root cause / Impact). Render it as a blockquote so those are carried as
-    # inert quoted prose and can never masquerade as a top-level document
-    # section — the document's own section grammar stays fixed.
+    # (Root cause / Impact) or raw HTML/links. Render it through ``_blockquote``,
+    # which escapes each line, so those are carried as inert quoted prose and can
+    # never masquerade as a top-level section or active markup.
     if details:
-        parts.append("\n".join(f"> {line}" for line in details.splitlines()))
+        parts.append(_blockquote(details))
     else:
         parts.append("(no details recorded)")
 

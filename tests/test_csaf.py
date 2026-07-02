@@ -182,3 +182,16 @@ def test_csaf_rejects_an_incomplete_cvss_vector():
         make_finding(severity=Severity(cvss_vector="CVSS:3.1/AV:N", cvss_score=5.0))
     )
     assert validate_csaf(doc) != []
+
+
+def test_csaf_no_affected_still_defines_the_referenced_product():
+    """A finding with no affected packages still emits a product_tree defining
+    the CSAFPID that product_status references — no dangling product id, and the
+    doc validates."""
+    import json as _json
+
+    doc = finding_to_csaf(make_finding(affected=[]))
+    assert "product_tree" in doc
+    assert doc["vulnerabilities"][0]["product_status"]["known_affected"] == ["CSAFPID-0001"]
+    assert "CSAFPID-0001" in _json.dumps(doc["product_tree"])
+    assert validate_csaf(doc) == [], validate_csaf(doc)

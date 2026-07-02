@@ -183,11 +183,15 @@ def _product_tree(finding: "Finding") -> dict:
     """Build a vendor -> product_name -> product_version branch for the finding.
 
     Each CSAF branch object must have exactly three properties, so leaf branches
-    carry ``product`` and inner branches carry ``branches``.
+    carry ``product`` and inner branches carry ``branches``. This tree ALWAYS
+    defines ``CSAFPID-0001`` — including a placeholder for a finding with no
+    affected package — so the vulnerability's ``product_status`` never references
+    an undefined product id.
     """
-    pkg = finding.affected[0]
-    version = pkg.versions[0] if pkg.versions else "unspecified"
-    product_name = pkg.package
+    pkg = finding.affected[0] if finding.affected else None
+    version = (pkg.versions[0] if pkg and pkg.versions else "unspecified")
+    product_name = pkg.package if pkg else "PLACEHOLDER"
+    vendor_name = pkg.ecosystem if pkg else "PLACEHOLDER"
 
     version_branch = {
         "category": "product_version",
@@ -204,7 +208,7 @@ def _product_tree(finding: "Finding") -> dict:
     }
     vendor_branch = {
         "category": "vendor",
-        "name": pkg.ecosystem,
+        "name": vendor_name,
         "branches": [product_branch],
     }
     return {"branches": [vendor_branch]}
@@ -303,10 +307,11 @@ def finding_to_csaf(finding: "Finding") -> dict:
             },
         },
         "vulnerabilities": [_vulnerability(finding)],
+        # ALWAYS define the product tree (a placeholder product for a finding with
+        # no affected package), so the vulnerability's product_status never points
+        # at an undefined CSAFPID.
+        "product_tree": _product_tree(finding),
     }
-
-    if finding.affected:
-        doc["product_tree"] = _product_tree(finding)
 
     return doc
 

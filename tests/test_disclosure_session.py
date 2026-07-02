@@ -81,6 +81,20 @@ def test_refuses_a_finding_from_another_project(state_dir):
     assert session.artifact_refs == {}  # nothing drafted
 
 
+def test_refuses_a_missing_finding_cleanly(state_dir):
+    """A mistyped finding id is an input refusal, not a crash: the session closes
+    CLEAN (no resumable interrupted session) and drafts nothing."""
+    store = FileStore(state_dir)
+    store.save_project(make_project())
+
+    session = DisclosureSession(project_id="php-src", finding_id="F-9999")
+    record = run_session(store, GATE, session)
+
+    assert record.close_state is CloseState.clean
+    assert "not found" in session.outcome.summary
+    assert session.artifact_refs == {}
+
+
 def test_refuses_a_non_verified_finding(state_dir):
     for status in ("candidate", "disclosed", "patched"):
         import tempfile

@@ -77,7 +77,23 @@ class DisclosureSession(BaseSession):
     def run(self, store: Store, session_id: str) -> SessionOutcome:
         finding = store.get_finding(self.finding_id)
         if finding is None:
-            raise NotFoundError(f"finding {self.finding_id!r} not found")
+            # A mistyped finding id is an INPUT refusal, not a crash. Return a
+            # clean refusal (like wrong-project / non-verified) so the session log
+            # closes cleanly rather than leaving a resumable interrupted session
+            # for a typo. Nothing is drafted.
+            return self._record(
+                SessionOutcome(
+                    summary=(
+                        f"DISCLOSURE on {self.project_id!r}: finding "
+                        f"{self.finding_id!r} was not found — refusing. Nothing was "
+                        f"drafted."
+                    ),
+                    next_steps=(
+                        f"Check the finding id and re-run DISCLOSURE with a "
+                        f"verified finding that exists in {self.project_id!r}."
+                    ),
+                )
+            )
 
         # Refuse a finding that belongs to a DIFFERENT project. The gate was
         # evaluated for self.project_id only; drafting another project's finding

@@ -65,6 +65,21 @@ def test_disclose_refuses_a_non_verified_finding(tmp_path):
     assert "review the drafts and send" not in result.output
 
 
+def test_disclose_missing_finding_is_a_clean_refusal(tmp_path):
+    state = tmp_path / "state"
+    store = FileStore(state)
+    store.save_project(make_project())
+
+    result = runner.invoke(
+        app,
+        ["playbook", "disclose", "--state", str(state),
+         "--project", "php-src", "--finding", "F-9999"],
+    )
+    assert result.exit_code == 0, result.output   # clean refusal, not a crash
+    assert "not found" in result.output
+    assert "unchanged (still verified)" not in result.output
+
+
 def test_publish_format_csaf_is_namespaced_and_validates(tmp_path):
     state = tmp_path / "state"
     out = tmp_path / "out"

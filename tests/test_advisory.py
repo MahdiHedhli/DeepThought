@@ -137,6 +137,16 @@ def test_advisory_defuses_markdown_links_in_free_text():
     assert "\\[here\\]" in md
 
 
+def test_advisory_body_details_are_escaped_too():
+    """The Details block (scraped body prose) is escaped like every other free
+    text — raw HTML in the body must not become active markup."""
+    md = finding_to_advisory(
+        make_finding(body="## Root cause\n<img src=x onerror=alert(1)>\n")
+    )
+    assert "<img" not in md
+    assert "&lt;img" in md
+
+
 def test_summary_with_embedded_heading_cannot_forge_a_section():
     """A summary carrying a newline + Markdown heading must NOT become a real
     top-level section: it is collapsed onto the title line and quoted in the
