@@ -30,10 +30,10 @@ from .osv import osv_id_for
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema.finding import Finding
 
-# The official CVE id pattern. Only a value matching this is treated as a real,
-# assigned CVE; the sentinel "CVE-XXXX-XXXXX" and any malformed value fail it and
-# fall back to the internal finding id.
-_CVE_RE = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$")
+# The OFFICIAL CVE id pattern (CVE 5.1 schema: 4..19 digit sequence). Only a value
+# matching this is treated as a real, assigned CVE; the sentinel "CVE-XXXX-XXXXX"
+# and any malformed/over-long value fail it and fall back to the internal id.
+_CVE_RE = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,19}$")
 
 # Pinned OpenVEX context (spec version). Carried as the ``@context`` member.
 OPENVEX_CONTEXT = "https://openvex.dev/ns/v0.2.0"

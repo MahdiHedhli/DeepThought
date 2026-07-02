@@ -155,10 +155,11 @@ def _affected(finding: "Finding") -> list[dict]:
             )
         if not versions:
             versions = [{"version": "0", "status": "affected", "versionType": "semver"}]
+        product = (pkg.package.strip() or _PLACEHOLDER_VENDOR)[:_PRODUCT_MAX]
         entries.append(
             {
                 "vendor": _PLACEHOLDER_VENDOR,
-                "product": pkg.package[:_PRODUCT_MAX],  # bound to the schema limit
+                "product": product,  # non-empty, bounded to the schema limit
                 "versions": versions,
                 "defaultStatus": "unaffected",
             }

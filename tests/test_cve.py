@@ -124,6 +124,20 @@ def test_cve_bounds_overlong_product_and_url():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_valid_for_a_pathological_empty_finding():
+    """A finding with an empty summary/package/version, no severity and no
+    references still yields a structurally-conformant CVE draft."""
+    from deepthought.schema import AffectedPackage
+
+    draft = finding_to_cve_draft(
+        make_finding(
+            summary="", body="", severity=None, cve=None, references=[],
+            affected=[AffectedPackage(ecosystem="", package="", versions=[""])],
+        )
+    )
+    assert validate_cve_draft(draft) == []
+
+
 def test_cve_bounds_and_skips_empty_versions():
     """An empty version is skipped and an over-long one is bounded to 1024, so the
     persisted draft stays schema-conformant."""

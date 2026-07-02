@@ -119,7 +119,7 @@ def test_openvex_injection_inertness():
 def test_placeholder_or_malformed_cve_falls_back_to_the_finding_id():
     """A sentinel or malformed cve value must NOT appear as the vulnerability
     name — only a real CVE is used, else the internal finding id."""
-    for bad in ("CVE-XXXX-XXXXX", "CVE-2026-1", "not-a-cve"):
+    for bad in ("CVE-XXXX-XXXXX", "CVE-2026-1", "not-a-cve", "CVE-2026-" + "1" * 20):
         doc = finding_to_openvex(make_finding(cve=bad))
         assert doc["statements"][0]["vulnerability"]["name"] == "F-0007"
     # A real CVE is used verbatim.

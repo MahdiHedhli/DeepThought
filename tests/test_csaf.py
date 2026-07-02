@@ -207,6 +207,44 @@ def test_csaf_omits_an_incomplete_cvss_vector():
     assert validate_csaf(doc) == [], validate_csaf(doc)
 
 
+def test_csaf_overlong_cve_is_not_treated_as_real():
+    """A cve with more than 19 digits fails the official pattern, so it is NOT
+    emitted as a real 'cve' — an internal ids[] entry is used instead."""
+    doc = finding_to_csaf(make_finding(cve="CVE-2026-" + "1" * 20))
+    vuln = doc["vulnerabilities"][0]
+    assert "cve" not in vuln
+    assert "ids" in vuln
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
+def test_csaf_valid_for_a_pathological_empty_finding():
+    """A finding with an empty summary, empty package/version, no severity and no
+    references still yields a schema-conformant CSAF (all minLength-1 fields are
+    coerced non-empty)."""
+    from deepthought.schema import AffectedPackage
+
+    doc = finding_to_csaf(
+        make_finding(
+            summary="", body="", downstream_impact=None, severity=None, cve=None,
+            references=[],
+            affected=[AffectedPackage(ecosystem="", package="", versions=[""])],
+        )
+    )
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
+def test_csaf_blank_affected_version_falls_back_to_unspecified():
+    """A finding with versions=[''] must not emit a blank product_version name."""
+    from deepthought.schema import AffectedPackage
+
+    doc = finding_to_csaf(
+        make_finding(affected=[AffectedPackage(ecosystem="PyPI", package="p", versions=[""])])
+    )
+    version_branches = doc["product_tree"]["branches"][0]["branches"][0]["branches"]
+    assert all(b["name"].strip() for b in version_branches)
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
 def test_csaf_emits_every_affected_package_and_version():
     """Multi-package/multi-version scope is preserved: one product per (package,
     version), all known-affected and all defined in the product tree."""

@@ -46,15 +46,28 @@ CSAF_VERSION = "2.0"
 # Placeholder publisher identity — deliberately not a real CNA/vendor.
 _PLACEHOLDER_NAMESPACE = "https://deepthought.local/placeholder"
 
-# The official CVE id pattern. The sentinel "CVE-XXXX-XXXXX" fails this on
-# purpose so a draft can never be mistaken for a real, submittable CVE.
-_CVE_RE = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$")
+# The OFFICIAL CVE id pattern (CVE 5.1 schema: 4..19 digit sequence). Only a value
+# matching this is treated as a real, assigned CVE; anything else (the sentinel,
+# or a malformed/over-long value) falls back to an internal id and is never
+# presented as an assigned CVE.
+_CVE_RE = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,19}$")
 
 # Finding reference types that name the finding's OWN source/detection location
 # (CSAF category "self"); everything else (advisory, fix, report, web, …) is an
 # "external" reference — including the published advisory/fix links a disclosed or
 # patched finding carries.
 _SELF_REF_TYPES = frozenset({"self", "source", "detection", "location"})
+
+
+def _nonempty(text: object, fallback: str) -> str:
+    """A non-empty (stripped) string, or ``fallback``.
+
+    CSAF requires minLength 1 on title / notes text / product & branch names. A
+    finding's summary/package can be empty (the model does not forbid it), so
+    every such field is coerced non-empty here rather than emit an invalid draft.
+    """
+    value = str(text).strip() if text is not None else ""
+    return value if value else fallback
 
 
 @lru_cache(maxsize=1)
@@ -131,7 +144,12 @@ def _products(finding: "Finding") -> tuple[dict, list[str]]:
     pids: list[str] = []
     counter = 1
     for pkg in finding.affected:
-        versions = list(pkg.versions) if pkg.versions else ["unspecified"]
+        # Only non-blank versions (stripped), deduped; fall back to "unspecified"
+        # when none remain — a blank product_version name is non-conformant.
+        versions = list(
+            dict.fromkeys(v.strip() for v in (pkg.versions or []) if v and v.strip())
+        ) or ["unspecified"]
+        product_name = _nonempty(pkg.package, "PLACEHOLDER")  # minLength 1
         version_branches = []
         for version in versions:
             pid = f"CSAFPID-{counter:04d}"
@@ -142,7 +160,7 @@ def _products(finding: "Finding") -> tuple[dict, list[str]]:
                     "category": "product_version",
                     "name": version,
                     "product": {
-                        "name": f"{pkg.package} {version}",
+                        "name": f"{product_name} {version}",
                         "product_id": pid,
                     },
                 }
@@ -150,11 +168,11 @@ def _products(finding: "Finding") -> tuple[dict, list[str]]:
         vendor_branches.append(
             {
                 "category": "vendor",
-                "name": pkg.ecosystem or "PLACEHOLDER",
+                "name": _nonempty(pkg.ecosystem, "PLACEHOLDER"),
                 "branches": [
                     {
                         "category": "product_name",
-                        "name": pkg.package,
+                        "name": product_name,
                         "branches": version_branches,
                     }
                 ],
@@ -169,7 +187,7 @@ def _notes(finding: "Finding") -> list[dict]:
     ``notes[].text`` requires a non-empty string, so fall back to the finding
     summary when the body yields no root-cause/impact prose.
     """
-    text = _details(finding) or finding.summary
+    text = _nonempty(_details(finding) or finding.summary, "No details recorded.")
     return [{"category": "summary", "text": text}]
 
 
@@ -208,7 +226,7 @@ def _references(finding: "Finding") -> list[dict]:
 
 def _vulnerability(finding: "Finding", product_ids: list[str]) -> dict:
     vuln: dict = {
-        "title": finding.summary,
+        "title": _nonempty(finding.summary, osv_id_for(finding.id)),
         "notes": _notes(finding),
         "product_status": {"known_affected": list(product_ids)},
     }
@@ -246,7 +264,7 @@ def finding_to_csaf(finding: "Finding") -> dict:
                 "name": "PLACEHOLDER",
                 "namespace": _PLACEHOLDER_NAMESPACE,
             },
-            "title": finding.summary,
+            "title": _nonempty(finding.summary, tracking_id),
             "tracking": {
                 "current_release_date": now,
                 "id": tracking_id,
