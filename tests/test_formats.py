@@ -37,9 +37,18 @@ def test_is_uri_rejects_rfc3986_invalid_characters():
         assert not _is_uri(bad), bad
 
 
-def test_is_uri_rejects_active_and_foreign_schemes():
-    """Only http(s) is a safe disclosure link — active/foreign schemes are refused
-    so a draft never carries a dangerous URL into a human-reviewed artifact."""
+def test_is_uri_accepts_valid_non_http_schemes_incl_purl():
+    """The uri format accepts ANY well-formed URI (CSAF's purl uses pkg:), not just
+    http(s) — otherwise valid package URLs would fail schema validation."""
+    assert _is_uri("pkg:packagist/php/php-src@8.3.0")
+    assert _is_uri("pkg:pypi/foo@1.0")
+    assert _is_uri("ftp://x.test/a")   # a valid (non-dangerous) URI
+    assert _is_uri("urn:uuid:12345")
+
+
+def test_is_uri_rejects_dangerous_schemes():
+    """Active/dangerous schemes are refused even though they are syntactically
+    URI-shaped, so a draft never carries an executable link into a review."""
     for bad in ("javascript:alert(1)", "file:///etc/passwd", "data:text/html,x",
-                "ftp://x.test/a", "vbscript:msgbox(1)"):
+                "vbscript:msgbox(1)"):
         assert not _is_uri(bad), bad

@@ -7,8 +7,11 @@ Validates state consistency before ``publish``:
 * orphan references — no dangling project/finding/session links,
 * duplicate project identity — no two projects share a git_url or local_path,
 * OSV conformance — every finding's OSV validates against the pinned schema,
-* disclosure-draft conformance — every finding's CSAF and OpenVEX drafts
-  validate (the CVE draft is intentionally non-submittable and is not checked).
+* disclosure-draft conformance — every finding's re-derived CSAF and OpenVEX
+  drafts validate, and a DISCLOSURE session's persisted CSAF/OpenVEX/CVE drafts
+  are present and validate (the CVE draft via its TOLERANT validator, which
+  accepts the intentional non-submittable cveId sentinel but still catches
+  corrupt JSON or a malformed structure).
 
 A ``check`` that raises counts as a failed check (Constitution VII), so the whole
 run is wrapped and any exception becomes a failure rather than a crash.

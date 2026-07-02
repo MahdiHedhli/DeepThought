@@ -56,14 +56,27 @@ def is_safe_http_url(value: object) -> bool:
     return isinstance(value, str) and bool(_SAFE_HTTP_URL_RE.match(value))
 
 
+# The ``uri`` FORMAT applies to every uri field in the schemas — including CSAF's
+# ``purl`` (a ``pkg:`` Package-URL), not just http(s) links — so this checker must
+# accept ANY well-formed RFC3986 URI, rejecting only malformed ones (whitespace /
+# stray characters / no scheme) and a denylist of active/dangerous schemes. The
+# http(s)-only restriction for *reference* links lives in the exporters
+# (``is_safe_http_url``), which is where a dangerous link would be emitted.
+_DANGEROUS_URI_SCHEMES = frozenset({"javascript", "data", "vbscript", "file"})
+_URI_RE = re.compile(
+    r"^[A-Za-z][A-Za-z0-9+.\-]*:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$"
+)
+
+
 def _is_uri(value: object) -> bool:
     # Only a string is a uri; a non-string is a type error handled by the schema's
-    # own "type" keyword. Disclosure uri fields (publisher namespace, references)
-    # are web links, so restrict them to safe http(s) — an active scheme like
-    # javascript:/file: is refused rather than emitted into a draft.
+    # own "type" keyword.
     if not isinstance(value, str):
         return True
-    return is_safe_http_url(value)
+    if not _URI_RE.match(value):
+        return False
+    scheme = value.split(":", 1)[0].lower()
+    return scheme not in _DANGEROUS_URI_SCHEMES
 
 
 def format_checker() -> jsonschema.FormatChecker:
