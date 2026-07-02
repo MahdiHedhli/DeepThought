@@ -57,14 +57,19 @@ def run_loop(
 
 Behaviour (see `plan.md` for the flow):
 
-1. Missing/unauthorized project → return a `LoopRun` with `stop_reason=gate_refused`,
-   `sessions_run=0`, an explanatory `body`; nothing else written.
-2. Loop: `would_exceed` → `budget_exhausted`; `select_next_action` is `None` →
-   `fixed_point`; action `is_escalation` → append `outstanding_actions`, stop with
-   `hard_stop`; else build the session (repertoire **excludes** `NEW PROJECT`), run
-   it via `run_session`, and on a non-`proceed` gate outcome stop with
-   `gate_held`/`gate_refused`.
-3. Accumulate `ContextCost` + session count into `LoopSpend`; append a `LoopStep`.
+1. Missing project → return an **UNPERSISTED** `LoopRun` with
+   `stop_reason=gate_refused`, `sessions_run=0` (nothing to audit, and a persisted
+   record would orphan `check`).
+2. Gate the project **once up front** (Article I — the Gate runs before ANY work,
+   including an escalation-only or fixed-point run; the loop changes no
+   authorization/scope, so the decision holds for the whole run). A non-`proceed`
+   decision → persist a `LoopRun` with `gate_held`/`gate_refused`, `sessions_run=0`.
+3. Loop: `would_exceed` (against a live spend whose `wall_seconds` is the REAL
+   elapsed wall-clock time, measured in the driver) → `budget_exhausted`;
+   `select_next_action` is `None` → `fixed_point`; action `is_escalation` → append
+   `outstanding_actions`, stop with `hard_stop`; else build the session (repertoire
+   **excludes** `NEW PROJECT`), run it via `run_session`.
+4. Accumulate session count + token `ContextCost` into `LoopSpend`; append a `LoopStep`.
 4. On stop, persist the `LoopRun` (via `store.save_loop_run`) with the trace,
    accumulated cost, stop reason, outstanding actions, and a teach-back `body`
    whose **Next steps** section is non-empty (the outstanding human actions, or an

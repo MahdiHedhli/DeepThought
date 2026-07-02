@@ -69,9 +69,11 @@ loop` verb. No network code, no new sandbox, no `Project` write.
 
 ## Constitution Check
 
-- **Article I (Gate-first).** Every loop iteration runs its session via
-  `run_session`, which gates before work; a `hold`/`refuse` stops the loop with the
-  reason recorded. The loop adds no path that bypasses the gate. ✔
+- **Article I (Gate-first).** The loop gates the project **once up front** (before
+  any action, including an escalation-only or fixed-point run — the loop changes no
+  auth/scope, so the decision holds), and each session additionally runs via
+  `run_session`, which gates before work. A non-`proceed` decision stops the loop
+  with the reason recorded. No path bypasses the gate. ✔
 - **Article II (Authorization & scope).** The loop reads the project's basis and
   scope; it never sets or widens them. An unauthorized project is refused at the
   gate on the first session, stopping the loop. ✔

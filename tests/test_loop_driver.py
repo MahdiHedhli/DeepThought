@@ -93,16 +93,44 @@ def test_missing_project_is_refused_without_running(state_dir):
 
 
 def test_unauthorized_project_stops_at_the_gate(state_dir, tmp_path):
-    # No authorization basis -> the DefaultGate refuses the first session.
+    # No authorization basis -> the DefaultGate refuses up front, before any work.
     store = _seed(state_dir, tmp_path, authorization_basis=None)
     run = run_loop(store, GATE, "php-src", LoopBudget(max_sessions=5))
     assert run.stop_reason is StopReason.gate_refused
-    assert run.sessions_run == 1
-    assert run.trace and run.trace[0].gate_outcome.value == "refuse"
-    # the gate's remediation reason is carried into the durable teach-back, not
-    # replaced by the generic "no further safe work" fixed-point message.
+    assert run.sessions_run == 0   # gated BEFORE any session ran (Article I)
+    assert run.trace == []
+    # the gate's remediation reason is carried into the durable teach-back.
     assert run.has_next_steps()
     assert any("authorization basis" in a for a in run.outstanding_actions), run.outstanding_actions
+
+
+def test_escalation_only_run_is_regated_when_authorization_is_lost(state_dir, tmp_path):
+    """A project that completed recon and LATER loses authorization must stop as
+    gate_refused on the next run — the loop re-gates up front, so an escalation-only
+    state never bypasses the Gate (Article I)."""
+    store = _seed(state_dir, tmp_path)
+    run_loop(store, GATE, "php-src", LoopBudget(max_sessions=20))  # recon completes
+    store.save_finding(make_finding(id="F-9", project="php-src", status="candidate"))
+    # Remove the authorization basis (same id + identity -> an update).
+    p = store.get_project("php-src")
+    store.save_project(p.model_copy(update={"authorization_basis": None}))
+    run = run_loop(store, GATE, "php-src", LoopBudget(max_sessions=20))
+    assert run.stop_reason is StopReason.gate_refused   # NOT hard_stop via escalation
+    assert run.sessions_run == 0
+
+
+def test_wall_clock_budget_stops_the_loop(state_dir, tmp_path):
+    """--max-seconds is a REAL bound: elapsed wall time is measured in the driver,
+    so it stops the loop even though stub sessions report a zero context_cost."""
+    from datetime import datetime, timedelta, timezone
+
+    store = _seed(state_dir, tmp_path)
+    base = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    gen = (base + timedelta(seconds=100 * i) for i in range(1000))
+    run = run_loop(store, GATE, "php-src", LoopBudget(max_wall_seconds=5),
+                   clock=lambda: next(gen))
+    assert run.stop_reason is StopReason.budget_exhausted
+    assert run.context_cost.wall_seconds >= 5   # real elapsed recorded
 
 
 def test_second_loop_run_does_not_rehunt_or_redraft(state_dir, tmp_path):

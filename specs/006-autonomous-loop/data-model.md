@@ -22,8 +22,12 @@ The limit-awareness envelope. A plain value object (not a Store record).
   `spent.wall_seconds >= max_wall_seconds`, or `spent.tokens >= max_context_tokens`).
   Checked **before** each iteration; the budget is read-only for the loop's life.
 
-`LoopSpend` is the running accumulator: `sessions: int`, `wall_seconds: float`,
-`tokens: int`, summed from each ran session's `ContextCost` plus the count.
+`LoopSpend` is the running accumulator: `sessions: int` (the count),
+`wall_seconds: float`, `tokens: int`. **Wall time is REAL elapsed time measured in
+the driver** (`clock() - start`), so `--max-seconds` bounds the loop even while the
+in-repo stub sessions report a zero `ContextCost`. **Tokens** are summed from each
+session's `ContextCost.tokens` — zero for the stubs (which consume no tokens),
+populated and bounded once real workers report cost.
 
 ## `ActionKind` + `LoopAction` (`schema/loop.py`)
 

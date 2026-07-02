@@ -15,8 +15,8 @@ from collections.abc import Callable
 from datetime import datetime
 
 from ..protocol import run_session
-from ..protocol.gate import Gate
-from ..schema import CloseState, GateOutcome
+from ..protocol.gate import Gate, GateContext
+from ..schema import CloseState, GateOutcome, SessionType
 from ..schema.common import ContextCost, iso_z, safe_record_id, utcnow
 from ..schema.loop import ActionKind, LoopAction, LoopRun, LoopStep, StopReason
 from ..sessions import (
@@ -104,12 +104,41 @@ def run_loop(
             planned=None,
         )
 
+    # Gate the project ONCE up front (Article I — the Gate runs before ANY work,
+    # including an escalation-only or fixed-point run). The loop changes no
+    # authorization/scope, so the decision holds for the whole run; without this an
+    # unauthorized project in an escalation-only state would never be re-gated.
+    decision = gate.evaluate(GateContext.from_project(project, SessionType.status))
+    if not decision.proceeds:
+        run = _build_run(
+            store, project.id, budget, now, clock,
+            stop_reason=(StopReason.gate_held if decision.outcome is GateOutcome.hold
+                         else StopReason.gate_refused),
+            spent=LoopSpend(), trace=[],
+            outstanding=[
+                f"Gate {decision.outcome.value} on {project.id!r}: {decision.reason} "
+                f"— resolve authorization/scope, then re-run the loop."
+            ],
+            planned=None,
+        )
+        store.save_loop_run(run)   # the project exists, so this audit resolves
+        return run
+
     spent = LoopSpend()
     done: set[tuple[str, str]] = set()
     trace: list[LoopStep] = []
     outstanding: list[str] = []
     planned: LoopAction | None = None
     stop_reason: StopReason | None = None
+
+    # Real elapsed wall-clock time, measured HERE — a bound the loop can enforce
+    # even while stub sessions report a zero context_cost.
+    def _live_spend() -> LoopSpend:
+        return LoopSpend(
+            sessions=spent.sessions,
+            wall_seconds=(clock() - now).total_seconds(),
+            tokens=spent.tokens,
+        )
 
     while True:
         action = select_next_action(store, project, done=done)
@@ -122,7 +151,7 @@ def run_loop(
             trace.append(LoopStep(kind=action.kind, finding=action.finding))
             done.add(_key(action))
             continue
-        if budget.would_exceed(spent):
+        if budget.would_exceed(_live_spend()):
             planned = action
             stop_reason = StopReason.budget_exhausted
             break
@@ -163,14 +192,19 @@ def run_loop(
 
 def _build_run(store, project_ref, budget, now, clock, stop_reason, spent, trace,
                outstanding, planned) -> LoopRun:
+    stopped = clock()
     return LoopRun(
         id=generate_loop_run_id(store, now),
         project=project_ref,
         started=iso_z(now),
-        stopped=iso_z(clock()),
+        stopped=iso_z(stopped),
         stop_reason=stop_reason,
         sessions_run=spent.sessions,
-        context_cost=ContextCost(tokens=spent.tokens, wall_seconds=spent.wall_seconds),
+        # Real elapsed wall-clock time (session-reported cost is currently zero);
+        # tokens are the sum of session context_cost, populated when real workers run.
+        context_cost=ContextCost(
+            tokens=spent.tokens, wall_seconds=(stopped - now).total_seconds()
+        ),
         budget=budget,
         trace=trace,
         outstanding_actions=outstanding,
