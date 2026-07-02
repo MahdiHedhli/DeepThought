@@ -22,7 +22,7 @@ from ..schema import (
     SourceType,
 )
 from ..schema.common import safe_record_id
-from ..store import Store
+from ..store import DuplicateProjectError, Store
 
 
 def default_verify_git_url(url: str) -> bool:
@@ -33,12 +33,18 @@ def default_verify_git_url(url: str) -> bool:
     """
     if not url:
         return False
+    # A url starting with ``-`` would be parsed by git as an OPTION, not a
+    # repository (argument injection — e.g. ``--upload-pack=<cmd>`` runs a
+    # command). Refuse it outright, and pass the url only after a ``--`` options
+    # terminator so it is always a positional argument.
+    if url.startswith("-"):
+        return False
     local = Path(url)
     if local.exists():
         return True
     try:
         result = subprocess.run(
-            ["git", "ls-remote", "--exit-code", url, "HEAD"],
+            ["git", "ls-remote", "--exit-code", "--", url, "HEAD"],
             capture_output=True,
             timeout=20,
             check=False,
@@ -139,7 +145,19 @@ class NewProjectSession(BaseSession):
             status=ProjectStatus.active,
             body=self.notes or f"Registered target {identity!r}.",
         )
-        store.save_project(project)
+        try:
+            store.save_project(project)
+        except DuplicateProjectError as exc:
+            # A different project already holds this (derived) id — refuse rather
+            # than clobber it. resolve_project above already handled the same
+            # identity, so this is a genuine id collision.
+            return SessionOutcome(
+                summary=f"Refused: {exc}.",
+                next_steps=(
+                    "Two distinct targets derive the same project id; pass an "
+                    "explicit project_id to disambiguate, then retry."
+                ),
+            )
         return SessionOutcome(
             summary=(
                 f"Registered project {project.id!r} ({self.source_type.value}) with "

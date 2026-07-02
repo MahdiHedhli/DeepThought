@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from ..schema import (
@@ -90,12 +90,21 @@ class FileStore(Store):
 
     # --- Project ---------------------------------------------------------
     def save_project(self, project: Project) -> Project:
-        # Identity resolves on git_url or local_path; never create a duplicate.
+        # Identity resolves on git_url or local_path; never create a duplicate,
+        # and never silently overwrite a DIFFERENT project that happens to share an
+        # id (two distinct identities can derive/claim the same id — e.g. ``_repo``
+        # and ``repo`` both normalise to ``repo``). Same id + same identity is a
+        # normal update and is allowed through.
         for existing in self.list_projects():
             if existing.id != project.id and existing.identity == project.identity:
                 raise DuplicateProjectError(
                     f"project identity {project.identity!r} already registered as "
                     f"{existing.id!r}"
+                )
+            if existing.id == project.id and existing.identity != project.identity:
+                raise DuplicateProjectError(
+                    f"project id {project.id!r} already registered for a different "
+                    f"identity {existing.identity!r}"
                 )
         self._write(self.root / "projects" / f"{project.id}.md", project.to_markdown())
         return project
@@ -342,24 +351,35 @@ class FileStore(Store):
         """Resolve a ``detail/...`` ref to a path inside the ``detail/`` tree, or
         ``None``.
 
-        The ref can be derived from a (possibly tampered) session id, so a ref
-        that escapes via ``..`` or an absolute path is rejected. It must ALSO name
-        a detail artifact: a ref that resolves into another store subtree (e.g.
-        ``projects/<id>.md``) is refused, so the candidate -> verified evidence
-        gate can never be satisfied by a non-evidence store file.
+        Two independent guards, because the ref can be derived from a (possibly
+        tampered) session id:
+
+        * LEXICAL — the ref must name the ``detail/`` subtree with no ``..``
+          component, so it can neither escape (``detail/../../secret``) nor
+          re-enter another store subtree (``detail/../projects/<id>.md``). This
+          keeps the candidate -> verified evidence gate pointed at real detail
+          artifacts only.
+        * PHYSICAL — the RESOLVED target must stay under the RESOLVED store root,
+          so a symlinked ``detail`` directory (or any symlink) can never make a
+          ref read outside the store.
         """
         rel = ref[len("state/") :] if ref.startswith("state/") else ref
-        if not (rel == "detail" or rel.startswith("detail/")):
+        parts = PurePosixPath(rel).parts
+        if not parts or parts[0] != "detail" or ".." in parts:
             return None
-        base = (self.root / "detail").resolve()
+        root = self.root.resolve()
         target = (self.root / rel).resolve()
-        if target != base and base not in target.parents:
+        if target != root and root not in target.parents:
             return None
         return target
 
     def detail_exists(self, ref: str) -> bool:
+        # ``is_file`` (not ``exists``) so a DIRECTORY ref — the detail base or a
+        # session subdir, which exist after any write_detail — is not mistaken for
+        # an artifact. This keeps the check consistent with read_detail, so the
+        # candidate -> verified evidence gate needs a real file, not a directory.
         path = self._detail_path(ref)
-        return path is not None and path.exists()
+        return path is not None and path.is_file()
 
     def read_detail(self, ref: str) -> str | None:
         path = self._detail_path(ref)

@@ -307,3 +307,45 @@ def test_detail_access_stays_within_the_detail_directory(state_dir):
                     "state/projects/secret.md", "methodology/x.md"):
         assert store.read_detail(outside) is None, outside
         assert store.detail_exists(outside) is False, outside
+    # A DIRECTORY ref (the detail base or a session subdir) is not an artifact:
+    # detail_exists must agree with read_detail (is_file), else the candidate ->
+    # verified evidence gate could be satisfied by a directory, not real evidence.
+    for directory in ("detail", "detail/S-1", "state/detail/S-1"):
+        assert store.detail_exists(directory) is False, directory
+        assert store.read_detail(directory) is None, directory
+    # A ref that names the detail prefix but re-enters another subtree via ``..``
+    # (``detail/../projects/secret.md``) must be refused — it is not under detail/.
+    assert store.read_detail("detail/../projects/secret.md") is None
+    assert store.detail_exists("detail/../projects/secret.md") is False
+
+
+def test_detail_access_rejects_a_symlinked_detail_dir(state_dir, tmp_path):
+    """If ``detail`` is a SYMLINK out of the store, refs must not resolve through it
+    — detail access stays under the RESOLVED store root, not the symlink target.
+    (Anchoring only to ``root/detail`` would follow the symlink and leak.)"""
+    import os
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("EXFIL")
+    root = state_dir / "linked"
+    for sub in ("projects", "findings", "sessions", "coverage", "methodology"):
+        (root / sub).mkdir(parents=True)
+    os.symlink(outside, root / "detail")  # detail -> outside the store
+    store = FileStore(root)
+    assert store.read_detail("detail/secret.txt") is None
+    assert store.detail_exists("detail/secret.txt") is False
+
+
+def test_save_project_refuses_same_id_for_a_different_identity(state_dir):
+    """Two DISTINCT identities can claim the same id (e.g. ``_repo`` and ``repo``
+    both normalise to ``repo``); saving the second must NOT silently overwrite the
+    first project's record — the id collision is refused, not clobbered."""
+    store = FileStore(state_dir)
+    store.save_project(make_project(id="repo", git_url="https://x.test/_repo"))
+    with pytest.raises(DuplicateProjectError):
+        store.save_project(make_project(id="repo", git_url="https://x.test/other"))
+    # Same id + same identity is a normal update and must still work.
+    store.save_project(make_project(id="repo", git_url="https://x.test/_repo", status="paused"))
+    assert store.get_project("repo").status.value == "paused"
+    assert len(store.list_projects()) == 1

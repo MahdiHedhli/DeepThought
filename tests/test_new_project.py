@@ -10,6 +10,7 @@ from __future__ import annotations
 from deepthought.protocol import HermesUltraCodeGate, run_session
 from deepthought.schema import CloseState, GateOutcome
 from deepthought.sessions import NewProjectSession
+from deepthought.sessions.new_project import default_verify_git_url
 from deepthought.store import FileStore
 
 GATE = HermesUltraCodeGate()
@@ -21,6 +22,42 @@ def _resolves(_url: str) -> bool:
 
 def _unresolvable(_url: str) -> bool:
     return False
+
+
+def test_default_verify_git_url_refuses_option_like_urls(monkeypatch):
+    """The url is passed to ``git ls-remote``; a value starting with ``-`` would be
+    parsed as a git OPTION rather than a repository (argument injection — e.g.
+    ``--upload-pack=<cmd>`` can run a command). Such a url is refused WITHOUT ever
+    spawning git."""
+    import subprocess
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("git must not be spawned for an option-like url")
+
+    monkeypatch.setattr(subprocess, "run", _must_not_run)
+    for hostile in ("--upload-pack=touch /tmp/pwned", "-x", "--output=/etc/cron.d/x", "-"):
+        assert default_verify_git_url(hostile) is False
+
+
+def test_default_verify_git_url_passes_url_positionally(monkeypatch):
+    """A benign (non-existent) url reaches ``git ls-remote`` as a POSITIONAL arg
+    after a ``--`` terminator, so it can never be reinterpreted as an option."""
+    import subprocess
+
+    captured = {}
+
+    class _R:
+        returncode = 2
+
+    def _fake_run(argv, **_k):
+        captured["argv"] = argv
+        return _R()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    assert default_verify_git_url("https://example.test/does-not-exist.git") is False
+    argv = captured["argv"]
+    assert "--" in argv
+    assert argv.index("--") < argv.index("https://example.test/does-not-exist.git")
 
 
 def test_registers_project_with_basis_and_scope(state_dir):
@@ -41,6 +78,26 @@ def test_registers_project_with_basis_and_scope(state_dir):
     assert project is not None
     assert project.authorization_basis.value == "permissive_oss"
     assert project.scope_allowlist == ["ext/soap", "ext/standard"]
+
+
+def test_derived_id_collision_is_refused_not_silently_overwritten(state_dir):
+    """Two DISTINCT identities whose derived id collides (``_repo`` and ``repo``
+    both normalise to ``repo``) must not silently overwrite: the first registers,
+    the second is refused with a hint to disambiguate, and the first survives."""
+    store = FileStore(state_dir)
+    first = NewProjectSession(
+        name="first", source_type="open_source", local_path="/repos/_repo",
+        authorization_basis="permissive_oss", scope_allowlist=["app"], verify_url=_resolves,
+    )
+    run_session(store, GATE, first)
+    second = NewProjectSession(
+        name="second", source_type="open_source", local_path="/repos/repo",
+        authorization_basis="permissive_oss", scope_allowlist=["app"], verify_url=_resolves,
+    )
+    record = run_session(store, GATE, second)
+    assert "already registered" in record.body.lower()
+    assert len(store.list_projects()) == 1
+    assert store.get_project("repo").local_path == "/repos/_repo"  # first survived
 
 
 def test_refuses_unresolvable_git_url(state_dir):
