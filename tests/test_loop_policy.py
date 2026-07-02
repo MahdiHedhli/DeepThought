@@ -31,10 +31,11 @@ def _add_session(store, stype, sid, gate_outcome="proceed", close_state="clean",
                                gate_outcome=gate_outcome, close_state=close_state, **kw))
 
 
-def _cover_scope(store, project):
-    """Record Coverage for every in-scope area (what a completed MAP produces)."""
+def _cover_scope(store, project, last_session="S-2"):
+    """Record Coverage for every in-scope area (what a completed MAP produces),
+    attributed to a given map session id (creation order matters for DISCOVER)."""
     for area in project.scope_allowlist:
-        store.save_coverage(make_coverage(area=area))
+        store.save_coverage(make_coverage(area=area, last_session=last_session))
 
 
 def _write_drafts(store, session_id, finding):
@@ -102,13 +103,31 @@ def test_broadened_scope_triggers_a_new_map(state_dir):
     p = make_project(scope_allowlist=["src"])
     store.save_project(p)
     _add_session(store, "status", "S-1")
-    store.save_coverage(make_coverage(area="src"))
+    store.save_coverage(make_coverage(area="src", last_session="S-2"))
     _add_session(store, "discover", "S-3")
     assert select_next_action(store, p) is None  # fully mapped+discovered for ['src']
     # the operator adds 'lib' to the scope -> the new area must be mapped
     broadened = p.model_copy(update={"scope_allowlist": ["src", "lib"]})
     action = select_next_action(store, broadened)
     assert action is not None and action.kind is ActionKind.map
+
+
+def test_discover_reruns_after_broadened_scope_is_remapped(state_dir):
+    """After the new scope area is mapped by a LATER map session, DISCOVER is stale
+    and re-runs over the newly-mapped surface (not left at a false fixed point)."""
+    store = FileStore(state_dir)
+    p = make_project(scope_allowlist=["src"])
+    store.save_project(p)
+    _add_session(store, "status", "S-1")
+    store.save_coverage(make_coverage(area="src", last_session="S-2"))
+    _add_session(store, "discover", "S-3")
+    assert select_next_action(store, p) is None  # recon complete for ['src']
+    # scope broadened; the new area 'lib' is mapped by a LATER map session (S-4)
+    broadened = p.model_copy(update={"scope_allowlist": ["src", "lib"]})
+    store.save_coverage(make_coverage(area="lib", last_session="S-4"))
+    # all areas covered now, so MAP is done; DISCOVER (S-3) predates the new map (S-4)
+    action = select_next_action(store, broadened)
+    assert action is not None and action.kind is ActionKind.discover
 
 
 def test_refused_discover_attempt_is_not_counted_as_done(state_dir):

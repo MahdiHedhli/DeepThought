@@ -51,7 +51,8 @@ def select_next_action(
     # AND broadening the scope (a human action outside the loop) re-triggers MAP for
     # the newly in-scope areas rather than being masked by one existing coverage
     # file. The in-run `done` set still bounds it to one MAP per run.
-    covered_areas = {c.area for c in store.list_coverage(pid)}
+    coverage = store.list_coverage(pid)
+    covered_areas = {c.area for c in coverage}
     in_scope = [a.strip() for a in project.scope_allowlist if a.strip()]
     has_coverage = bool(covered_areas)
     unmapped = [area for area in in_scope if area not in covered_areas]
@@ -60,9 +61,18 @@ def select_next_action(
     if unmapped and fresh(ActionKind.map, pid):
         return LoopAction(kind=ActionKind.map, project=pid)
 
-    # 3. DISCOVER — produce candidates over the MAPPED surface (gated on Coverage,
-    #    so it never runs in the degenerate pre-map state), once per SUCCESSFUL run.
-    if has_coverage and SessionType.discover not in succeeded and fresh(ActionKind.discover, pid):
+    # 3. DISCOVER — produce candidates over the MAPPED surface. Gated on Coverage
+    #    (never runs pre-map), and STALE once new Coverage post-dates the last
+    #    successful DISCOVER — so broadening the scope and re-mapping re-triggers
+    #    DISCOVER over the newly-mapped area. Session ids share a monotonic daily
+    #    counter, so a lexical id compare is creation order (no timestamp parsing).
+    last_map_id = max((c.last_session for c in coverage if c.last_session), default="")
+    last_discover_id = max(
+        (s.id for s in sessions if s.type is SessionType.discover and completed(s)),
+        default="",
+    )
+    discover_current = bool(last_discover_id) and last_discover_id >= last_map_id
+    if has_coverage and not discover_current and fresh(ActionKind.discover, pid):
         return LoopAction(kind=ActionKind.discover, project=pid)
 
     findings = store.list_findings(pid)

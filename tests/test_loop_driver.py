@@ -77,6 +77,21 @@ def test_token_budget_stops_the_loop(state_dir, tmp_path):
     assert store.get_loop_run(run.id) is not None
 
 
+def test_wall_budget_bounds_an_escalation_heavy_run(state_dir, tmp_path):
+    """--max-seconds bounds the loop even in an escalation-only state — the wall cap
+    is enforced before every iteration, including escalation collection."""
+    from datetime import datetime, timedelta, timezone
+
+    store = _seed(state_dir, tmp_path)
+    for i in range(5):  # many candidates -> an escalation-heavy state
+        store.save_finding(make_finding(id=f"F-900{i}", project="php-src", status="candidate"))
+    base = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    gen = (base + timedelta(seconds=100 * i) for i in range(1000))
+    run = run_loop(store, GATE, "php-src", LoopBudget(max_wall_seconds=5),
+                   clock=lambda: next(gen))
+    assert run.stop_reason is StopReason.budget_exhausted
+
+
 def test_missing_project_is_refused_without_running(state_dir):
     from deepthought.check import run_check
 

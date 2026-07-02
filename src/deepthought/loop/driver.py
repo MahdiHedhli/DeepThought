@@ -151,13 +151,25 @@ def run_loop(
             tokens=spent.tokens,
         )
 
+    def _wall_exceeded() -> bool:
+        return (budget.max_wall_seconds is not None
+                and (clock() - now).total_seconds() >= budget.max_wall_seconds)
+
     while True:
         action = select_next_action(store, project, done=done)
         if action is None:
             stop_reason = StopReason.hard_stop if outstanding else StopReason.fixed_point
             break
+        # Wall time is consumed by EVERY iteration — escalation collection included —
+        # so the wall cap is enforced before any action (the session/token caps apply
+        # only to actual runs, below).
+        if _wall_exceeded():
+            planned = action
+            stop_reason = StopReason.budget_exhausted
+            break
         if action.is_escalation:
-            # A hard stop — recorded for a human, never run. No session, no budget.
+            # A hard stop — recorded for a human, never run. No session, no session/
+            # token budget (but the wall cap above still bounds the collection).
             outstanding.append(action.human_action)
             trace.append(LoopStep(kind=action.kind, finding=action.finding))
             done.add(_key(action))
