@@ -94,9 +94,15 @@ class ActionKind(str, Enum):
     discover = "discover"
     sibling_hunt = "sibling_hunt"
     disclosure = "disclosure"
-    # Not a runnable session: a candidate that can only advance by real
-    # reproduction, which is a human-signed hard stop (Article III).
+    # Escalations — NOT runnable sessions, recorded for a human (never performed):
+    # a candidate that can only advance by real reproduction (Article III), and a
+    # drafted-but-unsent finding whose disclosure a human must review and send
+    # (Article V). Both stay outstanding until a human acts.
     verify_escalation = "verify_escalation"
+    disclosure_send = "disclosure_send"
+
+
+_ESCALATION_KINDS = frozenset({ActionKind.verify_escalation, ActionKind.disclosure_send})
 
 
 class StopReason(str, Enum):
@@ -123,15 +129,15 @@ class LoopAction(BaseModel):
 
     @property
     def is_escalation(self) -> bool:
-        return self.kind is ActionKind.verify_escalation
+        return self.kind in _ESCALATION_KINDS
 
     @model_validator(mode="after")
     def _escalation_carries_a_human_action(self) -> "LoopAction":
-        if self.kind is ActionKind.verify_escalation:
+        if self.kind in _ESCALATION_KINDS:
             if not self.human_action:
-                raise ValueError("a verify_escalation action must carry a human_action")
+                raise ValueError(f"a {self.kind.value} action must carry a human_action")
         elif self.human_action is not None:
-            raise ValueError("only a verify_escalation action carries a human_action")
+            raise ValueError("only an escalation action carries a human_action")
         return self
 
 

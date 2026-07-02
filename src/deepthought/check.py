@@ -254,3 +254,27 @@ def _check_disclosure_drafts(
                 continue
             for err in validate(doc):
                 report.fail(f"disclosure draft {ref!r} non-conformance: {err}")
+
+
+def disclosure_drafts_ok(store: Store, session_id: str) -> bool:
+    """Whether a disclosure session's four persisted drafts all resolve AND the
+    JSON drafts parse and validate — the SAME checks the ``check`` gate applies.
+
+    The autonomous loop uses this so a finding counts as drafted only when its
+    drafts would pass ``check``; a missing or malformed draft makes the loop
+    re-draft rather than stop while ``check`` stays red.
+    """
+    for name in _DISCLOSURE_ARTIFACTS:
+        content = store.read_detail(f"detail/{session_id}/{name}")
+        if content is None:
+            return False
+        validate = _DISCLOSURE_SCHEMA_DRAFTS.get(name)
+        if validate is None:
+            continue
+        try:
+            doc = json.loads(content)
+        except json.JSONDecodeError:
+            return False
+        if validate(doc):
+            return False
+    return True

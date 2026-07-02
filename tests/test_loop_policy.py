@@ -37,11 +37,20 @@ def _cover_scope(store, project):
         store.save_coverage(make_coverage(area=area))
 
 
-def _write_drafts(store, session_id):
-    """Write the four disclosure draft artifacts a successful DISCLOSURE persists."""
-    for name in ("disclosure-advisory.md", "disclosure-csaf.json",
-                 "disclosure-openvex.json", "disclosure-cve-draft.json"):
-        store.write_detail(session_id, name, "{}")
+def _write_drafts(store, session_id, finding):
+    """Write the four VALID disclosure draft artifacts a successful DISCLOSURE
+    persists (real exporter output, so they pass the same validation `check` uses)."""
+    import json
+
+    from deepthought.export.advisory import finding_to_advisory
+    from deepthought.export.csaf import finding_to_csaf
+    from deepthought.export.cve import finding_to_cve_draft
+    from deepthought.export.openvex import finding_to_openvex
+
+    store.write_detail(session_id, "disclosure-advisory.md", finding_to_advisory(finding))
+    store.write_detail(session_id, "disclosure-csaf.json", json.dumps(finding_to_csaf(finding)))
+    store.write_detail(session_id, "disclosure-openvex.json", json.dumps(finding_to_openvex(finding)))
+    store.write_detail(session_id, "disclosure-cve-draft.json", json.dumps(finding_to_cve_draft(finding)))
 
 
 def _past_recon(store, project):
@@ -153,18 +162,24 @@ def test_verified_finding_yields_sibling_hunt_then_disclosure(state_dir):
     store = FileStore(state_dir)
     p = _proj(store)
     _past_recon(store, p)
-    store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
+    finding = make_finding(id="F-1", project="php-src", status="verified")
+    store.save_finding(finding)
 
     a = select_next_action(store, p)
     assert a.kind is ActionKind.sibling_hunt and a.finding == "F-1"
-    # once the hunt is dispatched (driver marks it done), disclosure is next
+    # once the hunt is dispatched (driver marks it done), DISCLOSURE (draft) is next
     done = {("sibling_hunt", "F-1")}
     a = select_next_action(store, p, done=done)
     assert a.kind is ActionKind.disclosure and a.finding == "F-1"
-    # a completed disclosure session WITH its persisted drafts is the cross-run signal
+    # a completed disclosure session WITH valid persisted drafts -> the human SEND
+    # escalation (Article V), not a fresh draft
     _add_session(store, "disclosure", "S-4", findings_touched=["F-1"])
-    _write_drafts(store, "S-4")
-    assert select_next_action(store, p, done=done) is None
+    _write_drafts(store, "S-4", finding)
+    a = select_next_action(store, p, done=done)
+    assert a.kind is ActionKind.disclosure_send and a.finding == "F-1"
+    assert a.is_escalation and "send" in a.human_action.lower()
+    # once the send escalation is also collected -> fixed point
+    assert select_next_action(store, p, done=done | {("disclosure_send", "F-1")}) is None
 
 
 def test_uncompleted_disclosure_does_not_block_a_redraft(state_dir):
@@ -189,13 +204,31 @@ def test_disclosure_redrafts_when_the_persisted_artifacts_are_missing(state_dir)
     store = FileStore(state_dir)
     p = _proj(store)
     _past_recon(store, p)
-    store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
+    finding = make_finding(id="F-1", project="php-src", status="verified")
+    store.save_finding(finding)
     _add_session(store, "disclosure", "S-9", findings_touched=["F-1"])  # NO draft files
+    done = {("sibling_hunt", "F-1")}
+    a = select_next_action(store, p, done=done)
+    assert a.kind is ActionKind.disclosure and a.finding == "F-1"  # re-drafted (missing)
+    # once VALID drafts are present, drafting is done -> the human SEND escalation
+    _write_drafts(store, "S-9", finding)
+    a = select_next_action(store, p, done=done)
+    assert a.kind is ActionKind.disclosure_send and a.finding == "F-1"
+
+
+def test_malformed_disclosure_drafts_trigger_a_redraft(state_dir):
+    """Drafts that EXIST but fail validation (what `check` rejects) do not count as
+    done — the loop re-drafts, matching check's validity gate (not mere existence)."""
+    store = FileStore(state_dir)
+    p = _proj(store)
+    _past_recon(store, p)
+    store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
+    _add_session(store, "disclosure", "S-9", findings_touched=["F-1"])
+    for name in ("disclosure-advisory.md", "disclosure-csaf.json",
+                 "disclosure-openvex.json", "disclosure-cve-draft.json"):
+        store.write_detail("S-9", name, "{}")  # present but not schema-valid
     a = select_next_action(store, p, done={("sibling_hunt", "F-1")})
     assert a.kind is ActionKind.disclosure and a.finding == "F-1"  # re-drafted
-    # once the drafts are present, disclosure is done
-    _write_drafts(store, "S-9")
-    assert select_next_action(store, p, done={("sibling_hunt", "F-1")}) is None
 
 
 def test_candidate_yields_a_verify_escalation(state_dir):

@@ -22,7 +22,8 @@ from deepthought.schema.loop import (
 
 
 def test_action_and_stop_enums_are_closed():
-    for good in ("status", "map", "discover", "sibling_hunt", "disclosure", "verify_escalation"):
+    for good in ("status", "map", "discover", "sibling_hunt", "disclosure",
+                 "verify_escalation", "disclosure_send"):
         assert ActionKind(good).value == good
     for good in ("fixed_point", "budget_exhausted", "hard_stop", "gate_held", "gate_refused"):
         assert StopReason(good).value == good
@@ -35,11 +36,10 @@ def test_action_and_stop_enums_are_closed():
 def test_loop_action_escalation_flag_tracks_kind():
     safe = LoopAction(kind="map", project="php-src", area="ext/soap")
     assert safe.is_escalation is False
-    esc = LoopAction(
-        kind="verify_escalation", project="php-src", finding="F-0007",
-        human_action="F-0007 needs VERIFY under a real sandbox — human sign-off required",
-    )
-    assert esc.is_escalation is True
+    for kind in ("verify_escalation", "disclosure_send"):
+        esc = LoopAction(kind=kind, project="php-src", finding="F-0007",
+                         human_action="a human must act")
+        assert esc.is_escalation is True
 
 
 def test_verify_escalation_requires_a_human_action():

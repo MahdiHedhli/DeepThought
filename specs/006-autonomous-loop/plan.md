@@ -139,11 +139,15 @@ teach-back: outstanding human actions (verify-under-real-sandbox, send-disclosur
    candidates over the mapped surface). Once per project.
 4. **SIBLING HUNT** — for the first `verified` finding not yet hunted this run. New
    progress = variants of a confirmed bug.
-5. **DISCLOSURE (draft)** — for the first `verified` finding lacking drafts. New
-   progress = a disclosure package prepared.
-6. **VERIFY escalation** — if `candidate` findings remain, emit an *escalation*
+5. **DISCLOSURE (draft)** — for the first `verified` finding without VALID drafts
+   (present + schema-valid, the same check the gate applies), so deleted/corrupt
+   drafts are re-drafted. New progress = a valid disclosure package prepared.
+6. **DISCLOSURE SEND escalation** — a `verified` finding WITH valid drafts still
+   needs a human to review and send it (Article V); an *escalation* surfaced on
+   every run (state-based) until the finding moves past `verified`.
+7. **VERIFY escalation** — if `candidate` findings remain, emit an *escalation*
    (not a run): each needs real reproduction behind a human sign-off.
-7. otherwise `None` → fixed point.
+8. otherwise `None` → fixed point.
 
 STATUS/MAP/DISCOVER are per-project sessions (the `MapSession`/`DiscoverSession`
 take a project, not an area), so each runs once; their store-visible session

@@ -16,7 +16,7 @@ from datetime import datetime
 
 from ..protocol import run_session
 from ..protocol.gate import Gate, GateContext
-from ..schema import CloseState, GateOutcome, SessionType
+from ..schema import GateOutcome, SessionType
 from ..schema.common import ContextCost, iso_z, safe_record_id, utcnow
 from ..schema.loop import ActionKind, LoopAction, LoopRun, LoopStep, StopReason
 from ..sessions import (
@@ -187,13 +187,9 @@ def run_loop(
                 else StopReason.gate_refused
             )
             break
-        # A drafted disclosure still needs a human to review and SEND it — the
-        # transmission boundary is a hard stop (Article V). Name it in the audit.
-        if action.kind is ActionKind.disclosure and record.close_state is CloseState.clean:
-            outstanding.append(
-                f"{action.finding} disclosure drafted — human review and send "
-                f"required (Article V); Deep Thought drafts only, never transmits."
-            )
+        # (The Article V "review and send" hard stop for a drafted finding is
+        # surfaced by the policy's disclosure_send escalation — state-based, so it
+        # persists on every run until the finding moves past `verified`.)
 
     run = _build_run(store, project.id, budget, now, clock, stop_reason, spent,
                      trace, outstanding, planned)

@@ -9,24 +9,10 @@ nothing that expands scope, executes target code, or transmits.
 
 from __future__ import annotations
 
+from ..check import disclosure_drafts_ok
 from ..schema import CloseState, FindingStatus, GateOutcome, Project, SessionType
 from ..schema.loop import ActionKind, LoopAction
 from ..store import Store
-
-# The four artifacts a successful DISCLOSURE session persists (the same set the
-# `check` gate validates). A finding is only "drafted" while all four resolve.
-_DISCLOSURE_DRAFTS = (
-    "disclosure-advisory.md",
-    "disclosure-csaf.json",
-    "disclosure-openvex.json",
-    "disclosure-cve-draft.json",
-)
-
-
-def _drafts_present(store: Store, session_id: str) -> bool:
-    return all(
-        store.detail_exists(f"detail/{session_id}/{name}") for name in _DISCLOSURE_DRAFTS
-    )
 
 # A per-run key the driver marks once an action has been dispatched, so the same
 # work is never re-proposed within a run (structural monotonicity, independent of
@@ -99,22 +85,38 @@ def select_next_action(
         if f.id not in hunted_before and fresh(ActionKind.sibling_hunt, f.id):
             return LoopAction(kind=ActionKind.sibling_hunt, project=pid, finding=f.id)
 
-    # 5. DISCLOSURE (draft) — for the first verified finding lacking drafts. A
-    #    finding counts as drafted only when a COMPLETED disclosure session recorded
-    #    it AND its four persisted draft artifacts still resolve. So if the local
-    #    drafts are deleted/corrupted (and `check` goes red), the loop re-drafts to
-    #    regenerate them rather than skipping on a stale session record alone.
+    # A finding counts as drafted only when a COMPLETED disclosure session recorded
+    # it AND its four persisted drafts resolve AND VALIDATE (the same checks the
+    # `check` gate applies). So deleted/corrupt drafts (which make `check` go red)
+    # make the loop re-draft rather than skip on a stale session record alone.
     drafted = {
         fid
         for s in sessions
-        if s.type is SessionType.disclosure and completed(s) and _drafts_present(store, s.id)
+        if s.type is SessionType.disclosure and completed(s) and disclosure_drafts_ok(store, s.id)
         for fid in s.findings_touched
     }
+
+    # 5. DISCLOSURE (draft) — for the first verified finding without valid drafts.
     for f in verified:
         if f.id not in drafted and fresh(ActionKind.disclosure, f.id):
             return LoopAction(kind=ActionKind.disclosure, project=pid, finding=f.id)
 
-    # 6. VERIFY escalation — a candidate can only advance by real reproduction,
+    # 6. DISCLOSURE SEND escalation — a verified finding WITH valid drafts still
+    #    needs a human to review and SEND it (Article V). Surfaced on every run
+    #    (state-based) until the finding moves past `verified`; never performed.
+    for f in verified:
+        if f.id in drafted and fresh(ActionKind.disclosure_send, f.id):
+            return LoopAction(
+                kind=ActionKind.disclosure_send,
+                project=pid,
+                finding=f.id,
+                human_action=(
+                    f"{f.id} disclosure drafted — human review and send required "
+                    f"(Article V); Deep Thought drafts only, never transmits"
+                ),
+            )
+
+    # 7. VERIFY escalation — a candidate can only advance by real reproduction,
     #    which is a human-signed hard stop. Never run; recorded for a human.
     for f in findings:
         if f.status is FindingStatus.candidate and fresh(ActionKind.verify_escalation, f.id):
@@ -127,5 +129,5 @@ def select_next_action(
                 ),
             )
 
-    # 7. Nothing safe remains.
+    # 8. Nothing safe remains.
     return None

@@ -34,7 +34,9 @@ populated and bounded once real workers report cost.
 What the policy proposes. `LoopAction` is a typed value, never free-text.
 
 `ActionKind` (str enum): `status`, `map`, `discover`, `sibling_hunt`,
-`disclosure`, `verify_escalation`.
+`disclosure`, and two escalations — `verify_escalation` (a candidate needs real
+reproduction, Article III) and `disclosure_send` (a verified finding with valid
+drafts needs a human to review and send, Article V).
 
 | `LoopAction` field | Type | Meaning |
 |---|---|---|
