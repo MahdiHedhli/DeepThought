@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from ..schema.common import iso_z, utcnow
+from ._formats import _is_date_time
 from .osv import osv_id_for
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -162,6 +163,9 @@ def validate_openvex(doc: dict) -> list[str]:
     for field in ("@id", "author", "timestamp"):
         if not _nonempty_str(doc.get(field)):
             errors.append(f"{field}: must be a non-empty string")
+    # timestamp must additionally be an RFC3339 date-time.
+    if _nonempty_str(doc.get("timestamp")) and not _is_date_time(doc.get("timestamp")):
+        errors.append("timestamp: must be an RFC3339 date-time")
     # version is a positive integer (not a bool, string, or float).
     version = doc.get("version")
     if not (isinstance(version, int) and not isinstance(version, bool) and version >= 1):

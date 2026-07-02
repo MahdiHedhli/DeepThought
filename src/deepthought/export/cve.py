@@ -33,6 +33,7 @@ from referencing.jsonschema import DRAFT7
 
 from ..schema.common import iso_z, utcnow  # noqa: F401  (re-exported timestamp helper)
 from ._cvss import cvss3_metric, cvss3_schema
+from ._formats import format_checker
 from .osv import _details, osv_id_for  # reuse body-prose scraping + id mapping
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -305,7 +306,11 @@ def validate_cve_draft(doc: dict) -> list[str]:
     schema = _published_schema()
     validator_cls = jsonschema.validators.validator_for(schema)
     validator_cls.check_schema(schema)
-    validator = validator_cls(schema, registry=_registry())
+    # A FormatChecker enforces the schema's date-time / uri formats (otherwise mere
+    # annotations), so a corrupted persisted draft with a bad timestamp/URI fails.
+    validator = validator_cls(
+        schema, registry=_registry(), format_checker=format_checker()
+    )
     # Stringify path elements before sorting: a JSON path mixes str keys and int
     # array indices, and comparing str vs int across two errors raises TypeError.
     errors = sorted(

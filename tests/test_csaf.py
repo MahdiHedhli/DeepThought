@@ -157,6 +157,19 @@ def test_csaf_corrupt_doc_is_reported():
     assert validate_csaf(doc) != []
 
 
+def test_csaf_enforces_date_time_and_uri_formats():
+    """A corrupted persisted CSAF with a non-date timestamp or a non-URI namespace
+    is reported — the validator supplies a FormatChecker (format is otherwise a
+    mere annotation)."""
+    bad_date = finding_to_csaf(make_finding())
+    bad_date["document"]["tracking"]["current_release_date"] = "not-a-date"
+    assert any("current_release_date" in e for e in validate_csaf(bad_date))
+
+    bad_uri = finding_to_csaf(make_finding())
+    bad_uri["document"]["publisher"]["namespace"] = "not a uri"
+    assert validate_csaf(bad_uri) != []
+
+
 def test_validate_csaf_handles_multiple_errors_with_mixed_paths():
     """A doc with several errors across object keys AND array indices sorts and
     returns a list[str] without raising (paths are stringified before sorting)."""

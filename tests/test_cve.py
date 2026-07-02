@@ -293,6 +293,14 @@ def test_cve_injection_inertness():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_enforces_uri_format_on_references():
+    """A corrupted persisted CVE draft with a non-URI reference url is reported —
+    the validator supplies a FormatChecker."""
+    draft = finding_to_cve_draft(make_finding())
+    draft["containers"]["cna"]["references"][0]["url"] = "not a uri"
+    assert validate_cve_draft(draft) != []
+
+
 def test_validate_reports_a_malformed_cveid_not_just_the_sentinel():
     """validate_cve_draft tolerates ONLY the exact sentinel's pattern miss. A
     genuinely malformed cveId (wrong type, or a different bad string) must still

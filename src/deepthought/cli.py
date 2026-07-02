@@ -11,9 +11,9 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import typer
 
@@ -430,15 +430,17 @@ _DISCLOSURE_STATUSES = frozenset(
 
 
 def _safe_stem(finding_id: str) -> str:
-    """A filesystem-safe artifact filename stem for a finding id.
+    """A filesystem-safe AND injective artifact filename stem for a finding id.
 
     A finding id can contain path separators or ``..`` (the model and check do not
     forbid it, and records can be hand-edited); using it raw in ``out/<fmt>/<stem>``
-    could traverse out of the format directory. Non-``[A-Za-z0-9._-]`` characters
-    are replaced with ``_``, and the stable ``x_`` prefix keeps the result from
-    ever being ``.`` / ``..``.
+    could traverse out of the format directory. Percent-encoding every character
+    outside ``[A-Za-z0-9._-]`` keeps the stem inside the directory AND injective
+    (distinct ids -> distinct stems, so artifacts never silently overwrite), while
+    leaving an ordinary id like ``x_F-0007`` unchanged. The stable ``x_`` prefix
+    keeps the result from ever being ``.`` / ``..``.
     """
-    return re.sub(r"[^A-Za-z0-9._-]", "_", osv_id_for(finding_id)) or "artifact"
+    return quote(osv_id_for(finding_id), safe="") or "artifact"
 
 
 def _write_format(fmt: str, finding, dest: Path) -> Path:

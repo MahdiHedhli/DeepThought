@@ -213,6 +213,13 @@ def test_products_are_deduplicated_and_uniqueness_is_validated():
     assert any("unique" in e for e in validate_openvex(doc))
 
 
+def test_validate_enforces_timestamp_date_time_format():
+    """A non-date timestamp is reported (not merely required non-empty)."""
+    doc = finding_to_openvex(make_finding())
+    doc["timestamp"] = "not-a-date"
+    assert any("timestamp" in e for e in validate_openvex(doc))
+
+
 def test_validate_enforces_context_and_version_values():
     """@context must be the pinned OpenVEX context and version a positive integer —
     a corrupted draft with a wrong context or a non-integer version is reported."""

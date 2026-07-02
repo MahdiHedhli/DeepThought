@@ -35,6 +35,7 @@ from referencing import Registry, Resource
 
 from ..schema.common import iso_z, utcnow
 from ._cvss import cvss3_metric, cvss3_schema
+from ._formats import format_checker
 from .osv import _details, osv_id_for
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -327,7 +328,11 @@ def validate_csaf(doc: dict) -> list[str]:
     schema = _csaf_schema()
     validator_cls = jsonschema.validators.validator_for(schema)
     validator_cls.check_schema(schema)
-    validator = validator_cls(schema, registry=_cvss_registry())
+    # A FormatChecker enforces the schema's date-time / uri formats (otherwise mere
+    # annotations), so a corrupted persisted draft with a bad timestamp/URI fails.
+    validator = validator_cls(
+        schema, registry=_cvss_registry(), format_checker=format_checker()
+    )
     # Stringify path elements before sorting: a JSON path mixes str keys and int
     # array indices, and comparing str vs int across two errors raises TypeError.
     errors = sorted(validator.iter_errors(doc), key=lambda e: [str(p) for p in e.path])
