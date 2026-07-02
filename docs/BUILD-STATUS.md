@@ -5,9 +5,22 @@ _As of 2026-07-02._
 ## TL;DR
 DeepThought is a **governed, autonomous security-research platform**. Its entire
 numbered feature roadmap — **001 → 006 — is built, reviewed, and merged to
-`main`.** Repo: **`MahdiHedhli/DeepThought`** (public). State on `main`: **570
-tests green; all six smoke scripts pass.** No further numbered feature remains;
-next work needs a human decision.
+`main`**, plus a **Tier 1 rediscovery benchmark** (CVE-2007-4559). Repo:
+**`MahdiHedhli/DeepThought`** (public). State on `main`: **582 tests green; all
+six smoke scripts pass.** No further numbered feature remains; next work needs a
+human decision.
+
+## Benchmark (merged, PR #7 `2fe2435`)
+A deterministic CI **rediscovery benchmark** proves the platform re-finds a known,
+patched CVE through the *shipped* pipeline **without executing the vulnerable
+sink** — see [`benchmarks/deep-thought-benchmark.md`](../benchmarks/deep-thought-benchmark.md).
+- **Tier 1 — CVE-2007-4559** (Python `tarfile` path traversal / CWE-22): an AST
+  rule → SARIF → the real `sarif_to_findings` (extended to carry a validated CVE as
+  an informational **alias**, never the authoritative `Finding.cve` — SARIF stays
+  untrusted) → a candidate → OSV/`check` → the loop's `verify_escalation`. Every
+  test runs with `TarFile.extractall`/`extract` monkeypatched to raise. **Built.**
+- **Tier 2 — cJSON memory-safety**: **not started** — it crosses the execution
+  hard stop and needs a wired sandbox + Mahdi's sign-off (Article III).
 
 Every feature was built **gate-first / test-first** and merged only after an
 independent **dual-gate review** (both reviewers clean on the same HEAD). All
@@ -135,9 +148,11 @@ state machine, each fixed test-first; agy was clean the last four rounds.
 - **NTFY** to `ntfy.sh/Mahdi-Dev` on every hard stop (urgent) and every merge.
 
 ## What needs a decision next
-The numbered roadmap is complete, so there is nothing left to build autonomously.
-Options: (a) the two follow-ups above, (b) a new numbered feature (needs a spec),
-or (c) a real **authorized** engagement — which immediately hits the
+The numbered roadmap is complete and Tier 1 of the benchmark is merged, so there is
+nothing left to build autonomously. Options: (a) the two follow-ups above, (b) a new
+numbered feature (needs a spec), (c) **Tier 2 of the benchmark** (cJSON memory-safety
+rediscovery) — which crosses the execution hard stop and needs a wired sandbox +
+sign-off, or (d) a real **authorized** engagement — which immediately hits the
 target-code-execution / disclosure-transmission hard stops that need a human
 sign-off.
 
@@ -145,7 +160,7 @@ sign-off.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv -e ".[dev]"
-.venv/bin/pytest                          # 570 tests
+.venv/bin/pytest                          # 582 tests (tests/ + benchmarks/)
 for s in scripts/smoke*.sh; do bash "$s"; done   # 6 smokes
 .venv/bin/deepthought --help
 ```
