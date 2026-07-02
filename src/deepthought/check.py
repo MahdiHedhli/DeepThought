@@ -35,6 +35,7 @@ from .schema import (
     Session,
     SessionType,
 )
+from .schema.loop import LoopRun
 from .store import Store
 
 _MODEL_BY_KIND = {
@@ -43,6 +44,7 @@ _MODEL_BY_KIND = {
     "session": Session,
     "coverage": Coverage,
     "methodology": Methodology,
+    "loop": LoopRun,
 }
 
 
@@ -66,7 +68,7 @@ def run_check(store: Store) -> CheckReport:
         _check_osv(parsed["finding"], report)
         _check_csaf(parsed["finding"], report)
         _check_openvex(parsed["finding"], report)
-        _check_disclosure_drafts(store, report)
+        _check_disclosure_drafts(parsed["session"], store, report)
     except Exception as exc:  # a check that raises is a failed check
         report.fail(f"check raised: {exc!r}")
     return report
@@ -124,6 +126,26 @@ def _check_orphans(parsed: dict[str, list], report: CheckReport) -> None:
             if fid not in finding_ids:
                 report.fail(
                     f"session {session.id!r} touched unknown finding {fid!r}"
+                )
+
+    # A LoopRun is a durable audit; its project and every trace reference must
+    # still resolve, so a hand-edited/conflicted run cannot point at deleted state.
+    session_ids = {s.id for s in parsed["session"]}
+    for run in parsed["loop"]:
+        if run.project not in project_ids:
+            report.fail(
+                f"loop run {run.id!r} references unknown project {run.project!r}"
+            )
+        for step in run.trace:
+            if step.finding is not None and step.finding not in finding_ids:
+                report.fail(
+                    f"loop run {run.id!r} trace references unknown finding "
+                    f"{step.finding!r}"
+                )
+            if step.session_id is not None and step.session_id not in session_ids:
+                report.fail(
+                    f"loop run {run.id!r} trace references unknown session "
+                    f"{step.session_id!r}"
                 )
 
 
@@ -193,7 +215,9 @@ _DISCLOSURE_SCHEMA_DRAFTS = {
 }
 
 
-def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
+def _check_disclosure_drafts(
+    sessions: list[Session], store: Store, report: CheckReport
+) -> None:
     """Validate the PERSISTED disclosure drafts, not just a re-derivation.
 
     A DISCLOSURE session writes four ``detail/<session>/disclosure-*`` artifacts —
@@ -202,8 +226,12 @@ def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
     every refusal leaves it empty). For such a session ALL four artifacts must
     exist (a missing one fails the gate), and the two JSON drafts must additionally
     be schema-conformant. A refused session is skipped.
+
+    Iterates the ALREADY-PARSED sessions (not a fresh ``store.list_sessions()``)
+    so a single corrupt session file cannot raise here and abort the whole check
+    after the schema pass already reported it cleanly.
     """
-    for session in store.list_sessions():
+    for session in sessions:
         if session.type is not SessionType.disclosure:
             continue
         if not session.findings_touched:
@@ -226,3 +254,27 @@ def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
                 continue
             for err in validate(doc):
                 report.fail(f"disclosure draft {ref!r} non-conformance: {err}")
+
+
+def disclosure_drafts_ok(store: Store, session_id: str) -> bool:
+    """Whether a disclosure session's four persisted drafts all resolve AND the
+    JSON drafts parse and validate — the SAME checks the ``check`` gate applies.
+
+    The autonomous loop uses this so a finding counts as drafted only when its
+    drafts would pass ``check``; a missing or malformed draft makes the loop
+    re-draft rather than stop while ``check`` stays red.
+    """
+    for name in _DISCLOSURE_ARTIFACTS:
+        content = store.read_detail(f"detail/{session_id}/{name}")
+        if content is None:
+            return False
+        validate = _DISCLOSURE_SCHEMA_DRAFTS.get(name)
+        if validate is None:
+            continue
+        try:
+            doc = json.loads(content)
+        except json.JSONDecodeError:
+            return False
+        if validate(doc):
+            return False
+    return True

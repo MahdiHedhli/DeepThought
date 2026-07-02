@@ -21,11 +21,15 @@ Shipped so far:
 | **003** | `VERIFY` — sandboxed reproduction | execution behind a hard stop; `NoopSandbox` dry-run only, real execution needs sign-off |
 | **004** | `SIBLING HUNT` — cross-project variant analysis | read-only |
 | **005** | `DISCLOSURE` — draft advisory + CVE + CSAF + OpenVEX | **draft-only; transmits nothing** |
+| **006** | `loop` — autonomous driver + limit awareness | **bounded & gated; escalates the hard stops** |
 
 No untrusted target code executes without an explicit human sign-off, and no
 disclosure ever leaves the machine — drafting is done by an agent, sending by a
-person (Constitution Article V). The autonomous loop and limit awareness (feature
-006) arrive next, behind the same gates.
+person (Constitution Article V). The autonomous loop (feature 006) chains the
+safe, read-only, draft-only sessions behind the same gates: it runs only under an
+explicit budget, cannot expand its own scope, and advances work up to the
+target-execution and disclosure-transmission hard stops, then hands them to a
+human.
 
 > Built with GitHub Spec Kit. Intent is the source of truth (`specs/`,
 > `.specify/memory/constitution.md`); the platform is the regenerated output.
@@ -51,6 +55,16 @@ deepthought playbook verify  --project <id> --finding <F-NNNN>         # 003, No
 deepthought playbook sibling-hunt --project <id> --finding <F-NNNN> [--sibling <id> ...]  # 004, read-only variants
 deepthought playbook disclose --project <id> --finding <F-NNNN>        # 005, draft-only advisory/CVE/CSAF/OpenVEX
 deepthought publish --format osv|csaf|openvex|cve-draft|advisory|all   # local artifacts only
+```
+
+`loop` is the autonomous driver (feature 006) — it runs the safe chain above
+behind the gates, under an explicit budget, and escalates the hard stops:
+
+```
+deepthought loop --project <id> --max-sessions N [--max-seconds S] [--max-tokens T]
+# deterministic: status -> map -> discover -> sibling-hunt/disclose (per verified finding),
+# then stops (fixed point / budget / gate). Never runs NEW PROJECT or VERIFY: a candidate
+# needing real reproduction, and a disclosure needing to be sent, are escalated to a human.
 ```
 
 ## Quickstart

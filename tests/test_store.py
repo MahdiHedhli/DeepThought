@@ -260,6 +260,30 @@ def test_detail_access_rejects_path_traversal(state_dir, tmp_path):
     assert store.read_detail(f"detail/S-1/../../../{secret.name}") is None
 
 
+def test_loop_run_crud_and_list(state_dir):
+    from deepthought.loop import LoopBudget
+    from deepthought.schema.loop import LoopRun
+
+    store = FileStore(state_dir)
+    run = LoopRun(id="L-2026-07-02-0001", project="php-src",
+                  started="2026-07-02T00:00:00Z", stop_reason="fixed_point",
+                  budget=LoopBudget(max_sessions=5),
+                  body="## Summary\n\nx\n\n## Next steps\n\ny")
+    store.save_loop_run(run)
+    assert store.get_loop_run("L-2026-07-02-0001") == run
+    store.save_loop_run(LoopRun(id="L-2026-07-02-0002", project="curl", started="t",
+                                stop_reason="budget_exhausted",
+                                budget=LoopBudget(max_sessions=1)))
+    assert {r.id for r in store.list_loop_runs()} == {"L-2026-07-02-0001", "L-2026-07-02-0002"}
+    assert [r.id for r in store.list_loop_runs(project="curl")] == ["L-2026-07-02-0002"]
+
+
+def test_get_loop_run_rejects_traversal_ids(state_dir):
+    store = FileStore(state_dir)
+    for bad in ("../../etc/passwd", "a/b", "..", "with space", "", "L-1\n"):
+        assert store.get_loop_run(bad) is None, bad
+
+
 def test_get_lookups_reject_traversal_ids(state_dir):
     """The get_* lookups take a RAW string id (never model-validated), so a
     traversal id must be refused (returns not-found) — a crafted id can never read
