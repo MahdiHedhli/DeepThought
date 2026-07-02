@@ -22,12 +22,13 @@ def _proj(store):
     return p
 
 
-def _add_session(store, stype, sid, gate_outcome="proceed", **kw):
-    # Default to a gate-PROCEEDED session — only a session that proceeded counts as
-    # completed work in the policy (a refused attempt must not mark its rung done).
+def _add_session(store, stype, sid, gate_outcome="proceed", close_state="clean", **kw):
+    # Default to a genuinely COMPLETED session (gate proceeded + closed clean) —
+    # only a completed session counts as done in the policy; a refused or
+    # interrupted attempt must not mark its rung done.
     store.save_session(Session(id=sid, type=stype, project="php-src",
                                started="2026-07-02T00:00:00Z",
-                               gate_outcome=gate_outcome, **kw))
+                               gate_outcome=gate_outcome, close_state=close_state, **kw))
 
 
 def _past_recon(store):
@@ -83,6 +84,19 @@ def test_refused_discover_attempt_is_not_counted_as_done(state_dir):
     _add_session(store, "discover", "S-3", gate_outcome="refuse")  # a REFUSED attempt
     assert select_next_action(store, p).kind is ActionKind.discover  # re-proposed
     _add_session(store, "discover", "S-4", gate_outcome="proceed")   # now it succeeds
+    assert select_next_action(store, p) is None
+
+
+def test_interrupted_discover_is_not_counted_as_done(state_dir):
+    """A DISCOVER that proceeded the gate but did NOT close clean (interrupted) is
+    not completed work — DISCOVER is re-proposed until a clean run."""
+    store = FileStore(state_dir)
+    p = _proj(store)
+    _add_session(store, "status", "S-1")
+    store.save_coverage(make_coverage())
+    _add_session(store, "discover", "S-3", gate_outcome="proceed", close_state="interrupted")
+    assert select_next_action(store, p).kind is ActionKind.discover  # re-proposed
+    _add_session(store, "discover", "S-4", gate_outcome="proceed", close_state="clean")
     assert select_next_action(store, p) is None
 
 

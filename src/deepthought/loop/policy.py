@@ -9,7 +9,7 @@ nothing that expands scope, executes target code, or transmits.
 
 from __future__ import annotations
 
-from ..schema import FindingStatus, GateOutcome, Project, SessionType
+from ..schema import CloseState, FindingStatus, GateOutcome, Project, SessionType
 from ..schema.loop import ActionKind, LoopAction
 from ..store import Store
 
@@ -25,11 +25,17 @@ def select_next_action(
     done = done or set()
     pid = project.id
     sessions = store.list_sessions(pid)
-    # Only a session whose gate PROCEEDED counts as completed work: a gate-held/
-    # refused attempt (e.g. authorization temporarily removed) still persists a
-    # session record, but it did no work, so it must not mark its rung done — else
-    # the loop could never resume that step after the operator fixes the gate.
-    succeeded = {s.type for s in sessions if s.gate_outcome is GateOutcome.proceed}
+
+    # A rung is "done" only when a session genuinely COMPLETED it — the gate
+    # PROCEEDED and it closed CLEAN. A gate-held/refused attempt (authorization
+    # temporarily removed) or an interrupted run still persists a session record
+    # but did not do the work, so it must not mark its rung done — else the loop
+    # could never resume that step after the operator fixes the cause.
+    def completed(record) -> bool:
+        return (record.gate_outcome is GateOutcome.proceed
+                and record.close_state is CloseState.clean)
+
+    succeeded = {s.type for s in sessions if completed(s)}
 
     def fresh(kind: ActionKind, target: str) -> bool:
         return (kind.value, target) not in done
@@ -67,9 +73,7 @@ def select_next_action(
         step.finding
         for run in store.list_loop_runs(pid)
         for step in run.trace
-        if step.kind is ActionKind.sibling_hunt
-        and step.gate_outcome is GateOutcome.proceed
-        and step.finding
+        if step.kind is ActionKind.sibling_hunt and step.finding and completed(step)
     }
 
     # 4. SIBLING HUNT — variants of the first verified finding not yet hunted.
