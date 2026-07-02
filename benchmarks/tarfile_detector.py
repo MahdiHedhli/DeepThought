@@ -33,17 +33,23 @@ _SAFE_FILTER_CALLABLES = {"data_filter", "tar_filter"}
 
 
 def _has_safe_filter(call: ast.Call) -> bool:
-    """Whether the call passes a KNOWN-SAFE ``filter=`` (a `data`/`tar` string or
-    ``tarfile.data_filter``/``tar_filter``). Anything else is treated as unsafe."""
+    """Whether the call passes a KNOWN-SAFE ``filter=``: a ``"data"``/``"tar"``
+    string literal, or ``tarfile.data_filter`` / ``tarfile.tar_filter`` accessed on
+    the ``tarfile`` module itself. Anything else — ``filter=None``,
+    ``"fully_trusted"``, a dynamic value, or ``some_other_object.data_filter`` we
+    cannot prove is tarfile's — is treated as unsafe and flagged."""
     for kw in call.keywords:
         if kw.arg != "filter":
             continue
         value = kw.value
         if isinstance(value, ast.Constant) and value.value in _SAFE_FILTERS:
             return True
-        if isinstance(value, ast.Attribute) and value.attr in _SAFE_FILTER_CALLABLES:
-            return True
-        if isinstance(value, ast.Name) and value.id in _SAFE_FILTER_CALLABLES:
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "tarfile"
+            and value.attr in _SAFE_FILTER_CALLABLES
+        ):
             return True
     return False
 

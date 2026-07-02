@@ -95,6 +95,10 @@ def test_detector_flags_unsafe_filter_values():
         "tar.extractall(dest, filter=None)",
         'tar.extractall(dest, filter="fully_trusted")',
         "tar.extractall(dest, filter=chosen_at_runtime)",
+        # a `.data_filter` on something we cannot prove is the tarfile module — not
+        # accepted as safe (it could be any object's attribute).
+        "tar.extractall(dest, filter=untrusted.data_filter)",
+        "tar.extractall(dest, filter=data_filter)",
         "tar.extract(member, dest)",
     ]
     for snippet in vulnerable:
@@ -123,7 +127,8 @@ def test_real_ingest_files_candidate_with_ground_truth():
     assert len(findings) == 1
     finding = findings[0]
     assert finding.status is FindingStatus.candidate
-    assert finding.cve == GROUND_TRUTH_CVE            # aliased to the CVE
+    assert finding.cve is None                        # untrusted SARIF cannot ASSIGN a cve
+    assert GROUND_TRUTH_CVE in finding.aliases        # only an informational alias
     assert GROUND_TRUTH_CWE in finding.body           # tagged with the CWE
     assert RULE_ID in finding.summary
 
@@ -202,7 +207,8 @@ def test_full_pipeline_rediscovers_and_stops_at_the_verify_escalation(state_dir,
     finding = findings[0]
     assert finding.status is FindingStatus.candidate
     assert finding.id.startswith("F-")            # id from the session, not hardcoded
-    assert finding.cve == GROUND_TRUTH_CVE
+    assert finding.cve is None                        # not authoritatively assigned
+    assert GROUND_TRUTH_CVE in finding.aliases        # informational cross-reference
     assert GROUND_TRUTH_CWE in finding.body
     assert validate_osv(finding_to_osv(finding)) == []
 
@@ -242,5 +248,6 @@ def test_cli_discover_produces_the_candidate_through_the_shipped_session(state_d
     assert result.exit_code == 0, result.output
     findings = FileStore(state_dir).list_findings(project=pid)
     assert len(findings) == 1
-    assert findings[0].cve == GROUND_TRUTH_CVE
+    assert GROUND_TRUTH_CVE in findings[0].aliases
+    assert findings[0].cve is None
     assert findings[0].status is FindingStatus.candidate

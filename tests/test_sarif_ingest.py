@@ -244,7 +244,10 @@ def test_finding_carries_validated_cve_and_cwe_from_result_properties():
         properties={"cve": "CVE-2007-4559", "cwe": "CWE-22"},
     )
     finding = sarif_to_findings(doc, project="demo")[0]
-    assert finding.cve == "CVE-2007-4559"
+    # UNTRUSTED SARIF cannot ASSIGN the authoritative, disclosure-gating cve — the
+    # claim is recorded only as an informational ALIAS (cross-reference).
+    assert finding.cve is None
+    assert "CVE-2007-4559" in finding.aliases
     assert "CWE-22" in finding.body
     osv = finding_to_osv(finding)
     assert validate_osv(osv) == []
@@ -258,7 +261,8 @@ def test_cve_and_cwe_are_read_from_rule_properties_as_a_fallback():
         {"cve": "CVE-2007-4559", "cwe": "CWE-22"}
     )
     finding = sarif_to_findings(doc, project="demo")[0]
-    assert finding.cve == "CVE-2007-4559"
+    assert finding.cve is None
+    assert "CVE-2007-4559" in finding.aliases
     assert "CWE-22" in finding.body
 
 
@@ -268,6 +272,7 @@ def test_malformed_cve_or_cwe_in_properties_is_ignored():
     )
     finding = sarif_to_findings(doc, project="demo")[0]
     assert finding.cve is None                      # sentinel/invalid cve dropped
+    assert finding.aliases == []                    # not even recorded as an alias
     assert "javascript" not in finding.body         # unvalidated cwe never injected
     assert "alert" not in finding.body
     assert validate_osv(finding_to_osv(finding)) == []

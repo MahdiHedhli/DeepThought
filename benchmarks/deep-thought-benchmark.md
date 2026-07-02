@@ -28,10 +28,12 @@ fix (PEP 706, Python 3.12) is `extractall(..., filter='data')`.
   `cwe: CWE-22` and `cve: CVE-2007-4559` in `properties`. It flags the vulnerable
   call and skips the patched one.
 - **Real ingest wiring** — the SARIF feeds the **shipped** `deepthought.ingest.sarif`
-  (`sarif_to_findings`), which was extended (not forked) to copy a *validated*
-  `cve` onto the candidate Finding (mirrored into OSV aliases on export) and a
-  validated `cwe` into the finding body. A malformed/sentinel value is dropped —
-  SARIF stays untrusted, bounded data.
+  (`sarif_to_findings`), which was extended (not forked) to carry a *validated*
+  `cve`/`cwe`. Because SARIF is **untrusted**, a claimed CVE is recorded only as an
+  informational **alias** (a cross-reference — "this candidate looks like CVE-…"),
+  **never** the authoritative `Finding.cve` that gates `verified → disclosed`; the
+  CWE goes into the body. A malformed/sentinel value is dropped — SARIF stays
+  untrusted, bounded data.
 - **Repro** — a tar with a single member `../deep_thought_poc_marker`. A benign
   marker, no payload; staged and inspected, never extracted.
 - **Test** — [`test_cve_2007_4559.py`](test_cve_2007_4559.py): the rediscovery plus

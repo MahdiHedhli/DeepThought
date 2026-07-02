@@ -484,9 +484,13 @@ def sarif_to_findings(
             # text so an absurdly long uri cannot push the body over _BODY_MAX.
             location = f"\n\n**Location:** `{loc_text[:_LOCATION_MAX]}`"
 
-        # A known-vulnerability rediscovery may carry a validated cve/cwe; the cve
-        # lands on the finding (mirrored into OSV aliases on export) and the cwe is
-        # rendered into the body so the weakness travels with the record.
+        # A known-vulnerability rediscovery may carry a validated cve/cwe in the
+        # SARIF. SARIF is UNTRUSTED, so a claimed CVE is recorded only as an
+        # informational ALIAS (a cross-reference: "this candidate looks like
+        # CVE-…"), NEVER the authoritative ``Finding.cve`` — which gates the
+        # verified -> disclosed transition and only a human/verified process may
+        # assign (no fabricated-CVE boundary, feature 005). The cwe is rendered into
+        # the body so the weakness travels with the record.
         cve, cwe = _known_vuln_ids(result, rule)
         weakness = f"\n\n**Weakness:** `{cwe}`" if cwe else ""
 
@@ -507,7 +511,7 @@ def sarif_to_findings(
                 references=references,
                 affected=[],
                 evidence_ref=None,
-                cve=cve,
+                aliases=[cve] if cve else [],  # informational cross-reference only
                 body=body,
             )
         )
