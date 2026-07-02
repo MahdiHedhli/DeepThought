@@ -241,3 +241,26 @@ def test_check_requires_the_non_schema_disclosure_artifacts_too(state_dir):
             report = run_check(store)
             assert not report.ok, name
             assert any("missing expected draft" in e for e in report.errors)
+
+
+def test_check_validates_the_persisted_cve_draft_json(state_dir):
+    """The persisted CVE draft is parsed + validated (tolerant of the sentinel):
+    corrupt JSON there fails the gate, even though it is not schema-submittable."""
+    from deepthought.protocol import HermesUltraCodeGate, run_session
+    from deepthought.sessions import DisclosureSession
+
+    store = FileStore(state_dir)
+    store.save_project(make_project())
+    ev = store.write_detail("S-seed", "evidence.txt", "resolving evidence")
+    store.save_finding(make_finding(status="verified", evidence_ref=ev))
+
+    session = DisclosureSession("php-src", "F-0007")
+    run_session(store, HermesUltraCodeGate(), session)
+    assert run_check(store).ok  # the well-formed cve draft (with sentinel) passes
+
+    (store.root / session.artifact_refs["disclosure-cve-draft.json"]).write_text(
+        "{ not json", encoding="utf-8"
+    )
+    report = run_check(store)
+    assert not report.ok
+    assert any("cve-draft" in e for e in report.errors)

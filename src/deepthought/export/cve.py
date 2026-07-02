@@ -239,7 +239,11 @@ def validate_cve_draft(doc: dict) -> list[str]:
     validator_cls = jsonschema.validators.validator_for(schema)
     validator_cls.check_schema(schema)
     validator = validator_cls(schema, registry=_registry())
-    errors = sorted(validator.iter_errors(doc), key=lambda e: list(e.absolute_path))
+    # Stringify path elements before sorting: a JSON path mixes str keys and int
+    # array indices, and comparing str vs int across two errors raises TypeError.
+    errors = sorted(
+        validator.iter_errors(doc), key=lambda e: [str(p) for p in e.absolute_path]
+    )
 
     metadata = doc.get("cveMetadata") if isinstance(doc, dict) else None
     cveid = metadata.get("cveId") if isinstance(metadata, dict) else None

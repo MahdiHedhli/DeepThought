@@ -102,6 +102,19 @@ def test_cve_draft_structurally_valid():
     assert errors == [], errors
 
 
+def test_validate_cve_draft_handles_multiple_errors_with_mixed_paths():
+    """A structurally-broken draft with errors across object keys AND array
+    indices sorts and returns a list[str] without raising (paths stringified)."""
+    draft = {
+        "dataType": "CVE_RECORD",
+        "dataVersion": "5.1",
+        "cveMetadata": {},
+        "containers": {"cna": {"affected": [{}], "descriptions": [{}]}},
+    }
+    result = validate_cve_draft(draft)
+    assert isinstance(result, list) and len(result) >= 2
+
+
 def test_cve_cna_required_members_present():
     cna = finding_to_cve_draft(make_finding())["containers"]["cna"]
     assert "providerMetadata" in cna

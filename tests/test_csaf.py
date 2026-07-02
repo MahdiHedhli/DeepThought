@@ -157,6 +157,14 @@ def test_csaf_corrupt_doc_is_reported():
     assert validate_csaf(doc) != []
 
 
+def test_validate_csaf_handles_multiple_errors_with_mixed_paths():
+    """A doc with several errors across object keys AND array indices sorts and
+    returns a list[str] without raising (paths are stringified before sorting)."""
+    doc = {"document": {}, "vulnerabilities": [{}], "product_tree": {"branches": [{}]}}
+    result = validate_csaf(doc)
+    assert isinstance(result, list) and len(result) >= 2
+
+
 def test_csaf_cvss_30_vector_is_versioned_30_and_validates():
     """A CVSS:3.0 vector must be emitted as version 3.0 (matching the v3.0 oneOf
     branch) so check stays green — not hardcoded 3.1."""

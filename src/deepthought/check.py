@@ -20,6 +20,7 @@ import json
 from dataclasses import dataclass, field
 
 from .export.csaf import finding_to_csaf, validate_csaf
+from .export.cve import validate_cve_draft
 from .export.openvex import finding_to_openvex, validate_openvex
 from .export.osv import finding_to_osv, validate_osv
 from .schema import (
@@ -172,9 +173,10 @@ def _check_openvex(findings: list[Finding], report: CheckReport) -> None:
 
 
 # Every artifact a successful DISCLOSURE session writes. All FOUR must exist (they
-# are the human-review set); the two JSON drafts are additionally schema-validated.
-# The CVE draft is intentionally non-submittable, and the advisory is Markdown, so
-# those two are existence-checked only, not schema-gated.
+# are the human-review set). The three JSON drafts are additionally parsed and
+# validated — the CVE draft via its TOLERANT validator (which accepts the
+# intentional non-submittable cveId sentinel but still catches corrupt JSON or a
+# malformed structure). The advisory is Markdown, so it is existence-checked only.
 _DISCLOSURE_ARTIFACTS = (
     "disclosure-advisory.md",
     "disclosure-csaf.json",
@@ -184,6 +186,7 @@ _DISCLOSURE_ARTIFACTS = (
 _DISCLOSURE_SCHEMA_DRAFTS = {
     "disclosure-csaf.json": validate_csaf,
     "disclosure-openvex.json": validate_openvex,
+    "disclosure-cve-draft.json": validate_cve_draft,
 }
 
 
