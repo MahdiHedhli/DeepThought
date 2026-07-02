@@ -24,9 +24,28 @@ GROUND_TRUTH_CVE = "CVE-2007-4559"
 GROUND_TRUTH_CWE = "CWE-22"
 _SINKS = {"extractall", "extract"}
 
+# The PEP 706 filters that actually block path traversal. Only these make a call
+# safe. Any OTHER filter value is still CVE-2007-4559: `filter=None` is the old
+# unsafe default, `filter="fully_trusted"` disables sanitization entirely, and a
+# dynamic/unknown filter can be either — so a mere `filter=` keyword is NOT a fix.
+_SAFE_FILTERS = {"data", "tar"}
+_SAFE_FILTER_CALLABLES = {"data_filter", "tar_filter"}
 
-def _has_filter_kwarg(call: ast.Call) -> bool:
-    return any(kw.arg == "filter" for kw in call.keywords)
+
+def _has_safe_filter(call: ast.Call) -> bool:
+    """Whether the call passes a KNOWN-SAFE ``filter=`` (a `data`/`tar` string or
+    ``tarfile.data_filter``/``tar_filter``). Anything else is treated as unsafe."""
+    for kw in call.keywords:
+        if kw.arg != "filter":
+            continue
+        value = kw.value
+        if isinstance(value, ast.Constant) and value.value in _SAFE_FILTERS:
+            return True
+        if isinstance(value, ast.Attribute) and value.attr in _SAFE_FILTER_CALLABLES:
+            return True
+        if isinstance(value, ast.Name) and value.id in _SAFE_FILTER_CALLABLES:
+            return True
+    return False
 
 
 def scan_source(source: str, uri: str) -> list[dict]:
@@ -39,8 +58,8 @@ def scan_source(source: str, uri: str) -> list[dict]:
         func = node.func
         if not isinstance(func, ast.Attribute) or func.attr not in _SINKS:
             continue
-        if _has_filter_kwarg(node):
-            continue  # patched shape — the extraction filter is present
+        if _has_safe_filter(node):
+            continue  # patched shape — a known-safe extraction filter is present
         results.append(
             {
                 "ruleId": RULE_ID,

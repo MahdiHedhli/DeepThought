@@ -84,6 +84,34 @@ def test_detector_flags_vulnerable_and_skips_patched():
     assert result["properties"]["cve"] == GROUND_TRUTH_CVE
 
 
+def test_detector_flags_unsafe_filter_values():
+    """An UNSAFE filter is still CVE-2007-4559: only a known-safe filter is the fix,
+    so `filter=None`, `filter='fully_trusted'`, a dynamic filter, and a bare
+    `extract`/`extractall` must all be flagged."""
+    from tarfile_detector import scan_source
+
+    vulnerable = [
+        "tar.extractall(dest)",
+        "tar.extractall(dest, filter=None)",
+        'tar.extractall(dest, filter="fully_trusted")',
+        "tar.extractall(dest, filter=chosen_at_runtime)",
+        "tar.extract(member, dest)",
+    ]
+    for snippet in vulnerable:
+        assert len(scan_source(snippet, uri="x.py")) == 1, snippet
+
+
+def test_detector_suppresses_only_known_safe_filters():
+    from tarfile_detector import scan_source
+
+    for snippet in (
+        'tar.extractall(dest, filter="data")',
+        'tar.extractall(dest, filter="tar")',
+        "tar.extractall(dest, filter=tarfile.data_filter)",
+    ):
+        assert scan_source(snippet, uri="x.py") == [], snippet
+
+
 # --------------------------------------------------------------------------- #
 # the REAL ingest: SARIF -> candidate Finding (what DISCOVER does)
 # --------------------------------------------------------------------------- #
