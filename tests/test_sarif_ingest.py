@@ -228,3 +228,57 @@ def test_run_with_no_results_yields_nothing():
     doc = {"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "T"}}}]}
     assert sarif_to_findings(doc, project="demo") == []
     assert sarif_to_primitives(doc, finding_ids=[]) == []
+
+
+# --- CVE / CWE metadata carried from SARIF properties -----------------------
+# A SARIF result (or its rule) can carry a `cve` and `cwe` in its properties for a
+# known-vulnerability rediscovery. The ingest copies a VALIDATED cve onto the
+# finding (mirrored into OSV aliases on export) and a validated cwe into the body.
+# Untrusted SARIF: a malformed value is dropped, never persisted or injected.
+
+
+def test_finding_carries_validated_cve_and_cwe_from_result_properties():
+    doc = minimal_sarif(
+        ruleId="DT-TARFILE-EXTRACTALL",
+        message={"text": "unsanitized tar member path passed to extractall"},
+        properties={"cve": "CVE-2007-4559", "cwe": "CWE-22"},
+    )
+    finding = sarif_to_findings(doc, project="demo")[0]
+    # UNTRUSTED SARIF cannot ASSIGN the authoritative, disclosure-gating cve — the
+    # claim is recorded only as an informational ALIAS (cross-reference).
+    assert finding.cve is None
+    assert "CVE-2007-4559" in finding.aliases
+    assert "CWE-22" in finding.body
+    osv = finding_to_osv(finding)
+    assert validate_osv(osv) == []
+    assert "CVE-2007-4559" in osv.get("aliases", [])
+
+
+def test_cve_and_cwe_are_read_from_rule_properties_as_a_fallback():
+    doc = minimal_sarif(message={"text": "known weakness"})
+    # put cve/cwe on the RULE, not the result
+    doc["runs"][0]["tool"]["driver"]["rules"][0]["properties"].update(
+        {"cve": "CVE-2007-4559", "cwe": "CWE-22"}
+    )
+    finding = sarif_to_findings(doc, project="demo")[0]
+    assert finding.cve is None
+    assert "CVE-2007-4559" in finding.aliases
+    assert "CWE-22" in finding.body
+
+
+def test_malformed_cve_or_cwe_in_properties_is_ignored():
+    doc = minimal_sarif(
+        properties={"cve": "CVE-XXXX-XXXXX", "cwe": "javascript:alert(1)"}
+    )
+    finding = sarif_to_findings(doc, project="demo")[0]
+    assert finding.cve is None                      # sentinel/invalid cve dropped
+    assert finding.aliases == []                    # not even recorded as an alias
+    assert "javascript" not in finding.body         # unvalidated cwe never injected
+    assert "alert" not in finding.body
+    assert validate_osv(finding_to_osv(finding)) == []
+
+
+def test_absent_cve_cwe_properties_leave_the_finding_unchanged():
+    finding = sarif_to_findings(minimal_sarif(), project="demo")[0]
+    assert finding.cve is None
+    assert finding.aliases == []
