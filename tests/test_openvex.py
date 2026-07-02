@@ -180,6 +180,23 @@ def test_emits_a_product_for_every_affected_package_and_version():
     assert validate_openvex(doc) == []
 
 
+def test_validate_requires_non_empty_strings_not_truthy_values():
+    """A corrupted persisted draft with a non-string vulnerability.name / @id /
+    action_statement (e.g. a number) is REPORTED — a truthiness check would wrongly
+    accept it."""
+    doc = finding_to_openvex(make_finding())
+    doc["statements"][0]["vulnerability"]["name"] = 123
+    assert any("vulnerability/name" in e for e in validate_openvex(doc))
+
+    doc2 = finding_to_openvex(make_finding())
+    doc2["statements"][0]["products"][0]["@id"] = 123
+    assert any("@id" in e for e in validate_openvex(doc2))
+
+    doc3 = finding_to_openvex(make_finding())
+    doc3["@id"] = 42
+    assert any("@id" in e for e in validate_openvex(doc3))
+
+
 def test_validate_does_not_crash_on_non_list_statements():
     """A truthy-but-non-list statements value must be REPORTED, not raise — the
     validator's list[str] contract holds for any input."""

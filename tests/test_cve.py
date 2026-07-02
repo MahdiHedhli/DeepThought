@@ -102,6 +102,28 @@ def test_cve_draft_structurally_valid():
     assert errors == [], errors
 
 
+def test_cve_bounds_overlong_product_and_url():
+    """An over-long affected product name or reference url would make the draft
+    non-conformant; product is bounded to the schema limit and an over-long url is
+    dropped, so the persisted draft still validates."""
+    from deepthought.schema import AffectedPackage, Reference
+
+    draft = finding_to_cve_draft(
+        make_finding(
+            affected=[AffectedPackage(ecosystem="PyPI", package="p" * 5000, versions=["1.0"])],
+            references=[
+                Reference(type="web", url="https://example.test/" + "a" * 5000),
+                Reference(type="advisory", url="https://example.test/ok"),
+            ],
+        )
+    )
+    assert len(draft["containers"]["cna"]["affected"][0]["product"]) <= 2048
+    urls = {r["url"] for r in draft["containers"]["cna"]["references"]}
+    assert "https://example.test/ok" in urls
+    assert all(len(u) <= 2048 for u in urls)
+    assert validate_cve_draft(draft) == []
+
+
 def test_validate_cve_draft_handles_multiple_errors_with_mixed_paths():
     """A structurally-broken draft with errors across object keys AND array
     indices sorts and returns a list[str] without raising (paths stringified)."""

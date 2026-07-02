@@ -48,8 +48,12 @@ _ZEROED_ORG_UUID = "00000000-0000-4000-8000-000000000000"
 _PLACEHOLDER_CNA_SHORTNAME = "PLACEHOLDER_CNA"
 _PLACEHOLDER_VENDOR = "PLACEHOLDER"
 
-# CVE description value has minLength 1 / maxLength 4096.
-_DESCRIPTION_MAX = 4096
+# CVE Record schema length limits. A Finding's package/version/url are not bounded
+# by the Finding model, so bound them here — otherwise disclose would persist a
+# draft that validate_cve_draft (and thus the next check) rejects.
+_DESCRIPTION_MAX = 4096  # descriptions[].value
+_PRODUCT_MAX = 2048  # affected[].product
+_URL_MAX = 2048  # references[].url (uriType)
 
 # The official schema pulls CVSS and reference-tag definitions from sibling
 # files via ``file:`` refs that are not bundled. The CVSS v3.0/v3.1 refs resolve
@@ -142,7 +146,7 @@ def _affected(finding: "Finding") -> list[dict]:
         entries.append(
             {
                 "vendor": _PLACEHOLDER_VENDOR,
-                "product": pkg.package,
+                "product": pkg.package[:_PRODUCT_MAX],  # bound to the schema limit
                 "versions": versions,
                 "defaultStatus": "unaffected",
             }
@@ -191,7 +195,14 @@ def finding_to_cve_draft(finding: "Finding") -> dict:
     # EVERY non-empty finding reference url (so a later advisory/fix link is not
     # dropped and an empty first url does not emit an invalid ""), falling back to
     # a stable placeholder only when the finding has no usable url at all.
-    ref_urls = [r.url for r in finding.references if r.url and r.url.strip()]
+    # Only non-empty urls within the schema length limit (an over-long url would
+    # make the draft non-conformant); drop the rest, and fall back to a stable
+    # placeholder when none remain.
+    ref_urls = [
+        r.url
+        for r in finding.references
+        if r.url and r.url.strip() and len(r.url) <= _URL_MAX
+    ]
     if not ref_urls:
         ref_urls = [f"https://deepthought.invalid/finding/{osv_id_for(finding.id)}"]
     cna["references"] = [{"url": url, "tags": ["vdb-entry"]} for url in ref_urls]

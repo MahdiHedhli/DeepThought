@@ -52,6 +52,12 @@ _ACTION_STATEMENT_PLACEHOLDER = (
 _VALID_STATUSES = {"not_affected", "affected", "fixed", "under_investigation"}
 
 
+def _nonempty_str(value: object) -> bool:
+    """True only for a non-empty (non-whitespace) string — a truthiness check
+    would wrongly accept a numeric or other non-string value in a string field."""
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _vuln_name(finding: "Finding") -> str:
     """The statement's vulnerability name: the real CVE, or the internal id.
 
@@ -144,9 +150,13 @@ def validate_openvex(doc: dict) -> list[str]:
     if not isinstance(doc, dict):
         return ["<root>: document must be an object"]
 
-    for field in ("@context", "@id", "author", "timestamp", "version"):
-        if not doc.get(field):
-            errors.append(f"{field}: is a required document field")
+    # String document members must be non-empty STRINGS, not merely truthy — a
+    # corrupted persisted draft with e.g. a numeric @id must be reported.
+    for field in ("@context", "@id", "author", "timestamp"):
+        if not _nonempty_str(doc.get(field)):
+            errors.append(f"{field}: must be a non-empty string")
+    if not doc.get("version"):
+        errors.append("version: is a required document field")
 
     statements = doc.get("statements")
     if not isinstance(statements, list) or not statements:
@@ -161,17 +171,17 @@ def validate_openvex(doc: dict) -> list[str]:
                 continue
 
             vuln = stmt.get("vulnerability")
-            if not isinstance(vuln, dict) or not vuln.get("name"):
-                errors.append(f"{base}/vulnerability/name: is required")
+            if not isinstance(vuln, dict) or not _nonempty_str(vuln.get("name")):
+                errors.append(f"{base}/vulnerability/name: must be a non-empty string")
 
             products = stmt.get("products")
             if not isinstance(products, list) or not products:
                 errors.append(f"{base}/products: must be a non-empty list")
             else:
                 for j, product in enumerate(products):
-                    if not isinstance(product, dict) or not product.get("@id"):
+                    if not isinstance(product, dict) or not _nonempty_str(product.get("@id")):
                         errors.append(
-                            f"{base}/products/{j}/@id: each product requires an @id"
+                            f"{base}/products/{j}/@id: each product requires a non-empty @id"
                         )
 
             status = stmt.get("status")
@@ -181,9 +191,9 @@ def validate_openvex(doc: dict) -> list[str]:
                     f"{sorted(_VALID_STATUSES)}"
                 )
 
-            if status == "affected" and not stmt.get("action_statement"):
+            if status == "affected" and not _nonempty_str(stmt.get("action_statement")):
                 errors.append(
-                    f"{base}/action_statement: is required when status is 'affected'"
+                    f"{base}/action_statement: must be a non-empty string when status is 'affected'"
                 )
 
     return sorted(errors)
