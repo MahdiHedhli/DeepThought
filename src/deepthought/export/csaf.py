@@ -59,6 +59,34 @@ _CVE_RE = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,19}$")
 _SELF_REF_TYPES = frozenset({"self", "source", "detection", "location"})
 
 
+def _range_labels(ranges: list) -> list[str]:
+    """Human-readable version-range labels from OSV-style ``ranges``, deduped.
+
+    Each range's introduced/fixed/last_affected events become a readable bound
+    string (e.g. ``>=1.0, <2.0``) carried as a CSAF ``product_version_range`` name,
+    so range-only affected scope is preserved rather than dropped. Ranges with no
+    recognizable events yield no label.
+    """
+    labels: list[str] = []
+    for rng in ranges or []:
+        if not isinstance(rng, dict):
+            continue
+        parts: list[str] = []
+        for event in rng.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            if "introduced" in event:
+                parts.append(f">={_nonempty(event['introduced'], '0')}")
+            elif "fixed" in event:
+                parts.append(f"<{_nonempty(event['fixed'], '?')}")
+            elif "last_affected" in event:
+                parts.append(f"<={_nonempty(event['last_affected'], '?')}")
+        label = ", ".join(parts).strip()
+        if label:
+            labels.append(label)
+    return list(dict.fromkeys(labels))
+
+
 def _nonempty(text: object, fallback: str) -> str:
     """A non-empty (stripped) string, or ``fallback``.
 
@@ -148,19 +176,26 @@ def _products(finding: "Finding") -> tuple[dict, list[str]]:
         # when none remain — a blank product_version name is non-conformant.
         versions = list(
             dict.fromkeys(v.strip() for v in (pkg.versions or []) if v and v.strip())
-        ) or ["unspecified"]
+        )
         product_name = _nonempty(pkg.package, "PLACEHOLDER")  # minLength 1
+        # A leaf per exact version (product_version) AND per OSV range
+        # (product_version_range) — so a range-only finding keeps its actual bounds
+        # instead of collapsing to "unspecified".
+        leaves: list[tuple[str, str]] = [("product_version", v) for v in versions]
+        leaves += [("product_version_range", label) for label in _range_labels(pkg.ranges)]
+        if not leaves:
+            leaves = [("product_version", "unspecified")]
         version_branches = []
-        for version in versions:
+        for category, name in leaves:
             pid = f"CSAFPID-{counter:04d}"
             counter += 1
             pids.append(pid)
             version_branches.append(
                 {
-                    "category": "product_version",
-                    "name": version,
+                    "category": category,
+                    "name": name,
                     "product": {
-                        "name": f"{product_name} {version}",
+                        "name": f"{product_name} {name}",
                         "product_id": pid,
                     },
                 }

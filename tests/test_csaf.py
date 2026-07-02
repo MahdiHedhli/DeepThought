@@ -217,6 +217,26 @@ def test_csaf_overlong_cve_is_not_treated_as_real():
     assert validate_csaf(doc) == [], validate_csaf(doc)
 
 
+def test_csaf_preserves_range_only_affected_scope():
+    """A range-only finding keeps its bounds as a CSAF product_version_range branch
+    instead of collapsing to 'unspecified'."""
+    from deepthought.schema import AffectedPackage
+
+    doc = finding_to_csaf(
+        make_finding(
+            affected=[AffectedPackage(
+                ecosystem="PyPI", package="foo", versions=[],
+                ranges=[{"type": "ECOSYSTEM", "events": [{"introduced": "1.0"}, {"fixed": "2.0"}]}],
+            )]
+        )
+    )
+    leaves = doc["product_tree"]["branches"][0]["branches"][0]["branches"]
+    categories = {b["category"] for b in leaves}
+    assert "product_version_range" in categories
+    assert any(">=1.0" in b["name"] and "<2.0" in b["name"] for b in leaves)
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
 def test_csaf_valid_for_a_pathological_empty_finding():
     """A finding with an empty summary, empty package/version, no severity and no
     references still yields a schema-conformant CSAF (all minLength-1 fields are

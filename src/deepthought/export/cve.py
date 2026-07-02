@@ -126,35 +126,75 @@ def _description_value(finding: "Finding") -> str:
     return value[:_DESCRIPTION_MAX]
 
 
-def _affected(finding: "Finding") -> list[dict]:
-    """One CNA ``affected`` entry per affected package, with ALL its versions.
+def _bounded(value: object) -> str:
+    """A stripped, length-bounded version token (schema limit 1..1024)."""
+    return str(value).strip()[:_VERSION_MAX]
 
-    Collapsing to the first package/version would under-report the disclosure's
-    scope, so every ``AffectedPackage`` and every recorded version is preserved. A
-    package with no recorded versions gets a single ``0`` placeholder (the CNA
-    ``versions`` array requires at least one entry); a finding with no affected
-    packages at all falls back to a single PLACEHOLDER entry so the required
-    ``affected`` array is non-empty.
+
+def _ranges_to_version_entries(ranges: list) -> list[dict]:
+    """Map OSV-style ``ranges`` (introduced/fixed/last_affected events) to CVE
+    version entries, preserving the actual affected bounds instead of dropping
+    them or fabricating a version.
+
+    ``introduced X`` + ``fixed Y`` -> ``{version: X, lessThan: Y}``;
+    ``introduced X`` + ``last_affected Z`` -> ``{version: X, lessThanOrEqual: Z}``;
+    an unclosed ``introduced X`` -> ``{version: X, lessThan: "*"}`` (unbounded).
+    """
+    type_map = {"SEMVER": "semver", "ECOSYSTEM": "custom", "GIT": "git"}
+    entries: list[dict] = []
+    for rng in ranges or []:
+        if not isinstance(rng, dict):
+            continue
+        vtype = type_map.get(str(rng.get("type", "")).upper(), "custom")
+        intro: str | None = None
+        for event in rng.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            if "introduced" in event:
+                intro = _bounded(event["introduced"]) or "0"
+            elif "fixed" in event and intro is not None:
+                entries.append({"version": intro, "lessThan": _bounded(event["fixed"]) or "*",
+                                "status": "affected", "versionType": vtype})
+                intro = None
+            elif "last_affected" in event and intro is not None:
+                entries.append({"version": intro, "lessThanOrEqual": _bounded(event["last_affected"]) or "*",
+                                "status": "affected", "versionType": vtype})
+                intro = None
+        if intro is not None:  # an introduced with no closing event -> unbounded
+            entries.append({"version": intro, "lessThan": "*", "status": "affected", "versionType": vtype})
+    return entries
+
+
+def _affected(finding: "Finding") -> list[dict]:
+    """One CNA ``affected`` entry per affected package, with ALL its scope.
+
+    Every exact version AND every OSV range is preserved (ranges mapped to CVE
+    version-range entries), deduped. A package with neither exact versions nor
+    ranges uses an honest ``unspecified`` marker (never a fabricated ``0``); a
+    finding with no affected packages falls back to a single PLACEHOLDER entry so
+    the required ``affected`` array is non-empty.
     """
     entries: list[dict] = []
     for pkg in finding.affected or []:
-        # Only non-empty versions, each bounded to the schema limit (1..1024) and
-        # DEDUPED (affected[].versions is uniqueItems) — an empty, over-long, or
-        # duplicate version would make the persisted draft non-conformant.
-        versions = []
-        seen_versions: set[str] = set()
+        versions: list[dict] = []
+        seen: set[str] = set()
+
+        def _add(entry: dict) -> None:
+            key = json.dumps(entry, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                versions.append(entry)
+
+        # Exact versions (bounded, non-empty), then OSV ranges — both uniqueItems.
         for v in pkg.versions or []:
-            if not (v and v.strip()):
-                continue
-            value = v.strip()[:_VERSION_MAX]
-            if value in seen_versions:
-                continue
-            seen_versions.add(value)
-            versions.append(
-                {"version": value, "status": "affected", "versionType": "semver"}
-            )
+            if v and v.strip():
+                _add({"version": _bounded(v), "status": "affected", "versionType": "semver"})
+        for entry in _ranges_to_version_entries(pkg.ranges):
+            _add(entry)
         if not versions:
-            versions = [{"version": "0", "status": "affected", "versionType": "semver"}]
+            # No exact version and no range: an honest "unspecified" marker, NOT a
+            # fabricated affected version 0.
+            versions = [{"version": "unspecified", "status": "affected", "versionType": "custom"}]
         product = (pkg.package.strip() or _PLACEHOLDER_VENDOR)[:_PRODUCT_MAX]
         entries.append(
             {

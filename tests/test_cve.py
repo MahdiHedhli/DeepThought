@@ -124,6 +124,32 @@ def test_cve_bounds_overlong_product_and_url():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_maps_ranges_and_never_fabricates_version_zero():
+    """A range-only finding maps its OSV bounds to a CVE version-range entry
+    (introduced->version, fixed->lessThan) instead of fabricating version 0; a
+    finding with neither versions nor ranges uses an honest 'unspecified'."""
+    from deepthought.schema import AffectedPackage
+
+    draft = finding_to_cve_draft(
+        make_finding(
+            affected=[AffectedPackage(
+                ecosystem="PyPI", package="foo", versions=[],
+                ranges=[{"type": "ECOSYSTEM", "events": [{"introduced": "1.0"}, {"fixed": "2.0"}]}],
+            )]
+        )
+    )
+    versions = draft["containers"]["cna"]["affected"][0]["versions"]
+    assert {"version": "1.0", "lessThan": "2.0", "status": "affected", "versionType": "custom"} in versions
+    assert all(v["version"] != "0" for v in versions)  # no fabricated version 0
+    assert validate_cve_draft(draft) == []
+
+    empty = finding_to_cve_draft(
+        make_finding(affected=[AffectedPackage(ecosystem="", package="", versions=[])])
+    )
+    empty_versions = [v["version"] for v in empty["containers"]["cna"]["affected"][0]["versions"]]
+    assert empty_versions == ["unspecified"]  # honest, not a fabricated 0
+
+
 def test_cve_valid_for_a_pathological_empty_finding():
     """A finding with an empty summary/package/version, no severity and no
     references still yields a structurally-conformant CVE draft."""
