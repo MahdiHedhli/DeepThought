@@ -63,12 +63,13 @@ def _vuln_name(finding: "Finding") -> str:
     """The statement's vulnerability name: the real CVE, or the internal id.
 
     A stored ``cve`` is used only when it matches the official CVE pattern. The
-    sentinel ``CVE-XXXX-XXXXX`` or any malformed value falls back to the finding
-    id, so a local draft never appears to reference a non-existent assigned CVE.
+    sentinel ``CVE-XXXX-XXXXX`` or any malformed value falls back to the
+    ``osv_id_for``-prefixed internal id — so even a CVE-SHAPED finding id (with no
+    recorded cve) never appears to name an assigned CVE.
     """
     if finding.cve and _CVE_RE.match(finding.cve):
         return finding.cve
-    return finding.id
+    return osv_id_for(finding.id)
 
 
 def _purl_for(pkg, version: str | None) -> str | None:

@@ -74,9 +74,9 @@ def test_openvex_never_asserts_not_affected():
 
 
 def test_openvex_vuln_name_falls_back_to_id():
-    # no CVE -> the finding id is the vulnerability name
+    # no CVE -> the osv_id_for-prefixed internal id is the vulnerability name
     no_cve = finding_to_openvex(make_finding(cve=None))
-    assert no_cve["statements"][0]["vulnerability"]["name"] == "F-0007"
+    assert no_cve["statements"][0]["vulnerability"]["name"] == "x_F-0007"
 
     # a real CVE is carried verbatim
     with_cve = finding_to_openvex(make_finding(cve="CVE-2026-12345"))
@@ -121,10 +121,18 @@ def test_placeholder_or_malformed_cve_falls_back_to_the_finding_id():
     name — only a real CVE is used, else the internal finding id."""
     for bad in ("CVE-XXXX-XXXXX", "CVE-2026-1", "not-a-cve", "CVE-2026-" + "1" * 20):
         doc = finding_to_openvex(make_finding(cve=bad))
-        assert doc["statements"][0]["vulnerability"]["name"] == "F-0007"
+        assert doc["statements"][0]["vulnerability"]["name"] == "x_F-0007"
     # A real CVE is used verbatim.
     doc = finding_to_openvex(make_finding(cve="CVE-2026-12345"))
     assert doc["statements"][0]["vulnerability"]["name"] == "CVE-2026-12345"
+
+
+def test_openvex_cve_shaped_id_without_cve_is_not_presented_as_a_cve():
+    """A CVE-SHAPED finding id (with no recorded cve) must NOT become the
+    vulnerability name verbatim — it is prefixed so it can't look assigned."""
+    doc = finding_to_openvex(make_finding(id="CVE-2026-99999", cve=None))
+    name = doc["statements"][0]["vulnerability"]["name"]
+    assert name == "x_CVE-2026-99999"
 
 
 def test_validate_rejects_malformed_products():

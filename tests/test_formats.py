@@ -26,6 +26,17 @@ def test_is_uri_rejects_whitespace_and_requires_a_scheme():
     assert not _is_uri("https://x.test/\tpath")  # control char
 
 
+def test_is_uri_rejects_rfc3986_invalid_characters():
+    """Characters not valid unescaped in a URI ('"', '<', '>', backtick, etc.) are
+    rejected even with an http(s) scheme; valid query/fragment/percent URLs pass."""
+    assert _is_uri("https://example.test/a?b=c#d")
+    assert _is_uri("https://example.test/a%20b")
+    for bad in ('https://example.test/a"bad', "https://example.test/<x>",
+                "https://example.test/`x`", "https://example.test/a|b",
+                "https://example.test/a{b}"):
+        assert not _is_uri(bad), bad
+
+
 def test_is_uri_rejects_active_and_foreign_schemes():
     """Only http(s) is a safe disclosure link — active/foreign schemes are refused
     so a draft never carries a dangerous URL into a human-reviewed artifact."""

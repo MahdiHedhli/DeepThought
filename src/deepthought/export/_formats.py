@@ -40,11 +40,15 @@ def _is_date_time(value: object) -> bool:
         return False
 
 
-# A disclosure URI must be a clean, whitespace/control-free http(s) URL with an
-# authority — matching the SARIF ingest's posture. This refuses active/foreign
-# schemes (javascript:, file:, data:, …) so a draft never carries a dangerous link
-# into a human-reviewed artifact.
-_SAFE_HTTP_URL_RE = re.compile(r"^https?://(?![/?#])[!-~]+$", re.IGNORECASE)
+# A disclosure URI must be a clean http(s) URL with an authority, built ONLY from
+# RFC3986-valid characters (unreserved + reserved gen-/sub-delims + percent). This
+# refuses active/foreign schemes (javascript:, file:, data:, …) AND stray
+# characters that are not valid unescaped in a URI ('"', '<', '>', space, '{', '}',
+# '\\', '^', '`', '|'), so a draft never carries a broken or dangerous link into a
+# human-reviewed artifact.
+_SAFE_HTTP_URL_RE = re.compile(
+    r"^https?://(?![/?#])[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$", re.IGNORECASE
+)
 
 
 def is_safe_http_url(value: object) -> bool:
