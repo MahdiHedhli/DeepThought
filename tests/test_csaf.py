@@ -207,6 +207,17 @@ def test_csaf_preserves_all_references():
     assert validate_csaf(doc) == [], validate_csaf(doc)
 
 
+def test_csaf_reference_with_blank_type_gets_a_default_summary():
+    """A reference with a usable url but a blank type must not emit summary:"" —
+    it defaults to a non-empty summary so the CSAF draft still validates."""
+    from deepthought.schema import Reference
+
+    doc = finding_to_csaf(make_finding(references=[Reference(type="", url="https://example.test/x")]))
+    ref = doc["vulnerabilities"][0]["references"][0]
+    assert ref["summary"].strip()  # non-empty
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
 def test_csaf_skips_empty_reference_urls():
     """An empty reference url is skipped rather than emitted as an invalid ""; a
     finding whose only reference has an empty url still validates."""

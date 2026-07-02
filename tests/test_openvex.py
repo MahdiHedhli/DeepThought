@@ -145,6 +145,20 @@ def test_validate_rejects_malformed_products():
     assert any("@id" in e for e in validate_openvex(doc))
 
 
+def test_product_id_is_a_well_formed_uri_for_ecosystems_with_spaces():
+    """An OSV ecosystem containing spaces (e.g. 'GitHub Actions') must still yield
+    a well-formed, space-free @id — the PURL components are percent-encoded."""
+    from deepthought.schema import AffectedPackage
+
+    doc = finding_to_openvex(
+        make_finding(affected=[AffectedPackage(ecosystem="GitHub Actions", package="org/pkg", versions=["1.0"])])
+    )
+    pid = doc["statements"][0]["products"][0]["@id"]
+    assert " " not in pid
+    assert pid.startswith("pkg:github%20actions/")
+    assert validate_openvex(doc) == []
+
+
 def test_validate_does_not_crash_on_non_list_statements():
     """A truthy-but-non-list statements value must be REPORTED, not raise — the
     validator's list[str] contract holds for any input."""

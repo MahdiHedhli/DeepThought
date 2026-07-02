@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 from ..schema.common import iso_z, utcnow
 from .osv import osv_id_for
@@ -64,18 +65,25 @@ def _vuln_name(finding: "Finding") -> str:
 
 
 def _purl(finding: "Finding") -> str:
-    """Build a Package-URL product id from the first affected package.
+    """Build a percent-encoded Package-URL ``@id`` from the first affected package.
 
-    Falls back to a deepthought.local product id when the finding has no
-    affected package, so the product list is never empty.
+    PURL components are percent-encoded (the package's namespace ``/`` separators
+    kept), so an ecosystem or name with spaces or special characters (e.g. a valid
+    OSV ecosystem like ``GitHub Actions``) still yields a well-formed URI @id
+    instead of a broken ``pkg:github actions/...``. Falls back to a local IRI when
+    the finding has no affected package or no usable identity.
     """
+    local = f"https://deepthought.local/product/{osv_id_for(finding.id)}"
     if not finding.affected:
-        return f"https://deepthought.local/product/{osv_id_for(finding.id)}"
+        return local
     pkg = finding.affected[0]
-    ecosystem = pkg.ecosystem.lower()
-    purl = f"pkg:{ecosystem}/{pkg.package}"
-    if pkg.versions:
-        purl = f"{purl}@{pkg.versions[0]}"
+    if not (pkg.ecosystem and pkg.package):
+        return local
+    ptype = quote(pkg.ecosystem.lower(), safe="")
+    name = quote(pkg.package, safe="/")  # keep namespace/name separators
+    purl = f"pkg:{ptype}/{name}"
+    if pkg.versions and pkg.versions[0]:
+        purl = f"{purl}@{quote(pkg.versions[0], safe='')}"
     return purl
 
 

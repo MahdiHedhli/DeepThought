@@ -311,8 +311,10 @@ def _references(finding: "Finding") -> list[dict]:
         # one carries no disclosure link while making the draft non-conformant.
         if not (ref.url and ref.url.strip()):
             continue
-        category = "self" if ref.type in _SELF_REF_TYPES else "external"
-        refs.append({"category": category, "summary": ref.type, "url": ref.url})
+        rtype = ref.type.strip()
+        category = "self" if rtype in _SELF_REF_TYPES else "external"
+        # summary must be a non-empty string; default when the type is blank.
+        refs.append({"category": category, "summary": rtype or "reference", "url": ref.url})
     return refs
 
 
