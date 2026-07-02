@@ -268,7 +268,7 @@ def validate_cve_draft(doc: dict) -> list[str]:
     validator = validator_cls(schema, registry=_registry())
     errors = sorted(validator.iter_errors(doc), key=lambda e: list(e.absolute_path))
 
-    metadata = doc.get("cveMetadata")
+    metadata = doc.get("cveMetadata") if isinstance(doc, dict) else None
     cveid = metadata.get("cveId") if isinstance(metadata, dict) else None
     tolerate_sentinel = cveid == _SENTINEL_CVE_ID
 

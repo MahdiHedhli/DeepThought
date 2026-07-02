@@ -201,6 +201,14 @@ def test_cve_non_v3_vector_omits_metrics():
     assert validate_cve_draft(draft) == []
 
 
+def test_validate_does_not_crash_on_non_object_input():
+    """validate_cve_draft returns a list[str] for a decoded non-object draft
+    (null / list), reporting the type error rather than raising."""
+    for bad in (None, [], "x", 5):
+        errors = validate_cve_draft(bad)
+        assert isinstance(errors, list) and errors
+
+
 def test_cve_references_skip_empty_urls_and_never_emit_blank():
     """An empty reference url must not become an invalid "" in the draft, and
     valid later urls are preserved; with no usable url a placeholder is used."""
