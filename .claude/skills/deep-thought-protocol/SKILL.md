@@ -131,9 +131,19 @@ deepthought playbook verify --project <id> --finding <F-NNNN>  # 003, NoopSandbo
 deepthought playbook sibling-hunt --project <id> --finding <F-NNNN> [--sibling <id> ...] [--sarif <path>]  # 004, READ-ONLY variant hunt
 deepthought playbook disclose --project <id> --finding <F-NNNN>  # 005, DRAFT-ONLY advisory/CVE/CSAF/OpenVEX (no transmit)
 deepthought playbook findings [--project <id>]
+deepthought loop --project <id> --max-sessions N [--max-seconds S] [--max-tokens T]  # 006, autonomous driver: bounded, gated
 deepthought check
 deepthought publish [--format osv|csaf|openvex|cve-draft|advisory|all]  # local artifacts only; asserts the human gate
 ```
+
+`loop` (feature 006) is the autonomous driver: it deterministically chains the
+safe sessions (status → map → discover → sibling-hunt/disclose per verified
+finding) behind the Gate, under a required budget, and stops for a recorded reason
+(fixed point / budget / gate). It NEVER runs NEW PROJECT (no scope expansion) or
+VERIFY (no target-code execution) — a candidate needing real reproduction, and a
+disclosure needing to be sent, are recorded as human-sign-off escalations. It
+transmits nothing. See
+[`specs/006-autonomous-loop/contracts/loop.md`](../../../specs/006-autonomous-loop/contracts/loop.md).
 
 `playbook verify` NEVER executes untrusted target code by default: it runs the
 VERIFY session behind a `NoopSandbox` and reports a dry-run. It never enables

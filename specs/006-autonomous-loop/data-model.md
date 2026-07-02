@@ -36,17 +36,16 @@ What the policy proposes. `LoopAction` is a typed value, never free-text.
 |---|---|---|
 | `kind` | `ActionKind` | which rung fired |
 | `project` | `RecordId` | the (existing) project id |
-| `area` | `str \| None` | in-scope area, for `map`/`discover` |
+| `area` | `str \| None` | reserved (unused): `MAP`/`DISCOVER` are per-project |
 | `finding` | `RecordId \| None` | target finding, for `sibling_hunt`/`disclosure` |
-| `is_escalation` | `bool` | `True` only for `verify_escalation` |
 | `human_action` | `str \| None` | the outstanding-action text when escalating |
 
-- A `verify_escalation` carries `is_escalation=True` and a `human_action`
-  ("F-NNNN needs VERIFY under a real sandbox — human sign-off required"); every
-  other kind carries `is_escalation=False`.
-- `map`/`discover` carry an `area` drawn only from `project.scope_allowlist` (never
-  a widened surface). `sibling_hunt`/`disclosure` carry a `finding` that is already
-  `verified`.
+- `is_escalation` is a computed property: `True` iff `kind is verify_escalation`.
+  An escalation must carry a `human_action` ("F-NNNN needs VERIFY under a real
+  sandbox — human sign-off required"); a non-escalation must not.
+- `MAP`/`DISCOVER` sessions take a project (not an area), so they run once per
+  project and `area` stays `None`. `sibling_hunt`/`disclosure` carry a `finding`
+  that is already `verified`. No kind can widen scope or transmit.
 
 ## `StopReason` (`schema/loop.py`)
 
@@ -92,16 +91,20 @@ Round-trips through the Store as Markdown-with-front-matter like every record.
 
 ## Selection inputs (read-only, from the Store)
 
-`select_next_action(store, project)` reads only:
+`select_next_action(store, project, *, done)` reads only:
 
-- `project.scope_allowlist` — the in-scope surface (never widened).
-- `store.list_coverage(project.id)` — which areas are mapped, at what depth.
-- `store.list_findings(project.id)` — status buckets (`candidate` / `verified` / …).
-- `store.list_sessions(project.id)` — what has already run (a `status` baseline
-  exists?, which findings have a completed `sibling_hunt`, which `verified`
-  findings already have `disclosure` drafts via `findings_touched`).
+- `project.scope_allowlist` — the in-scope surface (never widened); gates the MAP
+  rung (an empty allowlist means nothing is in scope).
+- `store.list_findings(project.id)` — status buckets (`candidate` / `verified`).
+- `store.list_sessions(project.id)` — which session *types* have run
+  (STATUS/MAP/DISCOVER once-per-project signals), and which `verified` findings
+  already have `disclosure` drafts (a disclosure session records the drafted
+  finding in `findings_touched`).
+- `done` — the driver's in-run set of dispatched `(kind, target)` actions, so a
+  per-finding rung (SIBLING HUNT/DISCLOSURE) is not re-proposed within a run
+  regardless of what the ran session persisted.
 
-It writes nothing and calls no session; it is a pure function of the snapshot.
+It writes nothing and calls no session; it is a pure function of `(snapshot, done)`.
 
 ## Guarantees (enforced by construction)
 

@@ -98,10 +98,10 @@ act; the loop escalates to it and never performs it:
 
 1. **Chain the safe work.** An operator has project `acme` gated to proceed. They
    run `deepthought loop --project acme --max-sessions 20`. The loop runs
-   `STATUS`, then `MAP` for each uncovered in-scope area, then `DISCOVER` over the
-   mapped areas, then `SIBLING HUNT`/`DISCLOSE` for anything already verified —
-   each gated, each logged — then reaches a fixed point (no safe progress left)
-   and stops clean, teaching back that the remaining candidates need human-signed
+   `STATUS`, then `MAP` (the in-scope surface), then `DISCOVER` (over the mapped
+   surface), then `SIBLING HUNT`/`DISCLOSE` for anything already verified — each
+   gated, each logged — then reaches a fixed point (no safe progress left) and
+   stops clean, teaching back that the remaining candidates need human-signed
    `VERIFY`.
 
 2. **Budget stop.** The same project with `--max-sessions 3`. The loop runs three

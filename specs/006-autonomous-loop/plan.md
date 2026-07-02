@@ -128,19 +128,26 @@ teach-back: outstanding human actions (verify-under-real-sandbox, send-disclosur
 
 `select_next_action(store, project)` returns the first that applies:
 
-1. **STATUS** — if no `status` session has run yet for the project (cheap
-   situational baseline). Runs at most once per loop.
-2. **MAP** — for the first in-scope `scope_allowlist` area with no coverage record
-   (expand the mapped surface). New progress = a previously-uncovered area.
-3. **DISCOVER** — for the first mapped area not yet discovered over (produce
-   candidates). New progress = a mapped-but-undiscovered area.
-4. **SIBLING HUNT** — for the first `verified` finding with no prior sibling-hunt
-   session. New progress = variants of a confirmed bug.
+1. **STATUS** — if no `status` session has run for the project (a cheap
+   situational baseline). Once per project.
+2. **MAP** — if no `map` session has run and the project has an in-scope
+   `scope_allowlist` (MAP walks the whole in-scope surface, recording Coverage per
+   area). Once per project. New progress = the project's surface is mapped.
+3. **DISCOVER** — if a `map` session has run and no `discover` session has (produce
+   candidates over the mapped surface). Once per project.
+4. **SIBLING HUNT** — for the first `verified` finding not yet hunted this run. New
+   progress = variants of a confirmed bug.
 5. **DISCLOSURE (draft)** — for the first `verified` finding lacking drafts. New
    progress = a disclosure package prepared.
 6. **VERIFY escalation** — if `candidate` findings remain, emit an *escalation*
    (not a run): each needs real reproduction behind a human sign-off.
 7. otherwise `None` → fixed point.
+
+STATUS/MAP/DISCOVER are per-project sessions (the `MapSession`/`DiscoverSession`
+take a project, not an area), so each runs once; their store-visible session
+existence is the cross-run "done" signal. SIBLING HUNT/DISCLOSURE are per-finding;
+the driver's in-run `done` set (plus the disclosure session's `findings_touched`
+for the cross-run disclosure signal) keeps them from re-proposing.
 
 Each rung is guarded so it fires only while it makes new progress; when all rungs
 are exhausted the policy returns `None`. The escalation rung is terminal for the

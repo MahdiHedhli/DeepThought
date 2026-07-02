@@ -19,6 +19,7 @@ from ..schema import (
     Project,
     Session,
 )
+from ..schema.loop import LoopRun
 
 
 class StoreError(Exception):
@@ -110,6 +111,16 @@ class Store(ABC):
 
     @abstractmethod
     def list_sessions(self, project: str | None = None) -> list[Session]: ...
+
+    # --- Loop run (feature 006) ------------------------------------------
+    @abstractmethod
+    def save_loop_run(self, run: LoopRun) -> LoopRun: ...
+
+    @abstractmethod
+    def get_loop_run(self, run_id: str) -> LoopRun | None: ...
+
+    @abstractmethod
+    def list_loop_runs(self, project: str | None = None) -> list[LoopRun]: ...
 
     # --- Coverage --------------------------------------------------------
     @abstractmethod

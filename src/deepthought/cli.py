@@ -23,6 +23,7 @@ from .export.csaf import finding_to_csaf
 from .export.cve import finding_to_cve_draft
 from .export.openvex import finding_to_openvex
 from .export.osv import finding_to_osv, osv_id_for
+from .loop import LoopBudget, run_loop
 from .protocol import HermesUltraCodeGate, run_session
 from .sandbox import NoopSandbox, SandboxError, SandboxPolicy, SandboxResult, SandboxSpec
 from .schema import FindingStatus
@@ -532,6 +533,66 @@ def publish(
     typer.echo("")
     typer.echo("HUMAN GATE: nothing was transmitted. Coordinated disclosure requires")
     typer.echo("a human to review and send. Deep Thought emits local artifacts only.")
+
+
+def _echo_loop_run(run) -> None:
+    typer.echo(f"loop     : {run.id}")
+    typer.echo(f"project  : {run.project}")
+    typer.echo(f"sessions : {run.sessions_run}")
+    typer.echo(f"stop     : {run.stop_reason.value}")
+    typer.echo("trace    :")
+    for step in run.trace:
+        target = step.finding or step.area or ""
+        where = step.session_id or "(escalation)"
+        gate = step.gate_outcome.value if step.gate_outcome else "-"
+        typer.echo(f"  - {step.kind.value:18s} {where:22s} {target:16s} gate={gate}")
+    if run.outstanding_actions:
+        typer.echo("outstanding (human sign-off):")
+        for action in run.outstanding_actions:
+            typer.echo(f"  - {action}")
+    typer.echo("")
+    typer.echo(run.body)
+
+
+@app.command("loop")
+def loop(
+    project: str = typer.Option(..., help="Project id to drive (must be registered)."),
+    max_sessions: Optional[int] = typer.Option(
+        None, "--max-sessions", help="Max sessions the loop may run."
+    ),
+    max_seconds: Optional[float] = typer.Option(
+        None, "--max-seconds", help="Max summed session wall-time."
+    ),
+    max_tokens: Optional[int] = typer.Option(
+        None, "--max-tokens", help="Max summed session context tokens."
+    ),
+    state: Path = _STATE_OPTION,
+) -> None:
+    """Drive the safe, gated session chain autonomously under a budget (feature 006).
+
+    Deterministic and bounded: runs STATUS/MAP/DISCOVER/SIBLING HUNT/DISCLOSURE
+    behind the Gate, never expands scope, never executes target code, and never
+    transmits — a candidate needing real reproduction, and a disclosure needing to
+    be sent, are escalated to a human. Requires at least one budget limit; a
+    governed stop (fixed point, budget, gate refusal) exits 0.
+    """
+    if max_sessions is None and max_seconds is None and max_tokens is None:
+        typer.echo(
+            "error: the loop requires at least one budget limit "
+            "(--max-sessions / --max-seconds / --max-tokens) — it is never unbounded"
+        )
+        raise typer.Exit(code=2)
+    budget = LoopBudget(
+        max_sessions=max_sessions,
+        max_wall_seconds=max_seconds,
+        max_context_tokens=max_tokens,
+    )
+    try:
+        run = run_loop(_store(state), HermesUltraCodeGate(), project, budget)
+    except StoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    _echo_loop_run(run)
 
 
 if __name__ == "__main__":  # pragma: no cover

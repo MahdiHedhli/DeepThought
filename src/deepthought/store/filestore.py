@@ -20,6 +20,7 @@ from ..schema import (
     Session,
 )
 from ..schema.common import is_record_id, iso_z, utcnow
+from ..schema.loop import LoopRun
 
 # A record id is a single safe path segment (findings/<id>.md). Record MODELS
 # enforce this on construction, but the ``get_*`` lookups take a RAW string
@@ -70,7 +71,7 @@ def _slug(value: str) -> str:
 class FileStore(Store):
     def __init__(self, root: str | Path):
         self.root = Path(root)
-        for sub in ("projects", "findings", "sessions", "coverage", "methodology", "detail"):
+        for sub in ("projects", "findings", "sessions", "coverage", "methodology", "loop", "detail"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
 
     # --- low-level file IO ----------------------------------------------
@@ -245,6 +246,27 @@ class FileStore(Store):
             session = Session.from_markdown(self._read(path))
             if project is None or session.project == project:
                 out.append(session)
+        return out
+
+    # --- Loop run (feature 006) ------------------------------------------
+    def save_loop_run(self, run: LoopRun) -> LoopRun:
+        self._write(self.root / "loop" / f"{run.id}.md", run.to_markdown())
+        return run
+
+    def get_loop_run(self, run_id: str) -> LoopRun | None:
+        if not _safe_id(run_id):
+            return None
+        path = self.root / "loop" / f"{run_id}.md"
+        if not path.exists():
+            return None
+        return LoopRun.from_markdown(self._read(path))
+
+    def list_loop_runs(self, project: str | None = None) -> list[LoopRun]:
+        out = []
+        for path in sorted((self.root / "loop").glob("*.md")):
+            run = LoopRun.from_markdown(self._read(path))
+            if project is None or run.project == project:
+                out.append(run)
         return out
 
     # --- Coverage --------------------------------------------------------

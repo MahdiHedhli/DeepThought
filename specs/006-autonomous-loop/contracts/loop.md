@@ -27,10 +27,14 @@ class LoopSpend(BaseModel):
 ## `loop/policy.py`
 
 ```python
-def select_next_action(store: Store, project: Project) -> LoopAction | None: ...
+def select_next_action(
+    store: Store, project: Project, *, done: set[tuple[str, str]] | None = None
+) -> LoopAction | None: ...
 ```
 
-- **Pure** w.r.t. the store (reads coverage/findings/sessions; writes nothing).
+- **Pure** w.r.t. `(store, done)` (reads findings/sessions + `scope_allowlist`;
+  writes nothing). `done` is the driver's in-run set of dispatched
+  `(kind, target)` actions.
 - **Deterministic** and **priority-ordered** (the ladder in `plan.md`).
 - **Monotonic**: returns an action only if it makes *new* progress; returns `None`
   at a fixed point.
