@@ -184,6 +184,29 @@ def test_csaf_rejects_an_incomplete_cvss_vector():
     assert validate_csaf(doc) != []
 
 
+def test_csaf_preserves_all_references():
+    """Every finding reference is carried into CSAF (categorized), so a published
+    advisory/fix link later in the list is not dropped."""
+    from deepthought.schema import Reference
+
+    doc = finding_to_csaf(
+        make_finding(
+            references=[
+                Reference(type="detection", url="https://example.test/rule"),
+                Reference(type="advisory", url="https://example.test/advisory/1"),
+            ]
+        )
+    )
+    refs = doc["vulnerabilities"][0]["references"]
+    urls = {r["url"] for r in refs}
+    assert urls == {"https://example.test/rule", "https://example.test/advisory/1"}
+    # the detection ref is a self ref; the advisory is external
+    by_url = {r["url"]: r["category"] for r in refs}
+    assert by_url["https://example.test/rule"] == "self"
+    assert by_url["https://example.test/advisory/1"] == "external"
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
 def test_csaf_with_a_cvss_v2_score_validates_without_raising():
     """validate_csaf is hermetic and total: an external CSAF carrying a CVSS v2
     score resolves the v2 ref to a local stub and returns a list, never raising an

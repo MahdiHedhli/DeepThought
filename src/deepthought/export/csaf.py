@@ -283,12 +283,33 @@ def _vulnerability(finding: "Finding") -> dict:
     if scores is not None:
         vuln["scores"] = scores
 
-    if finding.references:
-        vuln["references"] = [
-            {"category": "self", "summary": "Source location", "url": finding.references[0].url}
-        ]
+    references = _references(finding)
+    if references:
+        vuln["references"] = references
 
     return vuln
+
+
+# Finding reference types that name the finding's OWN source/detection location
+# (CSAF category "self"); everything else (advisory, fix, report, web, …) is an
+# "external" reference — including the published advisory/fix links a disclosed or
+# patched finding carries.
+_SELF_REF_TYPES = frozenset({"self", "source", "detection", "location"})
+
+
+def _references(finding: "Finding") -> list[dict]:
+    """Map EVERY finding reference into CSAF, categorized.
+
+    Emitting only the first reference would drop a published advisory or fix URL
+    that appears later in the list (e.g. on a disclosed/patched finding), so the
+    CSAF draft would under-report the disclosure link. All are carried, each as an
+    inert url value.
+    """
+    refs: list[dict] = []
+    for ref in finding.references:
+        category = "self" if ref.type in _SELF_REF_TYPES else "external"
+        refs.append({"category": category, "summary": ref.type, "url": ref.url})
+    return refs
 
 
 def finding_to_csaf(finding: "Finding") -> dict:

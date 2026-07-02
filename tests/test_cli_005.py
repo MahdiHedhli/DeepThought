@@ -80,6 +80,23 @@ def test_disclose_missing_finding_is_a_clean_refusal(tmp_path):
     assert "unchanged (still verified)" not in result.output
 
 
+def test_disclose_unknown_project_refused_without_dirtying_state(tmp_path):
+    """A mistyped --project must NOT persist an orphan interrupted session that
+    would then break `check`."""
+    state = tmp_path / "state"
+    FileStore(state).save_project(make_project())  # a real, different project exists
+
+    result = runner.invoke(
+        app,
+        ["playbook", "disclose", "--state", str(state),
+         "--project", "does-not-exist", "--finding", "F-0007"],
+    )
+    assert result.exit_code == 2
+    assert "not found" in result.output
+    # No session was persisted, so `check` is unaffected.
+    assert FileStore(state).list_sessions() == []
+
+
 def test_publish_format_csaf_is_namespaced_and_validates(tmp_path):
     state = tmp_path / "state"
     out = tmp_path / "out"

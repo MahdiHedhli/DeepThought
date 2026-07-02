@@ -358,9 +358,20 @@ def playbook_disclose(
     fabricates a CVE or advisory reference. Sending is a human action performed
     outside this tool; Deep Thought drafts only.
     """
+    store = _store(state)
+    # Refuse an unknown project BEFORE entering the harness. Otherwise run_session
+    # would persist an interrupted Session referencing a missing project — an
+    # orphan that makes a later `check` fail until it is hand-deleted.
+    if store.get_project(project) is None:
+        typer.echo(
+            f"disclose refused: project {project!r} not found. Nothing was drafted.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     session = DisclosureSession(project_id=project, finding_id=finding)
     try:
-        record = run_session(_store(state), HermesUltraCodeGate(), session)
+        record = run_session(store, HermesUltraCodeGate(), session)
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
