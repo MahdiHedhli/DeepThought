@@ -119,6 +119,27 @@ def test_escalation_only_run_is_regated_when_authorization_is_lost(state_dir, tm
     assert run.sessions_run == 0
 
 
+def test_loop_import_does_not_load_the_execution_sandbox():
+    """Structural hard stop at the DEPENDENCY level: importing the loop must not
+    pull the execution backend (verify/sandbox) into its import closure — checked
+    in a clean interpreter so other tests can't pre-load it."""
+    import os
+    import subprocess
+    import sys
+
+    src = os.path.join(os.path.dirname(os.path.dirname(__file__)), "src")
+    code = (
+        "import sys, deepthought.loop\n"
+        "assert 'deepthought.sandbox' not in sys.modules, 'loop loaded the sandbox'\n"
+        "assert 'deepthought.sessions.verify' not in sys.modules, 'loop loaded verify'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": src},
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_loop_run_id_does_not_collide_after_a_deleted_run(state_dir):
     """generate_loop_run_id uses the max sequence + 1, so deleting a run leaves a
     gap instead of colliding with (and overwriting) an existing higher run."""

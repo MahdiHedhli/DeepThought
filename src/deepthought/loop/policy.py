@@ -13,6 +13,21 @@ from ..schema import CloseState, FindingStatus, GateOutcome, Project, SessionTyp
 from ..schema.loop import ActionKind, LoopAction
 from ..store import Store
 
+# The four artifacts a successful DISCLOSURE session persists (the same set the
+# `check` gate validates). A finding is only "drafted" while all four resolve.
+_DISCLOSURE_DRAFTS = (
+    "disclosure-advisory.md",
+    "disclosure-csaf.json",
+    "disclosure-openvex.json",
+    "disclosure-cve-draft.json",
+)
+
+
+def _drafts_present(store: Store, session_id: str) -> bool:
+    return all(
+        store.detail_exists(f"detail/{session_id}/{name}") for name in _DISCLOSURE_DRAFTS
+    )
+
 # A per-run key the driver marks once an action has been dispatched, so the same
 # work is never re-proposed within a run (structural monotonicity, independent of
 # whatever the ran session did or did not persist).
@@ -85,12 +100,14 @@ def select_next_action(
             return LoopAction(kind=ActionKind.sibling_hunt, project=pid, finding=f.id)
 
     # 5. DISCLOSURE (draft) — for the first verified finding lacking drafts. A
-    #    disclosure session records its drafted finding in findings_touched, the
-    #    cross-run signal that drafts already exist.
+    #    finding counts as drafted only when a COMPLETED disclosure session recorded
+    #    it AND its four persisted draft artifacts still resolve. So if the local
+    #    drafts are deleted/corrupted (and `check` goes red), the loop re-drafts to
+    #    regenerate them rather than skipping on a stale session record alone.
     drafted = {
         fid
         for s in sessions
-        if s.type is SessionType.disclosure and completed(s)
+        if s.type is SessionType.disclosure and completed(s) and _drafts_present(store, s.id)
         for fid in s.findings_touched
     }
     for f in verified:

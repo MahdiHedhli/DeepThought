@@ -37,6 +37,13 @@ def _cover_scope(store, project):
         store.save_coverage(make_coverage(area=area))
 
 
+def _write_drafts(store, session_id):
+    """Write the four disclosure draft artifacts a successful DISCLOSURE persists."""
+    for name in ("disclosure-advisory.md", "disclosure-csaf.json",
+                 "disclosure-openvex.json", "disclosure-cve-draft.json"):
+        store.write_detail(session_id, name, "{}")
+
+
 def _past_recon(store, project):
     """Advance the store past the recon rungs: a status baseline, MAP progress for
     every in-scope area, and a completed DISCOVER."""
@@ -154,8 +161,9 @@ def test_verified_finding_yields_sibling_hunt_then_disclosure(state_dir):
     done = {("sibling_hunt", "F-1")}
     a = select_next_action(store, p, done=done)
     assert a.kind is ActionKind.disclosure and a.finding == "F-1"
-    # a disclosure session that drafted F-1 (findings_touched) is the cross-run signal
+    # a completed disclosure session WITH its persisted drafts is the cross-run signal
     _add_session(store, "disclosure", "S-4", findings_touched=["F-1"])
+    _write_drafts(store, "S-4")
     assert select_next_action(store, p, done=done) is None
 
 
@@ -172,6 +180,22 @@ def test_uncompleted_disclosure_does_not_block_a_redraft(state_dir):
     # with the hunt already done, disclosure for F-1 is re-proposed (not skipped)
     a = select_next_action(store, p, done={("sibling_hunt", "F-1")})
     assert a.kind is ActionKind.disclosure and a.finding == "F-1"
+
+
+def test_disclosure_redrafts_when_the_persisted_artifacts_are_missing(state_dir):
+    """A completed disclosure session whose draft FILES were deleted/corrupted does
+    not count as drafted — the loop re-drafts to regenerate the local artifacts
+    (which `check` requires) instead of skipping on a stale record alone."""
+    store = FileStore(state_dir)
+    p = _proj(store)
+    _past_recon(store, p)
+    store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
+    _add_session(store, "disclosure", "S-9", findings_touched=["F-1"])  # NO draft files
+    a = select_next_action(store, p, done={("sibling_hunt", "F-1")})
+    assert a.kind is ActionKind.disclosure and a.finding == "F-1"  # re-drafted
+    # once the drafts are present, disclosure is done
+    _write_drafts(store, "S-9")
+    assert select_next_action(store, p, done={("sibling_hunt", "F-1")}) is None
 
 
 def test_candidate_yields_a_verify_escalation(state_dir):
