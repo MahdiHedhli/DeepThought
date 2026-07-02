@@ -96,7 +96,7 @@ def _products(finding: "Finding") -> list[dict]:
     affected scope. A finding with no usable affected identity falls back to a
     single local IRI so ``products`` is never empty.
     """
-    local = f"https://deepthought.local/product/{osv_id_for(finding.id)}"
+    local = f"https://deepthought.local/product/{quote(osv_id_for(finding.id), safe='')}"
     products: list[dict] = []
     seen: set[str] = set()  # OpenVEX statement products must be unique
     for pkg in finding.affected or []:
@@ -117,7 +117,7 @@ def finding_to_openvex(finding: "Finding") -> dict:
     utcdate = iso_z(utcnow())[:10]
     return {
         "@context": OPENVEX_CONTEXT,
-        "@id": f"https://deepthought.local/vex/draft/{utcdate}-{finding.id}",
+        "@id": f"https://deepthought.local/vex/draft/{utcdate}-{quote(finding.id, safe='')}",
         "author": _DRAFT_AUTHOR,
         "timestamp": iso_z(utcnow()),
         "version": 1,

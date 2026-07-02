@@ -293,6 +293,15 @@ def test_cve_injection_inertness():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_fallback_url_encodes_a_whitespace_finding_id():
+    """A finding with no usable reference url and a whitespace id yields a VALID
+    placeholder URI (the id segment is percent-encoded)."""
+    draft = finding_to_cve_draft(make_finding(id="F 0007", references=[]))
+    urls = [r["url"] for r in draft["containers"]["cna"]["references"]]
+    assert all(" " not in u for u in urls)
+    assert validate_cve_draft(draft) == []
+
+
 def test_cve_enforces_uri_format_on_references():
     """A corrupted persisted CVE draft with a non-URI reference url is reported —
     the validator supplies a FormatChecker."""

@@ -213,6 +213,15 @@ def test_products_are_deduplicated_and_uniqueness_is_validated():
     assert any("unique" in e for e in validate_openvex(doc))
 
 
+def test_whitespace_finding_id_yields_a_valid_document_id():
+    """A model-valid finding id with whitespace must not produce an invalid @id /
+    product IRI — the id is percent-encoded."""
+    doc = finding_to_openvex(make_finding(id="F 0007", affected=[]))
+    assert " " not in doc["@id"]
+    assert " " not in doc["statements"][0]["products"][0]["@id"]
+    assert validate_openvex(doc) == []
+
+
 def test_validate_enforces_timestamp_date_time_format():
     """A non-date timestamp is reported (not merely required non-empty)."""
     doc = finding_to_openvex(make_finding())

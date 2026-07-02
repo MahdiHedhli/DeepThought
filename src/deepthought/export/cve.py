@@ -27,6 +27,8 @@ from functools import lru_cache
 from importlib import resources
 from typing import TYPE_CHECKING
 
+from urllib.parse import quote
+
 import jsonschema
 from referencing import Registry, Resource
 from referencing.jsonschema import DRAFT7
@@ -261,7 +263,9 @@ def finding_to_cve_draft(finding: "Finding") -> dict:
         seen_urls.add(url)
         ref_urls.append(url)
     if not ref_urls:
-        ref_urls = [f"https://deepthought.invalid/finding/{osv_id_for(finding.id)}"]
+        # Percent-encode the id segment so a whitespace/odd id yields a valid URI.
+        stem = quote(osv_id_for(finding.id), safe="")
+        ref_urls = [f"https://deepthought.invalid/finding/{stem}"]
     cna["references"] = [{"url": url, "tags": ["vdb-entry"]} for url in ref_urls]
 
     return {
