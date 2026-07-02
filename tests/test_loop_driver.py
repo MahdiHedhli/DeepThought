@@ -77,6 +77,23 @@ def test_token_budget_stops_the_loop(state_dir, tmp_path):
     assert store.get_loop_run(run.id) is not None
 
 
+def test_all_outstanding_escalations_are_enumerated_once(state_dir, tmp_path):
+    """At the hard-stop boundary the loop names EVERY outstanding human action in a
+    single bounded pass — a run with several candidates surfaces them all, not just
+    the first (and without an unbounded per-escalation selector loop)."""
+    store = _seed(state_dir, tmp_path)
+    for i in range(3):
+        store.save_finding(make_finding(id=f"F-800{i}", project="php-src", status="candidate"))
+    run = run_loop(store, GATE, "php-src", LoopBudget(max_sessions=20))
+    assert run.stop_reason is StopReason.hard_stop
+    named = " ".join(run.outstanding_actions)
+    for i in range(3):
+        assert f"F-800{i}" in named, run.outstanding_actions
+    # each candidate is escalated exactly once (no duplicate enumeration)
+    esc = [s for s in run.trace if s.kind is ActionKind.verify_escalation]
+    assert sorted(s.finding for s in esc) == ["F-8000", "F-8001", "F-8002"]
+
+
 def test_wall_budget_bounds_an_escalation_heavy_run(state_dir, tmp_path):
     """--max-seconds bounds the loop even in an escalation-only state — the wall cap
     is enforced before every iteration, including escalation collection."""

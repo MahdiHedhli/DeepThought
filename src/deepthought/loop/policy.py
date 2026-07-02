@@ -20,22 +20,67 @@ from ..store import Store
 Done = set  # set[tuple[str, str]] of (ActionKind.value, target-id)
 
 
+def _completed(record) -> bool:
+    """A session/step genuinely COMPLETED its work: the gate PROCEEDED and it
+    closed CLEAN. A gate-held/refused or interrupted attempt still persists a
+    record but did no work, so it must not mark its rung done — else the loop
+    could never resume that step after the operator fixes the cause."""
+    return (record.gate_outcome is GateOutcome.proceed
+            and record.close_state is CloseState.clean)
+
+
+def _verify_escalation(pid: str, fid: str) -> LoopAction:
+    return LoopAction(
+        kind=ActionKind.verify_escalation, project=pid, finding=fid,
+        human_action=f"{fid} needs VERIFY under a real sandbox — human sign-off required",
+    )
+
+
+def _send_escalation(pid: str, fid: str) -> LoopAction:
+    return LoopAction(
+        kind=ActionKind.disclosure_send, project=pid, finding=fid,
+        human_action=(
+            f"{fid} disclosure drafted — human review and send required "
+            f"(Article V); Deep Thought drafts only, never transmits"
+        ),
+    )
+
+
+def _drafted_findings(store: Store, sessions: list) -> set[str]:
+    """Findings whose disclosure a COMPLETED session drafted AND whose four
+    persisted drafts resolve AND VALIDATE (the same checks the `check` gate
+    applies), so deleted/corrupt drafts trigger a re-draft."""
+    return {
+        fid
+        for s in sessions
+        if s.type is SessionType.disclosure and _completed(s) and disclosure_drafts_ok(store, s.id)
+        for fid in s.findings_touched
+    }
+
+
+def pending_escalations(store: Store, project: Project) -> list[LoopAction]:
+    """Every outstanding human hard stop for the project, in ONE bounded pass: a
+    SEND escalation (Article V) per verified finding with valid drafts, then a
+    VERIFY escalation (Article III) per candidate. Never performed — recorded for a
+    human. The driver enumerates these once at the hard-stop boundary rather than
+    looping the selector per escalation."""
+    pid = project.id
+    findings = store.list_findings(pid)
+    drafted = _drafted_findings(store, store.list_sessions(pid))
+    sends = [_send_escalation(pid, f.id) for f in findings
+             if f.status is FindingStatus.verified and f.id in drafted]
+    verifies = [_verify_escalation(pid, f.id) for f in findings
+                if f.status is FindingStatus.candidate]
+    return sends + verifies
+
+
 def select_next_action(
     store: Store, project: Project, *, done: "set[tuple[str, str]] | None" = None
 ) -> LoopAction | None:
     done = done or set()
     pid = project.id
     sessions = store.list_sessions(pid)
-
-    # A rung is "done" only when a session genuinely COMPLETED it — the gate
-    # PROCEEDED and it closed CLEAN. A gate-held/refused attempt (authorization
-    # temporarily removed) or an interrupted run still persists a session record
-    # but did not do the work, so it must not mark its rung done — else the loop
-    # could never resume that step after the operator fixes the cause.
-    def completed(record) -> bool:
-        return (record.gate_outcome is GateOutcome.proceed
-                and record.close_state is CloseState.clean)
-
+    completed = _completed
     succeeded = {s.type for s in sessions if completed(s)}
 
     def fresh(kind: ActionKind, target: str) -> bool:
@@ -95,16 +140,7 @@ def select_next_action(
         if f.id not in hunted_before and fresh(ActionKind.sibling_hunt, f.id):
             return LoopAction(kind=ActionKind.sibling_hunt, project=pid, finding=f.id)
 
-    # A finding counts as drafted only when a COMPLETED disclosure session recorded
-    # it AND its four persisted drafts resolve AND VALIDATE (the same checks the
-    # `check` gate applies). So deleted/corrupt drafts (which make `check` go red)
-    # make the loop re-draft rather than skip on a stale session record alone.
-    drafted = {
-        fid
-        for s in sessions
-        if s.type is SessionType.disclosure and completed(s) and disclosure_drafts_ok(store, s.id)
-        for fid in s.findings_touched
-    }
+    drafted = _drafted_findings(store, sessions)
 
     # 5. DISCLOSURE (draft) — for the first verified finding without valid drafts.
     for f in verified:
@@ -116,28 +152,13 @@ def select_next_action(
     #    (state-based) until the finding moves past `verified`; never performed.
     for f in verified:
         if f.id in drafted and fresh(ActionKind.disclosure_send, f.id):
-            return LoopAction(
-                kind=ActionKind.disclosure_send,
-                project=pid,
-                finding=f.id,
-                human_action=(
-                    f"{f.id} disclosure drafted — human review and send required "
-                    f"(Article V); Deep Thought drafts only, never transmits"
-                ),
-            )
+            return _send_escalation(pid, f.id)
 
     # 7. VERIFY escalation — a candidate can only advance by real reproduction,
     #    which is a human-signed hard stop. Never run; recorded for a human.
     for f in findings:
         if f.status is FindingStatus.candidate and fresh(ActionKind.verify_escalation, f.id):
-            return LoopAction(
-                kind=ActionKind.verify_escalation,
-                project=pid,
-                finding=f.id,
-                human_action=(
-                    f"{f.id} needs VERIFY under a real sandbox — human sign-off required"
-                ),
-            )
+            return _verify_escalation(pid, f.id)
 
     # 8. Nothing safe remains.
     return None

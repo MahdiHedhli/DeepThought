@@ -28,7 +28,7 @@ from ..sessions import (
 )
 from ..store import Store
 from .budget import LoopBudget, LoopSpend
-from .policy import select_next_action
+from .policy import pending_escalations, select_next_action
 
 
 def generate_loop_run_id(store: Store, now: datetime) -> str:
@@ -168,12 +168,15 @@ def run_loop(
             stop_reason = StopReason.budget_exhausted
             break
         if action.is_escalation:
-            # A hard stop — recorded for a human, never run. No session, no session/
-            # token budget (but the wall cap above still bounds the collection).
-            outstanding.append(action.human_action)
-            trace.append(LoopStep(kind=action.kind, finding=action.finding))
-            done.add(_key(action))
-            continue
+            # Hard-stop boundary reached (no safe runnable work left). Enumerate ALL
+            # outstanding human actions in ONE bounded pass and stop — do NOT loop
+            # the selector per escalation, which (since escalations consume no
+            # session/token budget) would ignore a --max-sessions/--max-tokens cap.
+            for esc in pending_escalations(store, project):
+                outstanding.append(esc.human_action)
+                trace.append(LoopStep(kind=esc.kind, finding=esc.finding))
+            stop_reason = StopReason.hard_stop
+            break
         if budget.would_exceed(_live_spend()):
             planned = action
             stop_reason = StopReason.budget_exhausted
