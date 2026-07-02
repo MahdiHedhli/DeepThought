@@ -185,7 +185,10 @@ def validate_openvex(doc: dict) -> list[str]:
                         )
 
             status = stmt.get("status")
-            if status not in _VALID_STATUSES:
+            # isinstance BEFORE the set membership test: a non-string (e.g. a JSON
+            # object/array) is unhashable and `in` would raise, breaking the
+            # list[str] contract.
+            if not isinstance(status, str) or status not in _VALID_STATUSES:
                 errors.append(
                     f"{base}/status: {status!r} is not one of "
                     f"{sorted(_VALID_STATUSES)}"

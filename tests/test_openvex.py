@@ -197,6 +197,16 @@ def test_validate_requires_non_empty_strings_not_truthy_values():
     assert any("@id" in e for e in validate_openvex(doc3))
 
 
+def test_validate_does_not_crash_on_non_string_status():
+    """A non-string status (JSON object/array — unhashable) is REPORTED, not a
+    crash — the set-membership test is guarded by an isinstance check."""
+    doc = finding_to_openvex(make_finding())
+    doc["statements"][0]["status"] = {"weird": True}
+    errors = validate_openvex(doc)
+    assert isinstance(errors, list)
+    assert any("status" in e for e in errors)
+
+
 def test_validate_does_not_crash_on_non_list_statements():
     """A truthy-but-non-list statements value must be REPORTED, not raise — the
     validator's list[str] contract holds for any input."""

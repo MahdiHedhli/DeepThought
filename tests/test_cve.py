@@ -124,6 +124,20 @@ def test_cve_bounds_overlong_product_and_url():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_bounds_and_skips_empty_versions():
+    """An empty version is skipped and an over-long one is bounded to 1024, so the
+    persisted draft stays schema-conformant."""
+    from deepthought.schema import AffectedPackage
+
+    draft = finding_to_cve_draft(
+        make_finding(affected=[AffectedPackage(ecosystem="PyPI", package="p", versions=["", "9" * 5000])])
+    )
+    versions = [v["version"] for v in draft["containers"]["cna"]["affected"][0]["versions"]]
+    assert "" not in versions
+    assert all(1 <= len(v) <= 1024 for v in versions)
+    assert validate_cve_draft(draft) == []
+
+
 def test_validate_cve_draft_handles_multiple_errors_with_mixed_paths():
     """A structurally-broken draft with errors across object keys AND array
     indices sorts and returns a list[str] without raising (paths stringified)."""

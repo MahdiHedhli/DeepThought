@@ -54,6 +54,7 @@ _PLACEHOLDER_VENDOR = "PLACEHOLDER"
 _DESCRIPTION_MAX = 4096  # descriptions[].value
 _PRODUCT_MAX = 2048  # affected[].product
 _URL_MAX = 2048  # references[].url (uriType)
+_VERSION_MAX = 1024  # affected[].versions[].version (minLength 1)
 
 # The official schema pulls CVSS and reference-tag definitions from sibling
 # files via ``file:`` refs that are not bundled. The CVSS v3.0/v3.1 refs resolve
@@ -137,9 +138,12 @@ def _affected(finding: "Finding") -> list[dict]:
     """
     entries: list[dict] = []
     for pkg in finding.affected or []:
+        # Only non-empty versions, each bounded to the schema limit (1..1024) — an
+        # empty or over-long version would make the persisted draft non-conformant.
         versions = [
-            {"version": v, "status": "affected", "versionType": "semver"}
+            {"version": v.strip()[:_VERSION_MAX], "status": "affected", "versionType": "semver"}
             for v in (pkg.versions or [])
+            if v and v.strip()
         ]
         if not versions:
             versions = [{"version": "0", "status": "affected", "versionType": "semver"}]
