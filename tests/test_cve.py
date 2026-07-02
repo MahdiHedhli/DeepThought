@@ -124,6 +124,24 @@ def test_cve_bounds_overlong_product_and_url():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_range_with_implicit_introduced_zero_is_not_dropped():
+    """An OSV range starting with a bare 'fixed' (no 'introduced') implies
+    introduced at 0 — it maps to [0, fixed) rather than being dropped."""
+    from deepthought.schema import AffectedPackage
+
+    draft = finding_to_cve_draft(
+        make_finding(
+            affected=[AffectedPackage(
+                ecosystem="PyPI", package="foo", versions=[],
+                ranges=[{"type": "ECOSYSTEM", "events": [{"fixed": "1.0.0"}]}],
+            )]
+        )
+    )
+    versions = draft["containers"]["cna"]["affected"][0]["versions"]
+    assert {"version": "0", "lessThan": "1.0.0", "status": "affected", "versionType": "custom"} in versions
+    assert validate_cve_draft(draft) == []
+
+
 def test_cve_maps_ranges_and_never_fabricates_version_zero():
     """A range-only finding maps its OSV bounds to a CVE version-range entry
     (introduced->version, fixed->lessThan) instead of fabricating version 0; a

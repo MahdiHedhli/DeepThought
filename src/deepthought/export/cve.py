@@ -142,17 +142,23 @@ def _ranges_to_version_entries(ranges: list) -> list[dict]:
     ``introduced X`` + ``fixed Y`` -> ``{version: X, lessThan: Y}``;
     ``introduced X`` + ``last_affected Z`` -> ``{version: X, lessThanOrEqual: Z}``;
     an unclosed ``introduced X`` -> ``{version: X, lessThan: "*"}`` (unbounded).
+
+    Per the OSV schema, a range's affected scope is introduced at ``"0"`` unless an
+    explicit ``introduced`` event says otherwise — so a range that starts with a
+    bare ``fixed``/``last_affected`` (no ``introduced``) is treated as ``[0, …)``
+    rather than dropped.
     """
     type_map = {"SEMVER": "semver", "ECOSYSTEM": "custom", "GIT": "git"}
     entries: list[dict] = []
     for rng in ranges or []:
         if not isinstance(rng, dict):
             continue
+        events = [e for e in (rng.get("events") or []) if isinstance(e, dict)]
+        if not events:
+            continue  # a range with no events maps to nothing
         vtype = type_map.get(str(rng.get("type", "")).upper(), "custom")
-        intro: str | None = None
-        for event in rng.get("events") or []:
-            if not isinstance(event, dict):
-                continue
+        intro: str | None = "0"  # OSV implicit introduced-at-0
+        for event in events:
             if "introduced" in event:
                 intro = _bounded(event["introduced"]) or "0"
             elif "fixed" in event and intro is not None:
