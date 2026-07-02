@@ -1,17 +1,18 @@
 # Build Session Log — Feature 004, Sibling Hunt (variant analysis)
 
-> **STATUS: built on branch `004-sibling-hunt` (off `main`, features 001–003
-> merged). READ-ONLY build — SIBLING HUNT executes nothing.** It derives a variant
-> signature from a *verified* finding's typed fields, gates each target
-> independently, and writes candidate variant findings for the source and any
-> pre-authorized sibling project. `execution_enabled` stays `False`;
-> `DockerSandbox.run()` is untouched. **345 tests green; all four smokes
-> (`smoke.sh`, `smoke_002.sh`, `smoke_003.sh`, `smoke_004.sh`) pass.** Changes left
-> in the working tree (no commit).
+> **STATUS: MERGED to `main` (PR #3, squash `93ce057`, 2026-07-02).** READ-ONLY
+> feature — SIBLING HUNT executes nothing. It derives a variant signature from a
+> *verified* finding's typed fields, gates each target independently, and writes
+> candidate variant findings for the source and any pre-authorized sibling project.
+> `execution_enabled` stays `False`; `DockerSandbox.run()` is untouched. **380 tests
+> green (310 baseline + 70 new); all four smokes (`smoke.sh`, `smoke_002.sh`,
+> `smoke_003.sh`, `smoke_004.sh`) pass.** Reviewed to a clean dual-gate (codex
+> gpt-5.5 + agy/Gemini adversarial) on the same HEAD before merge.
 
 **Feature:** 004-sibling-hunt
-**Branch:** `004-sibling-hunt`
+**Branch:** `004-sibling-hunt` (merged and deleted)
 **Predecessor gate:** 003 merged to `main` (PR #2, squash `440485a`).
+**Merge:** PR #3, squash `93ce057`, 2026-07-02 — dual-gate clean (codex + agy).
 
 ## What shipped
 
@@ -85,12 +86,33 @@ its firewalls, adding a same-class filter and a per-target authority firewall.
 ## Tests
 
 - `tests/test_signature.py` — Signature model + typed-only derivation + injection
-  inertness (10 tests).
+  inertness (11 tests).
 - `tests/test_sibling_hunt.py` — gate, refusal rules, same-project variants,
   same-class filter, scope containment, cross-project per-target gating, authority
-  invariants (Store spy), exports, OSV validity, and the `check` gate (22 tests).
+  invariants (Store spy), exports, OSV validity, and the `check` gate — plus the
+  worker side-channel firewall hardening added across review (envelope + finding
+  re-validation, id/lifecycle/scope/dedup rules, per-target isolation incl. the
+  sibling gate step, ledger primitive normalization, concrete-locus requirement)
+  (55 tests).
 - `tests/test_cli_004.py` — CLI wiring, repeatable `--sibling`, `StoreError` exit
   (3 tests).
-- `tests/test_smoke_004.py` — the hermetic end-to-end loop.
+- `tests/test_smoke_004.py` — the hermetic end-to-end loop (1 test).
 
-**345 passed** (310 baseline + 35 new). All four smokes pass.
+**380 passed** (310 baseline + 70 new). All four smokes pass.
+
+## Review & merge
+
+Reviewed under the standing dual-gate (both must be clean on the same HEAD):
+**codex** (gpt-5.5, via the GitHub bot and — when the bot lagged — the local
+`codex review --base main` CLI) and **agy** (Antigravity/Gemini adversarial CLI,
+standing in for the quota-blocked `gemini-code-assist` bot). The review was
+deliberately deep on the forward-looking threat model of an out-of-process /
+compromised Marvin worker: the worker returns `(envelope, findings, detail)` and
+the orchestrator must admit nothing it has not independently re-validated. Hardening
+that landed across the rounds — envelope re-validation reused from the conductor,
+per-finding `Finding.model_validate` re-validation, `F-\d+` id shape, candidate +
+evidence-free lifecycle, attestation, same-class-primitive backing, NEW + dedup,
+full-untruncated-locus scope containment, concrete (non-empty) locus requirement,
+ledger primitive normalization to suspected same-class, and one per-target isolation
+guard covering even the sibling gate step. Merged at squash `93ce057` with both
+gates clean on `2202aa4`, 380 tests + four smokes green, zero unresolved threads.
