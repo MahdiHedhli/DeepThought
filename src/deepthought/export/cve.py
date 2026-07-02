@@ -208,12 +208,14 @@ def _affected(finding: "Finding") -> list[dict]:
             }
         )
     if not entries:
+        # No affected package recorded at all (e.g. a SARIF-created finding): an
+        # honest "unspecified" marker, never a fabricated affected version 0.
         entries.append(
             {
                 "vendor": _PLACEHOLDER_VENDOR,
                 "product": _PLACEHOLDER_VENDOR,
                 "versions": [
-                    {"version": "0", "status": "affected", "versionType": "semver"}
+                    {"version": "unspecified", "status": "affected", "versionType": "custom"}
                 ],
                 "defaultStatus": "unaffected",
             }

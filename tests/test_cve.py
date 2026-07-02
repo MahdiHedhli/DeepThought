@@ -163,6 +163,13 @@ def test_cve_valid_for_a_pathological_empty_finding():
     )
     assert validate_cve_draft(draft) == []
 
+    # A finding with NO affected package at all (e.g. a SARIF-created finding) must
+    # not fabricate an affected version 0 — it uses the honest 'unspecified' marker.
+    no_pkg = finding_to_cve_draft(make_finding(affected=[]))
+    versions = [v["version"] for v in no_pkg["containers"]["cna"]["affected"][0]["versions"]]
+    assert versions == ["unspecified"]
+    assert validate_cve_draft(no_pkg) == []
+
 
 def test_cve_bounds_and_skips_empty_versions():
     """An empty version is skipped and an over-long one is bounded to 1024, so the
