@@ -42,26 +42,45 @@ def _status_footer(finding: "Finding") -> str:
     )
 
 
+def _escape(text: object) -> str:
+    """Make free-text inert in an HTML-enabled Markdown renderer.
+
+    HTML-escapes ``&``/``<``/``>`` (so ``<script>`` or other raw HTML from a
+    hostile finding renders as literal text, never markup) and backslash-escapes
+    the Markdown link/image brackets (so ``[x](javascript:…)`` cannot become a
+    clickable/executable link). Combined with :func:`_inline` /
+    :func:`_blockquote`, finding free-text can neither forge document structure
+    nor smuggle active HTML into the human-review draft.
+    """
+    s = (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    return s.replace("[", "\\[").replace("]", "\\]")
+
+
 def _inline(text: object) -> str:
-    """Collapse free-text to a single inert line.
+    """Collapse free-text to a single, escaped, inert line.
 
     Any embedded newline could otherwise let a value start a new Markdown line
     (e.g. ``"foo\\n## Injected"``), which — placed on a heading or list line —
-    would forge a top-level section. Collapsing all whitespace to single spaces
-    keeps the value a data leaf on its own line.
+    would forge a top-level section. Whitespace is collapsed to single spaces and
+    the result is escaped, so the value stays an inert data leaf on its own line.
     """
-    return " ".join(str(text).split())
+    return _escape(" ".join(str(text).split()))
 
 
 def _blockquote(text: str) -> str:
-    """Render a multi-line block as an inert Markdown blockquote.
+    """Render a multi-line block as an inert, escaped Markdown blockquote.
 
-    Every line is prefixed with ``> ``, so an embedded ``## Heading`` becomes
-    quoted prose (``> ## Heading``) and can never masquerade as a real top-level
-    section. The document's own section grammar stays fixed.
+    Every line is prefixed with ``> `` and escaped, so an embedded ``## Heading``
+    becomes quoted prose (``> ## Heading``), raw HTML becomes literal text, and
+    the document's own section grammar stays fixed.
     """
-    lines = text.splitlines() or [""]
-    return "\n".join(f"> {line}" for line in lines)
+    lines = str(text).splitlines() or [""]
+    return "\n".join(f"> {_escape(line)}" for line in lines)
 
 
 def finding_to_advisory(finding: "Finding") -> str:

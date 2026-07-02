@@ -8,6 +8,8 @@ exists, and carries adversarial free-text only as inert string values.
 
 from __future__ import annotations
 
+import json
+
 from deepthought.export.openvex import (
     OPENVEX_CONTEXT,
     finding_to_openvex,
@@ -123,3 +125,21 @@ def test_placeholder_or_malformed_cve_falls_back_to_the_finding_id():
     # A real CVE is used verbatim.
     doc = finding_to_openvex(make_finding(cve="CVE-2026-12345"))
     assert doc["statements"][0]["vulnerability"]["name"] == "CVE-2026-12345"
+
+
+def test_validate_rejects_malformed_products():
+    """products must be a NON-EMPTY LIST of objects each carrying an @id — a
+    string, an empty list, or a list of empty objects is not conformant."""
+    base = finding_to_openvex(make_finding())
+
+    doc = json.loads(json.dumps(base))
+    doc["statements"][0]["products"] = "not-a-list"
+    assert any("products" in e for e in validate_openvex(doc))
+
+    doc = json.loads(json.dumps(base))
+    doc["statements"][0]["products"] = []
+    assert any("products" in e for e in validate_openvex(doc))
+
+    doc = json.loads(json.dumps(base))
+    doc["statements"][0]["products"] = [{}]  # object without @id
+    assert any("@id" in e for e in validate_openvex(doc))

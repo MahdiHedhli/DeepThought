@@ -106,13 +106,14 @@ def test_injection_inertness():
         )
     )
 
-    # adversarial text appears as literal prose
-    assert adversarial_summary in md
+    # Raw HTML is neutralized (escaped), never emitted as active markup.
+    assert "</script>" not in md
+    assert "&lt;/script&gt;" in md
+    # Non-HTML prose is still carried literally.
     assert "../../etc/passwd" in md
 
     # the fixed section structure survives — all headings still present
     for heading in (
-        f"# Advisory: {adversarial_summary}",
         "## Summary",
         "## Severity",
         "## Affected",
@@ -121,9 +122,19 @@ def test_injection_inertness():
         "## Status",
     ):
         assert heading in md, heading
+    # the escaped summary is on the title line
+    assert md.startswith('# Advisory: X &lt;/script&gt; {"$ref":"y"}')
 
-    # the DRAFT footer is intact
+    # the DRAFT footer marker is intact
     assert DRAFT_FOOTER in md
+
+
+def test_advisory_defuses_markdown_links_in_free_text():
+    """A finding summary carrying a Markdown link with a javascript: target must
+    NOT render as a clickable link — the brackets are escaped."""
+    md = finding_to_advisory(make_finding(summary="click [here](javascript:alert(1))"))
+    assert "[here](javascript:" not in md
+    assert "\\[here\\]" in md
 
 
 def test_summary_with_embedded_heading_cannot_forge_a_section():

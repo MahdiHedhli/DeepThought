@@ -140,8 +140,15 @@ def validate_openvex(doc: dict) -> list[str]:
             if not isinstance(vuln, dict) or not vuln.get("name"):
                 errors.append(f"{base}/vulnerability/name: is required")
 
-            if not stmt.get("products"):
-                errors.append(f"{base}/products: must be non-empty")
+            products = stmt.get("products")
+            if not isinstance(products, list) or not products:
+                errors.append(f"{base}/products: must be a non-empty list")
+            else:
+                for j, product in enumerate(products):
+                    if not isinstance(product, dict) or not product.get("@id"):
+                        errors.append(
+                            f"{base}/products/{j}/@id: each product requires an @id"
+                        )
 
             status = stmt.get("status")
             if status not in _VALID_STATUSES:
