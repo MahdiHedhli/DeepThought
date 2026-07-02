@@ -144,3 +144,39 @@ def test_record_ids_reject_unsafe_values():
     # Real ids used across the codebase remain valid.
     for good in ("F-0007", "php-src", "S-2026-07-02-0001", "a", "A1", "x._-9"):
         Finding.model_validate({"id": good, "project": "php-src", "summary": "x"})
+
+
+def test_derive_project_id_always_yields_a_safe_id():
+    """A derived project id feeds straight into ``Project.id`` (a RecordId), so the
+    generator must never emit a value the model rejects — a source tail with
+    leading/trailing punctuation, path separators, or excess length must be
+    normalised to a valid single safe path segment, and a Project must construct
+    from it."""
+    from deepthought.schema.common import safe_record_id
+    from deepthought.sessions.new_project import derive_project_id
+
+    hostile = [
+        ("n", None, "/tmp/_repo"),          # leading '_'
+        ("n", None, "/tmp/repo_"),          # trailing '_'
+        ("n", None, "/tmp/repo."),          # trailing '.'
+        (".hidden", None, None),            # leading '.'
+        ("a" * 200, None, None),            # over the 128-char bound
+        ("n", "https://x/._.git", None),    # collapses to punctuation only
+        ("...", None, None),                # nothing safe survives -> fallback
+        ("n", None, "/tmp/a b/c d"),        # whitespace in the tail
+    ]
+    for name, git_url, local_path in hostile:
+        did = derive_project_id(name, git_url, local_path)
+        # The id must build a Project without raising.
+        Project.model_validate(
+            {"id": did, "name": "n", "source_type": "open_source",
+             "git_url": "https://x.test/a", "authorization_basis": "own_code"}
+        )
+
+    # Backward-compatibility: an already-clean tail is unchanged.
+    assert derive_project_id("n", "https://github.com/php/php-src", None) == "php-src"
+    assert derive_project_id("n", None, "/repos/curl") == "curl"
+
+    # The shared coercion helper is idempotent on a value it already accepts.
+    for good in ("F-0007", "php-src", "a", "x._-9"):
+        assert safe_record_id(good, fallback="project") == good

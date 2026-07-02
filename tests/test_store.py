@@ -263,11 +263,47 @@ def test_detail_access_rejects_path_traversal(state_dir, tmp_path):
 def test_get_lookups_reject_traversal_ids(state_dir):
     """The get_* lookups take a RAW string id (never model-validated), so a
     traversal id must be refused (returns not-found) — a crafted id can never read
-    a record outside the store."""
+    a record outside the store. A trailing newline/CR must be rejected too: the
+    guard has to agree with the model, which forbids control characters (a naive
+    ``re.match`` against a ``$``-anchored pattern would wrongly accept ``id\\n``)."""
     store = FileStore(state_dir)
-    for bad in ("../../etc/passwd", "a/b", "a\\b", "..", ".", "with space", ""):
+    for bad in ("../../etc/passwd", "a/b", "a\\b", "..", ".", "with space", "",
+                "F-0007\n", "F-0007\r\n", "F-0007\t", "\nF-0007", "ok\x00"):
         assert store.get_finding(bad) is None, bad
         assert store.get_project(bad) is None, bad
         assert store.get_session(bad) is None, bad
         assert store.get_methodology(bad) is None, bad
         assert store.get_coverage(bad, "some/area") is None, bad
+
+
+def test_list_coverage_rejects_traversal_project(state_dir):
+    """``list_coverage(project=...)`` globs ``coverage/<project>/*.md`` with the raw
+    project arg, so — like ``get_coverage`` — it must refuse a traversal project
+    rather than glob (and try to parse) files outside the coverage directory."""
+    store = FileStore(state_dir)
+    # A real record proves the happy path still works.
+    store.save_coverage(make_coverage())
+    assert len(store.list_coverage(project="php-src")) == 1
+    # Plant a non-coverage record two levels up from coverage/<project>.
+    (state_dir / "projects" / "decoy.md").write_text(make_project(id="decoy").to_markdown())
+    for bad in ("../../projects", "../projects", "..", "a/b", "with space", ""):
+        assert store.list_coverage(project=bad) == [], bad
+
+
+def test_detail_access_stays_within_the_detail_directory(state_dir):
+    """``read_detail``/``detail_exists`` must resolve ONLY inside ``detail/`` — a ref
+    that names another store subtree (e.g. ``projects/<id>.md``) is not a detail
+    artifact and must not be readable through the detail API (else the candidate ->
+    verified evidence gate could be satisfied by a non-evidence store file)."""
+    store = FileStore(state_dir)
+    store.save_project(make_project(id="secret"))
+    store.save_finding(make_finding(id="F-1", project="secret"))
+    ref = store.write_detail("S-1", "note.txt", "real evidence")
+    # Legitimate detail access is unaffected.
+    assert store.read_detail(ref) == "real evidence"
+    assert store.detail_exists(ref)
+    # A ref pointing at another store subtree is refused.
+    for outside in ("projects/secret.md", "findings/F-1.md", "sessions/S-1.md",
+                    "state/projects/secret.md", "methodology/x.md"):
+        assert store.read_detail(outside) is None, outside
+        assert store.detail_exists(outside) is False, outside

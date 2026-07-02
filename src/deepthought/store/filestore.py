@@ -31,7 +31,11 @@ _SAFE_ID_RE = re.compile(_SAFE_ID_PATTERN)
 
 
 def _safe_id(ident: str) -> bool:
-    return isinstance(ident, str) and bool(_SAFE_ID_RE.match(ident))
+    # ``fullmatch`` (not ``match``) so the whole string must conform: a ``$``
+    # anchor in ``re`` also matches just before a trailing ``\n``, so ``match``
+    # would wrongly accept ``F-0007\n`` — a control character the record MODEL
+    # rejects. ``fullmatch`` keeps the raw-lookup guard consistent with the model.
+    return isinstance(ident, str) and bool(_SAFE_ID_RE.fullmatch(ident))
 from ..schema.finding import TransitionLogEntry
 from .base import (
     BACKWARD_EDGES,
@@ -294,6 +298,11 @@ class FileStore(Store):
         return candidate if (candidate is not None and candidate.area == area) else None
 
     def list_coverage(self, project: str | None = None) -> list[Coverage]:
+        # A project filter is used verbatim as a path segment (coverage/<project>),
+        # so — like get_coverage — refuse a traversal/unsafe value rather than glob
+        # (and try to parse) files outside the coverage directory.
+        if project is not None and not _safe_id(project):
+            return []
         out = []
         base = self.root / "coverage"
         globber = base.glob("*/*.md") if project is None else (base / project).glob("*.md")
@@ -330,14 +339,19 @@ class FileStore(Store):
         return ref
 
     def _detail_path(self, ref: str) -> Path | None:
-        """Resolve a ``detail/...`` ref to a path INSIDE the store, or ``None``.
+        """Resolve a ``detail/...`` ref to a path inside the ``detail/`` tree, or
+        ``None``.
 
         The ref can be derived from a (possibly tampered) session id, so a ref
-        that escapes the store root via ``..`` or an absolute path is rejected —
-        detail access never reads outside the store boundary.
+        that escapes via ``..`` or an absolute path is rejected. It must ALSO name
+        a detail artifact: a ref that resolves into another store subtree (e.g.
+        ``projects/<id>.md``) is refused, so the candidate -> verified evidence
+        gate can never be satisfied by a non-evidence store file.
         """
         rel = ref[len("state/") :] if ref.startswith("state/") else ref
-        base = self.root.resolve()
+        if not (rel == "detail" or rel.startswith("detail/")):
+            return None
+        base = (self.root / "detail").resolve()
         target = (self.root / rel).resolve()
         if target != base and base not in target.parents:
             return None

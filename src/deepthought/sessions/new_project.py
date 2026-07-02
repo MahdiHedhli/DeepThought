@@ -21,6 +21,7 @@ from ..schema import (
     SessionType,
     SourceType,
 )
+from ..schema.common import safe_record_id
 from ..store import Store
 
 
@@ -48,11 +49,15 @@ def default_verify_git_url(url: str) -> bool:
 
 
 def derive_project_id(name: str, git_url: str | None, local_path: str | None) -> str:
+    # The derived id becomes ``Project.id`` (a RecordId), so it must be a single
+    # safe path segment: ``safe_record_id`` normalises the repo/local tail (trims
+    # the leading/trailing punctuation the pattern forbids and bounds the length)
+    # so a tail like ``_repo``/``repo.`` or an over-long name can't crash the NEW
+    # PROJECT flow with a validation error.
     source = git_url or local_path or name
     tail = source.rstrip("/").split("/")[-1]
     tail = re.sub(r"\.git$", "", tail)
-    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", tail).strip("-").lower()
-    return slug or "project"
+    return safe_record_id(tail.lower(), fallback="project")
 
 
 class NewProjectSession(BaseSession):
