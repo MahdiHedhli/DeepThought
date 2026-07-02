@@ -104,7 +104,21 @@ load state  ->  gate  ->  scoped work  ->  teach back  ->  validate  ->  close
   `authorization_basis`** — the huntable target set is fixed at dispatch and never
   grows. Variants are promoted only by a later sandboxed VERIFY.
 
-- *(later)* DISCLOSURE — behind its own gate.
+- **DISCLOSURE** (feature 005, DRAFT-ONLY) — turn a *verified* finding into four
+  **local** draft artifacts: a human-readable advisory (Markdown), a CVE JSON 5.1
+  draft, a CSAF 2.0 advisory, and an OpenVEX statement. The session gates like any
+  other, **refuses any finding that is not `verified`**, drafts read-only from the
+  finding's typed fields (free text is carried only as inert string values, never
+  as document structure or a `$ref`), and writes each draft as session detail via
+  `write_detail`. It **transmits NOTHING** and leaves the finding exactly as it
+  was — still `verified`. **DISCLOSURE HARD STOP (Article V).** Sending/submitting
+  a disclosure, advancing a finding to `disclosed`, or fabricating a CVE or
+  advisory reference are human-only acts and require Mahdi's sign-off — never
+  autonomous. Drafts are deliberately non-submittable: the CVE `cveId` is the
+  sentinel `CVE-XXXX-XXXXX` (fails the real pattern), CSAF `tracking.status` is
+  `draft`, and no real CVE/advisory reference is ever added. `check` also validates
+  the CSAF and OpenVEX drafts (the CVE draft is intentionally non-submittable and
+  is not gate-checked).
 
 Run these through the CLI, which is the protocol harness in code:
 
@@ -115,9 +129,10 @@ deepthought playbook map --project <id>                    # 002, READ-ONLY cove
 deepthought playbook discover --project <id> [--sarif <path>]  # 002, candidate findings
 deepthought playbook verify --project <id> --finding <F-NNNN>  # 003, NoopSandbox dry-run (no execution)
 deepthought playbook sibling-hunt --project <id> --finding <F-NNNN> [--sibling <id> ...] [--sarif <path>]  # 004, READ-ONLY variant hunt
+deepthought playbook disclose --project <id> --finding <F-NNNN>  # 005, DRAFT-ONLY advisory/CVE/CSAF/OpenVEX (no transmit)
 deepthought playbook findings [--project <id>]
 deepthought check
-deepthought publish        # local artifacts only; asserts the human gate
+deepthought publish [--format osv|csaf|openvex|cve-draft|advisory|all]  # local artifacts only; asserts the human gate
 ```
 
 `playbook verify` NEVER executes untrusted target code by default: it runs the

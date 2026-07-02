@@ -16,6 +16,10 @@ dependencies = [
     "pyyaml>=6.0",
     "typer>=0.12",
     "jsonschema>=4.21",
+    # Imported directly by the CSAF/CVE draft validators to resolve external
+    # schema refs to local, hermetic stubs (no network). Ships transitively with
+    # jsonschema>=4.18; declared here because we import it directly.
+    "referencing>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -27,8 +31,12 @@ deepthought = "deepthought.cli:app"
 [tool.hatch.build.targets.wheel]
 packages = ["src/deepthought"]
 
-# Ship the pinned OSV schema (a non-.py file) inside the package.
-artifacts = ["src/deepthought/export/osv_schema.json"]
+# Ship the pinned standards schemas (non-.py files) inside the package.
+artifacts = [
+    "src/deepthought/export/osv_schema.json",
+    "src/deepthought/export/csaf_schema.json",
+    "src/deepthought/export/cve_schema.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

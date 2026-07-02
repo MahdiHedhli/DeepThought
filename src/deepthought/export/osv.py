@@ -159,5 +159,7 @@ def validate_osv(osv: dict) -> list[str]:
     validator_cls = jsonschema.validators.validator_for(schema)
     validator_cls.check_schema(schema)
     validator = validator_cls(schema)
-    errors = sorted(validator.iter_errors(osv), key=lambda e: list(e.path))
+    # Stringify path elements before sorting: a JSON path mixes str keys and int
+    # array indices, and comparing str vs int across two errors raises TypeError.
+    errors = sorted(validator.iter_errors(osv), key=lambda e: [str(p) for p in e.path])
     return [f"{'/'.join(str(p) for p in e.path) or '<root>'}: {e.message}" for e in errors]

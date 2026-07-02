@@ -6,7 +6,12 @@ Validates state consistency before ``publish``:
 * lifecycle legality — every finding's status satisfies its entry guard,
 * orphan references — no dangling project/finding/session links,
 * duplicate project identity — no two projects share a git_url or local_path,
-* OSV conformance — every finding's OSV validates against the pinned schema.
+* OSV conformance — every finding's OSV validates against the pinned schema,
+* disclosure-draft conformance — every finding's re-derived CSAF and OpenVEX
+  drafts validate, and a DISCLOSURE session's persisted CSAF/OpenVEX/CVE drafts
+  are present and validate (the CVE draft via its TOLERANT validator, which
+  accepts the intentional non-submittable cveId sentinel but still catches
+  corrupt JSON or a malformed structure).
 
 A ``check`` that raises counts as a failed check (Constitution VII), so the whole
 run is wrapped and any exception becomes a failure rather than a crash.
@@ -14,8 +19,12 @@ run is wrapped and any exception becomes a failure rather than a crash.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
+from .export.csaf import finding_to_csaf, validate_csaf
+from .export.cve import validate_cve_draft
+from .export.openvex import finding_to_openvex, validate_openvex
 from .export.osv import finding_to_osv, validate_osv
 from .schema import (
     Coverage,
@@ -24,6 +33,7 @@ from .schema import (
     Methodology,
     Project,
     Session,
+    SessionType,
 )
 from .store import Store
 
@@ -54,6 +64,9 @@ def run_check(store: Store) -> CheckReport:
         _check_orphans(parsed, report)
         _check_lifecycle_at_rest(parsed["finding"], store, report)
         _check_osv(parsed["finding"], report)
+        _check_csaf(parsed["finding"], report)
+        _check_openvex(parsed["finding"], report)
+        _check_disclosure_drafts(store, report)
     except Exception as exc:  # a check that raises is a failed check
         report.fail(f"check raised: {exc!r}")
     return report
@@ -146,3 +159,70 @@ def _check_osv(findings: list[Finding], report: CheckReport) -> None:
         errors = validate_osv(finding_to_osv(finding))
         for err in errors:
             report.fail(f"finding {finding.id!r} OSV non-conformance: {err}")
+
+
+def _check_csaf(findings: list[Finding], report: CheckReport) -> None:
+    for finding in findings:
+        errors = validate_csaf(finding_to_csaf(finding))
+        for err in errors:
+            report.fail(f"finding {finding.id!r} CSAF non-conformance: {err}")
+
+
+def _check_openvex(findings: list[Finding], report: CheckReport) -> None:
+    for finding in findings:
+        errors = validate_openvex(finding_to_openvex(finding))
+        for err in errors:
+            report.fail(f"finding {finding.id!r} OpenVEX non-conformance: {err}")
+
+
+# Every artifact a successful DISCLOSURE session writes. All FOUR must exist (they
+# are the human-review set). The three JSON drafts are additionally parsed and
+# validated — the CVE draft via its TOLERANT validator (which accepts the
+# intentional non-submittable cveId sentinel but still catches corrupt JSON or a
+# malformed structure). The advisory is Markdown, so it is existence-checked only.
+_DISCLOSURE_ARTIFACTS = (
+    "disclosure-advisory.md",
+    "disclosure-csaf.json",
+    "disclosure-openvex.json",
+    "disclosure-cve-draft.json",
+)
+_DISCLOSURE_SCHEMA_DRAFTS = {
+    "disclosure-csaf.json": validate_csaf,
+    "disclosure-openvex.json": validate_openvex,
+    "disclosure-cve-draft.json": validate_cve_draft,
+}
+
+
+def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
+    """Validate the PERSISTED disclosure drafts, not just a re-derivation.
+
+    A DISCLOSURE session writes four ``detail/<session>/disclosure-*`` artifacts —
+    the durable set a human reviews. A session that DREW drafts is identified by
+    the record-level signal ``findings_touched`` (only a successful draft sets it;
+    every refusal leaves it empty). For such a session ALL four artifacts must
+    exist (a missing one fails the gate), and the two JSON drafts must additionally
+    be schema-conformant. A refused session is skipped.
+    """
+    for session in store.list_sessions():
+        if session.type is not SessionType.disclosure:
+            continue
+        if not session.findings_touched:
+            continue  # a refused disclosure session drafts nothing
+        for name in _DISCLOSURE_ARTIFACTS:
+            ref = f"detail/{session.id}/{name}"
+            content = store.read_detail(ref)
+            if content is None:
+                report.fail(
+                    f"disclosure session {session.id!r} is missing expected draft {name!r}"
+                )
+                continue
+            validate = _DISCLOSURE_SCHEMA_DRAFTS.get(name)
+            if validate is None:
+                continue  # non-schema artifact (advisory / CVE draft): existence only
+            try:
+                doc = json.loads(content)
+            except json.JSONDecodeError as exc:
+                report.fail(f"disclosure draft {ref!r} is not valid JSON: {exc}")
+                continue
+            for err in validate(doc):
+                report.fail(f"disclosure draft {ref!r} non-conformance: {err}")
