@@ -214,13 +214,14 @@ def finding_to_cve_draft(finding: "Finding") -> dict:
                 }
             ]
 
-    # references is required (minItems 1). Use the first finding reference; fall
-    # back to a stable placeholder URL if the finding has none.
-    if finding.references:
-        ref_url = finding.references[0].url
-    else:
-        ref_url = f"https://deepthought.invalid/finding/{osv_id_for(finding.id)}"
-    cna["references"] = [{"url": ref_url, "tags": ["vdb-entry"]}]
+    # references is required (minItems 1) and each url must be non-empty. Carry
+    # EVERY non-empty finding reference url (so a later advisory/fix link is not
+    # dropped and an empty first url does not emit an invalid ""), falling back to
+    # a stable placeholder only when the finding has no usable url at all.
+    ref_urls = [r.url for r in finding.references if r.url and r.url.strip()]
+    if not ref_urls:
+        ref_urls = [f"https://deepthought.invalid/finding/{osv_id_for(finding.id)}"]
+    cna["references"] = [{"url": url, "tags": ["vdb-entry"]} for url in ref_urls]
 
     return {
         "dataType": "CVE_RECORD",

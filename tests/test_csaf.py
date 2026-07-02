@@ -207,6 +207,16 @@ def test_csaf_preserves_all_references():
     assert validate_csaf(doc) == [], validate_csaf(doc)
 
 
+def test_csaf_skips_empty_reference_urls():
+    """An empty reference url is skipped rather than emitted as an invalid ""; a
+    finding whose only reference has an empty url still validates."""
+    from deepthought.schema import Reference
+
+    doc = finding_to_csaf(make_finding(references=[Reference(type="x", url="")]))
+    assert "references" not in doc["vulnerabilities"][0]
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
 def test_csaf_with_a_cvss_v2_score_validates_without_raising():
     """validate_csaf is hermetic and total: an external CSAF carrying a CVSS v2
     score resolves the v2 ref to a local stub and returns a list, never raising an

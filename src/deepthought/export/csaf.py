@@ -307,6 +307,10 @@ def _references(finding: "Finding") -> list[dict]:
     """
     refs: list[dict] = []
     for ref in finding.references:
+        # Skip an empty url: a CSAF reference url must be a real URI, and an empty
+        # one carries no disclosure link while making the draft non-conformant.
+        if not (ref.url and ref.url.strip()):
+            continue
         category = "self" if ref.type in _SELF_REF_TYPES else "external"
         refs.append({"category": category, "summary": ref.type, "url": ref.url})
     return refs

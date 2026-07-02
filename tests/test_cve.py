@@ -201,6 +201,30 @@ def test_cve_non_v3_vector_omits_metrics():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_references_skip_empty_urls_and_never_emit_blank():
+    """An empty reference url must not become an invalid "" in the draft, and
+    valid later urls are preserved; with no usable url a placeholder is used."""
+    from deepthought.schema import Reference
+
+    # An empty first url + a real advisory url later: the empty is skipped.
+    draft = finding_to_cve_draft(
+        make_finding(
+            references=[Reference(type="detection", url=""),
+                        Reference(type="advisory", url="https://example.test/a")]
+        )
+    )
+    urls = {r["url"] for r in draft["containers"]["cna"]["references"]}
+    assert "" not in urls
+    assert "https://example.test/a" in urls
+    assert validate_cve_draft(draft) == []
+
+    # No usable url at all -> a single non-empty placeholder, still valid.
+    draft2 = finding_to_cve_draft(make_finding(references=[Reference(type="x", url="")]))
+    refs2 = draft2["containers"]["cna"]["references"]
+    assert refs2 and all(r["url"].strip() for r in refs2)
+    assert validate_cve_draft(draft2) == []
+
+
 def test_cve_preserves_all_affected_packages_and_versions():
     """Every affected package AND every recorded version is preserved — the draft
     must not collapse the disclosure's scope to the first package/version."""
