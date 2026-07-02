@@ -143,3 +143,12 @@ def test_validate_rejects_malformed_products():
     doc = json.loads(json.dumps(base))
     doc["statements"][0]["products"] = [{}]  # object without @id
     assert any("@id" in e for e in validate_openvex(doc))
+
+
+def test_validate_does_not_crash_on_non_list_statements():
+    """A truthy-but-non-list statements value must be REPORTED, not raise — the
+    validator's list[str] contract holds for any input."""
+    errors = validate_openvex({"@context": "x", "@id": "y", "author": "z",
+                               "timestamp": "t", "version": 1, "statements": 1})
+    assert isinstance(errors, list)
+    assert any("statements" in e for e in errors)

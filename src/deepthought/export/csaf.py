@@ -136,10 +136,25 @@ def _cvss3_schema(minor: str) -> dict:
     }
 
 
+# A permissive draft-07 stub. Used for the CVSS v2 branch: this exporter never
+# emits a cvss_v2 score, but ``validate_csaf`` is public and may be handed an
+# externally-built CSAF that does — resolving the ref to a permissive stub keeps
+# the validator hermetic and returning a ``list[str]`` instead of raising an
+# unresolved-reference error.
+_PERMISSIVE_STUB = {"$schema": "http://json-schema.org/draft-07/schema#"}
+
+
 @lru_cache(maxsize=1)
 def _cvss_registry() -> Registry:
-    """A referencing Registry that resolves the CSAF CVSS refs locally."""
+    """A referencing Registry that resolves every CSAF CVSS ref locally.
+
+    The bundled CSAF schema references FIRST.org CVSS v2.0/v3.0/v3.1 by URL.
+    v3.0/v3.1 get faithful in-code schemas (the versions this exporter emits);
+    v2.0 gets a permissive stub so an external CSAF with a v2 score validates
+    (its other fields strictly) rather than raising.
+    """
     resources_by_uri = {
+        "https://www.first.org/cvss/cvss-v2.0.json": _PERMISSIVE_STUB,
         "https://www.first.org/cvss/cvss-v3.0.json": _cvss3_schema("0"),
         "https://www.first.org/cvss/cvss-v3.1.json": _cvss3_schema("1"),
     }

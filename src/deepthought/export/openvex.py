@@ -127,8 +127,10 @@ def validate_openvex(doc: dict) -> list[str]:
             errors.append(f"{field}: is a required document field")
 
     statements = doc.get("statements")
-    if not statements:
-        errors.append("statements: must contain at least one statement")
+    if not isinstance(statements, list) or not statements:
+        # Guard the type BEFORE iterating: a truthy-but-non-list value (e.g. 1)
+        # must be reported, never crash the validator's list[str] contract.
+        errors.append("statements: must be a non-empty list")
     else:
         for i, stmt in enumerate(statements):
             base = f"statements/{i}"

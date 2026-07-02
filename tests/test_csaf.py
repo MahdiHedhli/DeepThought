@@ -184,6 +184,21 @@ def test_csaf_rejects_an_incomplete_cvss_vector():
     assert validate_csaf(doc) != []
 
 
+def test_csaf_with_a_cvss_v2_score_validates_without_raising():
+    """validate_csaf is hermetic and total: an external CSAF carrying a CVSS v2
+    score resolves the v2 ref to a local stub and returns a list, never raising an
+    unresolved-reference error."""
+    doc = finding_to_csaf(make_finding())
+    doc["vulnerabilities"][0]["scores"] = [
+        {
+            "cvss_v2": {"version": "2.0", "vectorString": "AV:N/AC:L/Au:N/C:C/I:C/A:C", "baseScore": 10.0},
+            "products": ["CSAFPID-0001"],
+        }
+    ]
+    result = validate_csaf(doc)
+    assert isinstance(result, list)  # resolved locally, did not raise
+
+
 def test_csaf_no_affected_still_defines_the_referenced_product():
     """A finding with no affected packages still emits a product_tree defining
     the CSAFPID that product_status references — no dangling product id, and the
