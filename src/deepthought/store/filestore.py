@@ -8,7 +8,6 @@ repository alone. The lifecycle guard is enforced here, at the boundary.
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
@@ -20,22 +19,16 @@ from ..schema import (
     Project,
     Session,
 )
-from ..schema.common import _SAFE_ID_PATTERN, iso_z, utcnow
+from ..schema.common import is_record_id, iso_z, utcnow
 
 # A record id is a single safe path segment (findings/<id>.md). Record MODELS
 # enforce this on construction, but the ``get_*`` lookups take a RAW string
 # argument that is never model-validated — so an id with ``..`` or a separator
 # would traverse out of the store on READ. This guard refuses such an argument
-# (the lookup returns "not found") — defence in depth at the path boundary.
-_SAFE_ID_RE = re.compile(_SAFE_ID_PATTERN)
-
-
-def _safe_id(ident: str) -> bool:
-    # ``fullmatch`` (not ``match``) so the whole string must conform: a ``$``
-    # anchor in ``re`` also matches just before a trailing ``\n``, so ``match``
-    # would wrongly accept ``F-0007\n`` — a control character the record MODEL
-    # rejects. ``fullmatch`` keeps the raw-lookup guard consistent with the model.
-    return isinstance(ident, str) and bool(_SAFE_ID_RE.fullmatch(ident))
+# (the lookup returns "not found") — defence in depth at the path boundary. It
+# shares ``is_record_id`` with the schema so the guard and the model agree
+# exactly (including rejecting a trailing newline).
+_safe_id = is_record_id
 from ..schema.finding import TransitionLogEntry
 from .base import (
     BACKWARD_EDGES,

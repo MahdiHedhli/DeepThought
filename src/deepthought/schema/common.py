@@ -29,6 +29,19 @@ _FRONT_MATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.DOTALL)
 # ``S-2026-07-02-0001`` — all conform.)
 _SAFE_ID_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$"
 RecordId = Annotated[str, StringConstraints(pattern=_SAFE_ID_PATTERN)]
+_SAFE_ID_RE = re.compile(_SAFE_ID_PATTERN)
+
+
+def is_record_id(value: object) -> bool:
+    """Whether ``value`` is a string that is a valid ``RecordId``.
+
+    A cheap predicate for guarding a RAW, user-supplied id BEFORE it is assigned
+    to a ``RecordId`` field — so an unsafe id (``../x``, ``org/repo``, a trailing
+    newline) becomes a controlled refusal instead of an unhandled ValidationError.
+    Uses ``fullmatch`` so a trailing ``\\n`` (which ``$`` would allow) is rejected,
+    keeping this in agreement with the model constraint.
+    """
+    return isinstance(value, str) and _SAFE_ID_RE.fullmatch(value) is not None
 
 # The longest string _SAFE_ID_PATTERN accepts (1 + 126 + 1). A derived id is
 # bounded to this so it stays a valid filename and a valid RecordId.

@@ -100,6 +100,23 @@ def test_derived_id_collision_is_refused_not_silently_overwritten(state_dir):
     assert store.get_project("repo").local_path == "/repos/_repo"  # first survived
 
 
+def test_explicit_unsafe_project_id_is_refused_not_crashed(state_dir):
+    """An explicit --project-id that is not a safe record id must produce a clean
+    refusal, not a bare ValidationError from constructing the Project record."""
+    store = FileStore(state_dir)
+    for bad in ("org/repo", "../x", "a b", "-lead"):
+        record = run_session(
+            store, GATE,
+            NewProjectSession(
+                name="n", source_type="open_source", local_path="/repos/ok",
+                authorization_basis="permissive_oss", scope_allowlist=["app"],
+                project_id=bad, verify_url=_resolves,
+            ),
+        )
+        assert "invalid project id" in record.body.lower(), bad
+        assert store.list_projects() == [], bad
+
+
 def test_refuses_unresolvable_git_url(state_dir):
     store = FileStore(state_dir)
     session = NewProjectSession(

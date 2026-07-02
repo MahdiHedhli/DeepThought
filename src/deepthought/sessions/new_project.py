@@ -21,7 +21,7 @@ from ..schema import (
     SessionType,
     SourceType,
 )
-from ..schema.common import safe_record_id
+from ..schema.common import is_record_id, safe_record_id
 from ..store import DuplicateProjectError, Store
 
 
@@ -111,6 +111,16 @@ class NewProjectSession(BaseSession):
         )
 
     def run(self, store: Store, session_id: str) -> SessionOutcome:
+        # An explicit project id (CLI --project-id) is used verbatim as Project.id
+        # (a RecordId); reject an unsafe value cleanly rather than let Project(...)
+        # raise a bare ValidationError below. A derived id is always normalised
+        # (safe_record_id), so only the explicit override needs this guard.
+        if self.explicit_id is not None and not is_record_id(self.explicit_id):
+            return SessionOutcome(
+                summary=f"Refused: invalid project id {self.explicit_id!r}.",
+                next_steps="Provide a valid project id — a single safe path segment.",
+            )
+
         # Resolve to one project on a repeat — never create a duplicate.
         existing = store.resolve_project(
             git_url=self.git_url, local_path=self.local_path
