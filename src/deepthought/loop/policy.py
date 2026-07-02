@@ -90,7 +90,7 @@ def select_next_action(
     drafted = {
         fid
         for s in sessions
-        if s.type is SessionType.disclosure
+        if s.type is SessionType.disclosure and completed(s)
         for fid in s.findings_touched
     }
     for f in verified:

@@ -159,6 +159,21 @@ def test_verified_finding_yields_sibling_hunt_then_disclosure(state_dir):
     assert select_next_action(store, p, done=done) is None
 
 
+def test_uncompleted_disclosure_does_not_block_a_redraft(state_dir):
+    """A disclosure record with findings_touched that did NOT complete cleanly
+    (interrupted) must not permanently mark the finding drafted — the drafted
+    signal uses the same completed() predicate as every other rung."""
+    store = FileStore(state_dir)
+    p = _proj(store)
+    _past_recon(store, p)
+    store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
+    _add_session(store, "disclosure", "S-9", findings_touched=["F-1"],
+                 close_state="interrupted")  # proceeded but NOT clean
+    # with the hunt already done, disclosure for F-1 is re-proposed (not skipped)
+    a = select_next_action(store, p, done={("sibling_hunt", "F-1")})
+    assert a.kind is ActionKind.disclosure and a.finding == "F-1"
+
+
 def test_candidate_yields_a_verify_escalation(state_dir):
     store = FileStore(state_dir)
     p = _proj(store)

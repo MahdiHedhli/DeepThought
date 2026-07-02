@@ -32,11 +32,22 @@ from .policy import select_next_action
 
 
 def generate_loop_run_id(store: Store, now: datetime) -> str:
-    """A stable, human-readable loop-run id: ``L-YYYY-MM-DD-NNNN``."""
+    """A stable, human-readable loop-run id: ``L-YYYY-MM-DD-NNNN``.
+
+    Uses the MAX existing sequence + 1 (not the count), so a deleted run leaves a
+    gap rather than making the next id collide with — and silently overwrite — an
+    existing higher-numbered run.
+    """
     date = now.strftime("%Y-%m-%d")
     prefix = f"L-{date}-"
-    used = [r.id for r in store.list_loop_runs() if r.id.startswith(prefix)]
-    return f"{prefix}{len(used) + 1:04d}"
+    max_seq = 0
+    for run in store.list_loop_runs():
+        if run.id.startswith(prefix):
+            try:
+                max_seq = max(max_seq, int(run.id[len(prefix):]))
+            except ValueError:
+                pass
+    return f"{prefix}{max_seq + 1:04d}"
 
 
 # The loop's runnable repertoire. NEW PROJECT (scope) and verify (execution) are

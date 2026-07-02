@@ -119,6 +119,30 @@ def test_escalation_only_run_is_regated_when_authorization_is_lost(state_dir, tm
     assert run.sessions_run == 0
 
 
+def test_loop_run_id_does_not_collide_after_a_deleted_run(state_dir):
+    """generate_loop_run_id uses the max sequence + 1, so deleting a run leaves a
+    gap instead of colliding with (and overwriting) an existing higher run."""
+    from datetime import datetime, timezone
+
+    from deepthought.loop.driver import generate_loop_run_id
+    from deepthought.schema.loop import LoopRun
+
+    store = FileStore(state_dir)
+    now = datetime(2026, 7, 2, tzinfo=timezone.utc)
+
+    def save(seq):
+        store.save_loop_run(LoopRun(
+            id=f"L-2026-07-02-{seq:04d}", project="p", started="t",
+            stop_reason="fixed_point", budget=LoopBudget(max_sessions=1),
+            body="## Summary\n\nx\n\n## Next steps\n\ny"))
+
+    save(1)
+    save(2)
+    (state_dir / "loop" / "L-2026-07-02-0001.md").unlink()  # a gap
+    # len()+1 would return 0002 and overwrite the existing run; max+1 returns 0003
+    assert generate_loop_run_id(store, now) == "L-2026-07-02-0003"
+
+
 def test_wall_clock_budget_stops_the_loop(state_dir, tmp_path):
     """--max-seconds is a REAL bound: elapsed wall time is measured in the driver,
     so it stops the loop even though stub sessions report a zero context_cost."""
