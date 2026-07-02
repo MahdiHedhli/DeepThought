@@ -13,7 +13,7 @@ from deepthought.schema import Session
 from deepthought.schema.loop import ActionKind
 from deepthought.store import FileStore
 
-from .conftest import make_finding, make_project
+from .conftest import make_coverage, make_finding, make_project
 
 
 def _proj(store):
@@ -25,6 +25,14 @@ def _proj(store):
 def _add_session(store, stype, sid, **kw):
     store.save_session(Session(id=sid, type=stype, project="php-src",
                                started="2026-07-02T00:00:00Z", **kw))
+
+
+def _past_recon(store):
+    """Advance the store past the recon rungs: a status baseline, real MAP
+    progress (Coverage exists), and a completed DISCOVER."""
+    _add_session(store, "status", "S-1")
+    store.save_coverage(make_coverage())     # MAP made progress
+    _add_session(store, "discover", "S-3")   # DISCOVER done
 
 
 def test_fresh_project_starts_with_status(state_dir):
@@ -40,18 +48,31 @@ def test_ladder_advances_status_then_map_then_discover(state_dir):
     p = _proj(store)
     _add_session(store, "status", "S-1")
     assert select_next_action(store, p).kind is ActionKind.map
-    _add_session(store, "map", "S-2")
+    # MAP is "done" only once it records Coverage — not by the session alone.
+    store.save_coverage(make_coverage())
     assert select_next_action(store, p).kind is ActionKind.discover
     _add_session(store, "discover", "S-3")
     # nothing found -> fixed point
     assert select_next_action(store, p) is None
 
 
+def test_map_reruns_when_it_produced_no_coverage(state_dir):
+    """A MAP that recorded no Coverage (e.g. a project with no checkout yet) is not
+    'done' — the loop re-proposes it so it can recover once the operator adds the
+    checkout its own next-steps ask for."""
+    store = FileStore(state_dir)
+    p = _proj(store)
+    _add_session(store, "status", "S-1")
+    _add_session(store, "map", "S-2")  # a MAP session that recorded NO coverage
+    assert select_next_action(store, p).kind is ActionKind.map  # re-proposed
+    store.save_coverage(make_coverage())                        # now MAP made progress
+    assert select_next_action(store, p).kind is ActionKind.discover
+
+
 def test_verified_finding_yields_sibling_hunt_then_disclosure(state_dir):
     store = FileStore(state_dir)
     p = _proj(store)
-    for t, s in (("status", "S-1"), ("map", "S-2"), ("discover", "S-3")):
-        _add_session(store, t, s)
+    _past_recon(store)
     store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
 
     a = select_next_action(store, p)
@@ -68,8 +89,7 @@ def test_verified_finding_yields_sibling_hunt_then_disclosure(state_dir):
 def test_candidate_yields_a_verify_escalation(state_dir):
     store = FileStore(state_dir)
     p = _proj(store)
-    for t, s in (("status", "S-1"), ("map", "S-2"), ("discover", "S-3")):
-        _add_session(store, t, s)
+    _past_recon(store)
     store.save_finding(make_finding(id="F-9", project="php-src", status="candidate"))
     a = select_next_action(store, p)
     assert a.kind is ActionKind.verify_escalation
@@ -82,8 +102,7 @@ def test_disclosure_precedes_verify_escalation(state_dir):
     escalation for candidates."""
     store = FileStore(state_dir)
     p = _proj(store)
-    for t, s in (("status", "S-1"), ("map", "S-2"), ("discover", "S-3")):
-        _add_session(store, t, s)
+    _past_recon(store)
     store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
     store.save_finding(make_finding(id="F-9", project="php-src", status="candidate"))
     done = {("sibling_hunt", "F-1")}

@@ -78,12 +78,18 @@ def test_token_budget_stops_the_loop(state_dir, tmp_path):
 
 
 def test_missing_project_is_refused_without_running(state_dir):
+    from deepthought.check import run_check
+
     store = FileStore(state_dir)
     run = run_loop(store, GATE, "does-not-exist", LoopBudget(max_sessions=5))
     assert run.stop_reason is StopReason.gate_refused
     assert run.sessions_run == 0
     assert run.trace == []
     assert run.has_next_steps()
+    # a typo'd project id must NOT persist an orphaned LoopRun — nothing durable is
+    # written, so `check` stays green (no loop run referencing a missing project).
+    assert store.list_loop_runs() == []
+    assert run_check(store).ok, run_check(store).errors
 
 
 def test_unauthorized_project_stops_at_the_gate(state_dir, tmp_path):

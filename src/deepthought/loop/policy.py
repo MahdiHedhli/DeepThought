@@ -34,13 +34,21 @@ def select_next_action(
     if SessionType.status not in types_run and fresh(ActionKind.status, pid):
         return LoopAction(kind=ActionKind.status, project=pid)
 
-    # 2. MAP — expand the mapped surface, once per project. Needs an in-scope
-    #    surface to map (an empty allowlist means nothing is in scope).
-    if project.scope_allowlist and SessionType.map not in types_run and fresh(ActionKind.map, pid):
+    # Progress, not mere session existence, is the completion signal for the recon
+    # rungs: a MAP that produced no Coverage (e.g. a project with no checkout yet)
+    # is NOT "done" — otherwise the loop could never recover once the operator adds
+    # the local_path its own MAP next-steps ask for. The in-run `done` set still
+    # bounds it to one MAP/DISCOVER per run.
+    has_coverage = bool(store.list_coverage(pid))
+
+    # 2. MAP — map the in-scope surface. Re-runnable across invocations until it
+    #    actually records Coverage (an empty allowlist means nothing is in scope).
+    if project.scope_allowlist and not has_coverage and fresh(ActionKind.map, pid):
         return LoopAction(kind=ActionKind.map, project=pid)
 
-    # 3. DISCOVER — produce candidates over the mapped surface, once per project.
-    if SessionType.map in types_run and SessionType.discover not in types_run and fresh(ActionKind.discover, pid):
+    # 3. DISCOVER — produce candidates over the MAPPED surface (gated on Coverage,
+    #    so it never runs in the degenerate pre-map state), once per project.
+    if has_coverage and SessionType.discover not in types_run and fresh(ActionKind.discover, pid):
         return LoopAction(kind=ActionKind.discover, project=pid)
 
     findings = store.list_findings(pid)

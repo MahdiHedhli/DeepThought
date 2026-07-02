@@ -90,7 +90,11 @@ def run_loop(
     now = clock()
     project = store.get_project(project_id)
     if project is None:
-        return _persist(
+        # A loop on a non-existent project is a no-op refusal — there is nothing to
+        # durably audit, and persisting a LoopRun whose `project` does not resolve
+        # would leave the store failing `check` (orphan). Return it UNPERSISTED so a
+        # typo'd id is a clean, stateless refusal.
+        return _build_run(
             store, safe_record_id(project_id, fallback="unknown"), budget, now, clock,
             stop_reason=StopReason.gate_refused, spent=LoopSpend(), trace=[],
             outstanding=[
@@ -150,13 +154,15 @@ def run_loop(
                 f"required (Article V); Deep Thought drafts only, never transmits."
             )
 
-    return _persist(store, project.id, budget, now, clock, stop_reason, spent,
-                    trace, outstanding, planned)
+    run = _build_run(store, project.id, budget, now, clock, stop_reason, spent,
+                     trace, outstanding, planned)
+    store.save_loop_run(run)   # a real project ran — persist the durable audit
+    return run
 
 
-def _persist(store, project_ref, budget, now, clock, stop_reason, spent, trace,
-             outstanding, planned) -> LoopRun:
-    run = LoopRun(
+def _build_run(store, project_ref, budget, now, clock, stop_reason, spent, trace,
+               outstanding, planned) -> LoopRun:
+    return LoopRun(
         id=generate_loop_run_id(store, now),
         project=project_ref,
         started=iso_z(now),
@@ -169,5 +175,3 @@ def _persist(store, project_ref, budget, now, clock, stop_reason, spent, trace,
         outstanding_actions=outstanding,
         body=_teach_back(stop_reason, spent.sessions, outstanding, planned),
     )
-    store.save_loop_run(run)
-    return run
