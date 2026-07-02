@@ -359,17 +359,21 @@ class FileStore(Store):
           re-enter another store subtree (``detail/../projects/<id>.md``). This
           keeps the candidate -> verified evidence gate pointed at real detail
           artifacts only.
-        * PHYSICAL — the RESOLVED target must stay under the RESOLVED store root,
-          so a symlinked ``detail`` directory (or any symlink) can never make a
-          ref read outside the store.
+        * PHYSICAL — the RESOLVED target must stay under the CANONICAL detail dir:
+          the resolved store root joined with ``detail`` WITHOUT following a
+          symlink on that component. This closes the whole symlink class at once —
+          a ``detail`` dir symlinked anywhere (outside the store, an in-store
+          sibling like ``projects``, or the root via ``.``) resolves the target
+          outside the canonical anchor, as does a symlink *inside* detail that
+          re-enters a sibling subtree (``detail/x -> ../projects``).
         """
         rel = ref[len("state/") :] if ref.startswith("state/") else ref
         parts = PurePosixPath(rel).parts
         if not parts or parts[0] != "detail" or ".." in parts:
             return None
-        root = self.root.resolve()
+        detail_base = self.root.resolve() / "detail"
         target = (self.root / rel).resolve()
-        if target != root and root not in target.parents:
+        if target != detail_base and detail_base not in target.parents:
             return None
         return target
 

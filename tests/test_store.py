@@ -320,21 +320,50 @@ def test_detail_access_stays_within_the_detail_directory(state_dir):
 
 
 def test_detail_access_rejects_a_symlinked_detail_dir(state_dir, tmp_path):
-    """If ``detail`` is a SYMLINK out of the store, refs must not resolve through it
-    — detail access stays under the RESOLVED store root, not the symlink target.
-    (Anchoring only to ``root/detail`` would follow the symlink and leak.)"""
+    """If ``detail`` itself is a SYMLINK — to anywhere: outside the store, OR an
+    in-store sibling subtree (``projects``), OR the store root (``.``) — refs must
+    not resolve through it. Detail access is anchored to the CANONICAL detail dir
+    (resolved-root/detail), so a relocated detail dir always lands outside it."""
     import os
 
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "secret.txt").write_text("EXFIL")
-    root = state_dir / "linked"
-    for sub in ("projects", "findings", "sessions", "coverage", "methodology"):
-        (root / sub).mkdir(parents=True)
-    os.symlink(outside, root / "detail")  # detail -> outside the store
-    store = FileStore(root)
-    assert store.read_detail("detail/secret.txt") is None
-    assert store.detail_exists("detail/secret.txt") is False
+
+    def _fresh_store(link_target):
+        root = state_dir / f"linked-{abs(hash(str(link_target)))}"
+        for sub in ("projects", "findings", "sessions", "coverage", "methodology"):
+            (root / sub).mkdir(parents=True)
+        (root / "projects" / "secret.md").write_text("SENSITIVE PROJECT RECORD")
+        os.symlink(link_target, root / "detail")
+        return FileStore(root)
+
+    # detail -> outside the store
+    s_out = _fresh_store(outside)
+    assert s_out.read_detail("detail/secret.txt") is None
+    assert s_out.detail_exists("detail/secret.txt") is False
+    # detail -> an in-store sibling subtree
+    s_sib = _fresh_store("projects")
+    assert s_sib.read_detail("detail/secret.md") is None
+    assert s_sib.detail_exists("detail/secret.md") is False
+    # detail -> the store root itself
+    s_dot = _fresh_store(".")
+    assert s_dot.read_detail("detail/projects/secret.md") is None
+    assert s_dot.detail_exists("detail/projects/secret.md") is False
+
+
+def test_detail_access_rejects_a_symlink_reentering_another_subtree(state_dir):
+    """A symlink INSIDE detail/ pointing at a sibling store subtree
+    (``detail/x -> ../projects``) must not let a ref re-enter it: the resolved
+    target has to stay physically under the resolved detail/ directory, not merely
+    under the store root (which a sibling subtree also satisfies)."""
+    import os
+
+    store = FileStore(state_dir)
+    (state_dir / "projects" / "secret.md").write_text("SENSITIVE PROJECT RECORD")
+    os.symlink("../projects", state_dir / "detail" / "reenter")
+    assert store.read_detail("detail/reenter/secret.md") is None
+    assert store.detail_exists("detail/reenter/secret.md") is False
 
 
 def test_save_project_refuses_same_id_for_a_different_identity(state_dir):
