@@ -48,6 +48,12 @@ class BaseSession(ABC):
 
     type: SessionType
     project_id: str | None = None
+    # The gate the harness is running with, injected by ``run_session`` before
+    # ``run``. A session that sub-gates additional targets (e.g. SIBLING HUNT
+    # gating each sibling project) MUST use this — the SAME gate the harness
+    # applied to the source — so a stricter deployment gate governs every target,
+    # never a hardcoded default. ``None`` outside a harness run.
+    harness_gate: "Gate | None" = None
 
     @abstractmethod
     def build_gate_context(self, store: Store) -> GateContext:
@@ -121,6 +127,9 @@ def run_session(
             next_steps=f"Resolve gate {decision.outcome.value}: {decision.reason}",
         )
     else:
+        # Inject the harness gate so a session that sub-gates further targets
+        # (SIBLING HUNT) applies the SAME gate this harness used on the source.
+        session.harness_gate = gate
         # --- scoped work --- (an exception here leaves the session interrupted)
         try:
             outcome = session.run(store, sid)

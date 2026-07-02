@@ -24,6 +24,7 @@ from .sessions import (
     DiscoverSession,
     MapSession,
     NewProjectSession,
+    SiblingHuntSession,
     StatusSession,
     VerifySession,
 )
@@ -158,6 +159,51 @@ def playbook_discover(
             _store(state),
             HermesUltraCodeGate(),
             DiscoverSession(project, sarif_path=sarif, root=root),
+        )
+    except StoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    _echo_session(record)
+
+
+@playbook_app.command("sibling-hunt")
+def playbook_sibling_hunt(
+    project: str = typer.Option(..., help="Project id the verified finding belongs to."),
+    finding: str = typer.Option(..., help="Verified finding id to hunt siblings of (F-NNNN)."),
+    sibling: list[str] = typer.Option(
+        [],
+        "--sibling",
+        help="A pre-registered sibling project id to also hunt. Repeatable.",
+    ),
+    sarif: Optional[str] = typer.Option(
+        None, "--sarif", help="SARIF file to reason over for sibling instances."
+    ),
+    root: Optional[str] = typer.Option(
+        None, "--root", help="Local checkout for code reasoning; defaults to local_path."
+    ),
+    state: Path = _STATE_OPTION,
+) -> None:
+    """Hunt read-only for same-class variants of a verified finding (SIBLING HUNT, 004).
+
+    Derives a variant signature from the verified finding's typed fields, gates the
+    source project AND each named sibling INDEPENDENTLY, and dispatches one worker
+    per gated-proceed target that writes candidate variant findings; the
+    orchestrator ingests only the typed envelope. Executes no target code,
+    transmits nothing, never creates a project, and never widens scope. A named
+    sibling that is not already registered (with its own authorization basis) is
+    skipped, never created.
+    """
+    try:
+        record = run_session(
+            _store(state),
+            HermesUltraCodeGate(),
+            SiblingHuntSession(
+                project_id=project,
+                finding_id=finding,
+                sibling_project_ids=list(sibling),
+                sarif_path=sarif,
+                root=root,
+            ),
         )
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)
