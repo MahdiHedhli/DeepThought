@@ -6,7 +6,9 @@ Validates state consistency before ``publish``:
 * lifecycle legality — every finding's status satisfies its entry guard,
 * orphan references — no dangling project/finding/session links,
 * duplicate project identity — no two projects share a git_url or local_path,
-* OSV conformance — every finding's OSV validates against the pinned schema.
+* OSV conformance — every finding's OSV validates against the pinned schema,
+* disclosure-draft conformance — every finding's CSAF and OpenVEX drafts
+  validate (the CVE draft is intentionally non-submittable and is not checked).
 
 A ``check`` that raises counts as a failed check (Constitution VII), so the whole
 run is wrapped and any exception becomes a failure rather than a crash.
@@ -16,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .export.csaf import finding_to_csaf, validate_csaf
+from .export.openvex import finding_to_openvex, validate_openvex
 from .export.osv import finding_to_osv, validate_osv
 from .schema import (
     Coverage,
@@ -54,6 +58,8 @@ def run_check(store: Store) -> CheckReport:
         _check_orphans(parsed, report)
         _check_lifecycle_at_rest(parsed["finding"], store, report)
         _check_osv(parsed["finding"], report)
+        _check_csaf(parsed["finding"], report)
+        _check_openvex(parsed["finding"], report)
     except Exception as exc:  # a check that raises is a failed check
         report.fail(f"check raised: {exc!r}")
     return report
@@ -146,3 +152,17 @@ def _check_osv(findings: list[Finding], report: CheckReport) -> None:
         errors = validate_osv(finding_to_osv(finding))
         for err in errors:
             report.fail(f"finding {finding.id!r} OSV non-conformance: {err}")
+
+
+def _check_csaf(findings: list[Finding], report: CheckReport) -> None:
+    for finding in findings:
+        errors = validate_csaf(finding_to_csaf(finding))
+        for err in errors:
+            report.fail(f"finding {finding.id!r} CSAF non-conformance: {err}")
+
+
+def _check_openvex(findings: list[Finding], report: CheckReport) -> None:
+    for finding in findings:
+        errors = validate_openvex(finding_to_openvex(finding))
+        for err in errors:
+            report.fail(f"finding {finding.id!r} OpenVEX non-conformance: {err}")

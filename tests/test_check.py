@@ -7,6 +7,7 @@ conform. A check that raises is a failed check.
 
 from __future__ import annotations
 
+import deepthought.check as check_mod
 from deepthought.check import run_check
 from deepthought.schema import FindingStatus
 from deepthought.store import FileStore
@@ -108,3 +109,42 @@ def test_disclosed_without_cve_is_illegal_at_rest(state_dir):
     report = run_check(store)
     assert not report.ok
     assert any("disclosed without a cve" in e for e in report.errors)
+
+
+# --- 005: disclosure-draft conformance is part of the gate ------------------
+
+
+def test_passes_validates_csaf_and_openvex(state_dir):
+    """A consistent finding also produces conformant CSAF and OpenVEX drafts, so
+    the gate (which now validates both) stays green."""
+    store = _consistent_store(state_dir)
+    report = run_check(store)
+    assert report.ok, report.errors
+
+
+def test_fails_on_malformed_csaf_draft(state_dir, monkeypatch):
+    store = _consistent_store(state_dir)
+    monkeypatch.setattr(check_mod, "finding_to_csaf", lambda f: {"document": {}})
+    report = run_check(store)
+    assert not report.ok
+    assert any("CSAF non-conformance" in e for e in report.errors)
+
+
+def test_fails_on_malformed_openvex_draft(state_dir, monkeypatch):
+    store = _consistent_store(state_dir)
+    monkeypatch.setattr(check_mod, "finding_to_openvex", lambda f: {"statements": []})
+    report = run_check(store)
+    assert not report.ok
+    assert any("OpenVEX non-conformance" in e for e in report.errors)
+
+
+def test_raising_disclosure_exporter_is_a_failed_check_not_a_crash(state_dir, monkeypatch):
+    store = _consistent_store(state_dir)
+
+    def _boom(_f):
+        raise RuntimeError("exporter exploded")
+
+    monkeypatch.setattr(check_mod, "finding_to_csaf", _boom)
+    report = run_check(store)
+    assert not report.ok
+    assert any("check raised" in e for e in report.errors)

@@ -17,10 +17,16 @@ from typing import Optional
 import typer
 
 from .check import run_check
+from .export.advisory import finding_to_advisory
+from .export.csaf import finding_to_csaf
+from .export.cve import finding_to_cve_draft
+from .export.openvex import finding_to_openvex
 from .export.osv import finding_to_osv, osv_id_for
 from .protocol import HermesUltraCodeGate, run_session
 from .sandbox import NoopSandbox, SandboxError, SandboxPolicy, SandboxResult, SandboxSpec
+from .schema import FindingStatus
 from .sessions import (
+    DisclosureSession,
     DiscoverSession,
     MapSession,
     NewProjectSession,
@@ -336,6 +342,38 @@ def playbook_verify(
         )
 
 
+@playbook_app.command("disclose")
+def playbook_disclose(
+    project: str = typer.Option(..., help="Project id the finding belongs to."),
+    finding: str = typer.Option(..., help="VERIFIED finding id to draft (F-NNNN)."),
+    state: Path = _STATE_OPTION,
+) -> None:
+    """Draft disclosure artifacts for a verified finding (DISCLOSURE session, 005).
+
+    DRAFT-ONLY (Constitution Article V). From a VERIFIED finding this drafts four
+    LOCAL artifacts — an advisory (Markdown), a CVE JSON 5.1 draft, a CSAF 2.0
+    advisory, and an OpenVEX statement — and writes them as session detail.
+
+    It transmits NOTHING, never advances the finding to ``disclosed``, and never
+    fabricates a CVE or advisory reference. Sending is a human action performed
+    outside this tool; Deep Thought drafts only.
+    """
+    session = DisclosureSession(project_id=project, finding_id=finding)
+    try:
+        record = run_session(_store(state), HermesUltraCodeGate(), session)
+    except StoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    _echo_session(record)
+    typer.echo("")
+    typer.echo(
+        "HUMAN GATE: nothing was transmitted, no CVE was assigned, and the finding "
+        "is unchanged (still verified). Coordinated disclosure requires a human to "
+        "review the drafts and send. Deep Thought drafts local artifacts only."
+    )
+
+
 @playbook_app.command("findings")
 def playbook_findings(
     project: Optional[str] = typer.Option(None, help="Filter by project id."),
@@ -365,29 +403,90 @@ def check(state: Path = _STATE_OPTION) -> None:
 
 
 # --- publish -------------------------------------------------------------
+# The finding record (OSV) is emitted for every finding. Disclosure formats are
+# meaningful only once a finding is at least verified, so they are status-filtered.
+_PUBLISH_FORMATS = ("osv", "csaf", "openvex", "cve-draft", "advisory")
+_DISCLOSURE_STATUSES = frozenset(
+    {FindingStatus.verified, FindingStatus.disclosed, FindingStatus.patched}
+)
+
+
+def _write_format(fmt: str, finding, dest: Path) -> Path:
+    """Emit ONE finding in ONE format as a LOCAL artifact; return the path."""
+    stem = osv_id_for(finding.id)
+    if fmt == "advisory":
+        path = dest / f"{stem}.md"
+        path.write_text(finding_to_advisory(finding) + "\n", encoding="utf-8")
+        return path
+    builder = {
+        "osv": finding_to_osv,
+        "csaf": finding_to_csaf,
+        "openvex": finding_to_openvex,
+        "cve-draft": finding_to_cve_draft,
+    }[fmt]
+    path = dest / f"{stem}.json"
+    path.write_text(
+        json.dumps(builder(finding), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return path
+
+
 @app.command("publish")
 def publish(
     out: Path = typer.Option("out", "--out", help="Local artifact directory."),
+    format: str = typer.Option(
+        "osv",
+        "--format",
+        help="osv | csaf | openvex | cve-draft | advisory | all. Disclosure "
+        "formats are DRAFT-ONLY and are emitted only for verified/disclosed/"
+        "patched findings.",
+    ),
     state: Path = _STATE_OPTION,
 ) -> None:
-    """Emit prepared local artifacts. Asserts the human gate. Transmits nothing."""
+    """Emit prepared local artifacts. Asserts the human gate. Transmits nothing.
+
+    ``osv`` (the default) writes the finding record to ``out/`` (unchanged). The
+    disclosure formats (``csaf``/``openvex``/``cve-draft``/``advisory``) and
+    ``all`` write each into an ``out/<format>/`` subdirectory. No format transmits;
+    every write is a local artifact under the human gate (Constitution Article V).
+    """
+    if format != "all" and format not in _PUBLISH_FORMATS:
+        typer.echo(
+            f"publish refused: unknown --format {format!r}. Choose one of: "
+            f"{', '.join(_PUBLISH_FORMATS)}, all.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     store = _store(state)
 
-    # check is a required hard gate before publish.
+    # check is a required hard gate before publish (Constitution Article VII).
     report = run_check(store)
     if not report.ok:
         typer.echo("publish refused: check is not green. Run `deepthought check`.", err=True)
         raise typer.Exit(code=1)
 
     out.mkdir(parents=True, exist_ok=True)
-    written = []
-    for finding in store.list_findings():
-        osv = finding_to_osv(finding)
-        path = out / f"{osv_id_for(finding.id)}.json"
-        path.write_text(json.dumps(osv, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        written.append(path)
+    selected = list(_PUBLISH_FORMATS) if format == "all" else [format]
+    findings = store.list_findings()
 
-    typer.echo(f"prepared {len(written)} OSV artifact(s) under {out}/")
+    written: list[Path] = []
+    for fmt in selected:
+        # OSV (the finding record) stays at out/ root for back-compat; disclosure
+        # formats are namespaced so multiple JSON formats never collide on name.
+        dest = out if fmt == "osv" else out / fmt
+        dest.mkdir(parents=True, exist_ok=True)
+        # OSV is emitted for every finding; disclosure formats only for findings
+        # that are at least verified.
+        targets = (
+            findings
+            if fmt == "osv"
+            else [f for f in findings if f.status in _DISCLOSURE_STATUSES]
+        )
+        for finding in targets:
+            written.append(_write_format(fmt, finding, dest))
+
+    typer.echo(f"prepared {len(written)} artifact(s) under {out}/ (format: {format})")
     for path in written:
         typer.echo(f"  - {path}")
     typer.echo("")
