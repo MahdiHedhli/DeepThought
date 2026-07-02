@@ -11,10 +11,18 @@ checkers so validation stays offline and total.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from urllib.parse import urlparse
 
 import jsonschema
+
+# RFC3339 date-time: full date + 'T' + time + a timezone (Z or +/-hh:mm). This is
+# stricter than datetime.fromisoformat, which also accepts a bare date or a
+# timezone-less time — neither of which satisfies JSON Schema's date-time format.
+_RFC3339_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$"
+)
 
 
 def _is_date_time(value: object) -> bool:
@@ -22,9 +30,11 @@ def _is_date_time(value: object) -> bool:
     # the schema's own "type" keyword, so treat it as conformant here.
     if not isinstance(value, str):
         return True
+    if not _RFC3339_RE.match(value):
+        return False
     try:
-        # Accept RFC3339/ISO-8601, including a trailing 'Z'.
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Confirm the component VALUES are real (e.g. month <= 12), not just shaped.
+        datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
         return True
     except ValueError:
         return False
@@ -33,6 +43,10 @@ def _is_date_time(value: object) -> bool:
 def _is_uri(value: object) -> bool:
     if not isinstance(value, str):
         return True
+    # A URI cannot contain whitespace or control characters (urlparse would still
+    # accept "https://exa mple.com"); reject those before the structural check.
+    if not value or any(c.isspace() or ord(c) < 0x20 for c in value):
+        return False
     try:
         parsed = urlparse(value)
     except ValueError:
