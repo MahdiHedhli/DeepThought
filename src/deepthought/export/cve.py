@@ -142,37 +142,59 @@ def _description_value(finding: "Finding") -> str:
     return value[:_DESCRIPTION_MAX]
 
 
+def _affected(finding: "Finding") -> list[dict]:
+    """One CNA ``affected`` entry per affected package, with ALL its versions.
+
+    Collapsing to the first package/version would under-report the disclosure's
+    scope, so every ``AffectedPackage`` and every recorded version is preserved. A
+    package with no recorded versions gets a single ``0`` placeholder (the CNA
+    ``versions`` array requires at least one entry); a finding with no affected
+    packages at all falls back to a single PLACEHOLDER entry so the required
+    ``affected`` array is non-empty.
+    """
+    entries: list[dict] = []
+    for pkg in finding.affected or []:
+        versions = [
+            {"version": v, "status": "affected", "versionType": "semver"}
+            for v in (pkg.versions or [])
+        ]
+        if not versions:
+            versions = [{"version": "0", "status": "affected", "versionType": "semver"}]
+        entries.append(
+            {
+                "vendor": _PLACEHOLDER_VENDOR,
+                "product": pkg.package,
+                "versions": versions,
+                "defaultStatus": "unaffected",
+            }
+        )
+    if not entries:
+        entries.append(
+            {
+                "vendor": _PLACEHOLDER_VENDOR,
+                "product": _PLACEHOLDER_VENDOR,
+                "versions": [
+                    {"version": "0", "status": "affected", "versionType": "semver"}
+                ],
+                "defaultStatus": "unaffected",
+            }
+        )
+    return entries
+
+
 def finding_to_cve_draft(finding: "Finding") -> dict:
     """Map a Finding to a CVE Record Format 5.1 *draft* (a plain dict).
 
     The draft is deliberately non-submittable: sentinel ``cveId`` and zeroed
     placeholder identities. Optional blocks are omitted rather than faked.
     """
-    first_pkg = finding.affected[0] if finding.affected else None
-    product = first_pkg.package if first_pkg else _PLACEHOLDER_VENDOR
-    versions = list(first_pkg.versions) if first_pkg and first_pkg.versions else []
-    first_version = versions[0] if versions else "0"
-
     cna: dict = {
         "providerMetadata": {
             "orgId": _ZEROED_ORG_UUID,
             "shortName": _PLACEHOLDER_CNA_SHORTNAME,
         },
         "descriptions": [{"lang": "en", "value": _description_value(finding)}],
-        "affected": [
-            {
-                "vendor": _PLACEHOLDER_VENDOR,
-                "product": product,
-                "versions": [
-                    {
-                        "version": first_version,
-                        "status": "affected",
-                        "versionType": "semver",
-                    }
-                ],
-                "defaultStatus": "unaffected",
-            }
-        ],
+        "affected": _affected(finding),
     }
 
     # Omit the metrics block entirely when there is no severity — or when the

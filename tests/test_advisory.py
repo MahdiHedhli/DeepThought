@@ -12,9 +12,8 @@ from deepthought.export.advisory import finding_to_advisory
 
 from .conftest import make_finding
 
-DRAFT_FOOTER = (
-    "DRAFT — no CVE assigned, nothing transmitted, finding remains verified."
-)
+# The load-bearing, status-agnostic part of the DRAFT footer.
+DRAFT_FOOTER = "nothing transmitted (Deep Thought emits local artifacts only)."
 
 
 def test_renders_all_expected_sections():
@@ -138,3 +137,16 @@ def test_summary_with_embedded_heading_cannot_forge_a_section():
     assert "INJECTED SECTION" in md  # still carried, inertly
     assert md.startswith("# Advisory: benign ## INJECTED SECTION - x")
     assert "## Summary" in md and "## Status" in md
+
+
+def test_status_footer_reflects_the_finding_status_and_cve():
+    """The footer is not hardcoded to verified/no-CVE: for a disclosed finding it
+    names the real CVE and status (so a rendered disclosed/patched advisory does
+    not misstate its state), while always asserting nothing was transmitted."""
+    md = finding_to_advisory(make_finding(status="disclosed", cve="CVE-2026-12345"))
+    assert "CVE CVE-2026-12345" in md
+    assert "finding status: disclosed" in md
+    assert "nothing transmitted" in md
+    # And the verified/no-CVE case reads accordingly.
+    md2 = finding_to_advisory(make_finding(status="verified", cve=None))
+    assert "no CVE assigned" in md2 and "finding status: verified" in md2

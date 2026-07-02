@@ -30,7 +30,7 @@ from deepthought.export.cve import (
     validate_cve_draft,
 )
 
-from deepthought.schema import Severity
+from deepthought.schema import AffectedPackage, Severity
 
 from .conftest import make_finding
 
@@ -198,4 +198,22 @@ def test_cve_non_v3_vector_omits_metrics():
     mislabelled one; the draft still validates structurally."""
     draft = finding_to_cve_draft(make_finding(severity=Severity(cvss_vector=_CVSS_40, cvss_score=9.3)))
     assert "metrics" not in draft["containers"]["cna"]
+    assert validate_cve_draft(draft) == []
+
+
+def test_cve_preserves_all_affected_packages_and_versions():
+    """Every affected package AND every recorded version is preserved — the draft
+    must not collapse the disclosure's scope to the first package/version."""
+    draft = finding_to_cve_draft(
+        make_finding(
+            affected=[
+                AffectedPackage(ecosystem="Packagist", package="php/php-src", versions=["8.3.0", "8.3.1"]),
+                AffectedPackage(ecosystem="PyPI", package="foo", versions=["1.0"]),
+            ]
+        )
+    )
+    aff = draft["containers"]["cna"]["affected"]
+    assert {e["product"] for e in aff} == {"php/php-src", "foo"}
+    php = next(e for e in aff if e["product"] == "php/php-src")
+    assert {v["version"] for v in php["versions"]} == {"8.3.0", "8.3.1"}
     assert validate_cve_draft(draft) == []

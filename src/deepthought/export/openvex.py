@@ -20,6 +20,7 @@ conformant.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from ..schema.common import iso_z, utcnow
@@ -27,6 +28,11 @@ from .osv import osv_id_for
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema.finding import Finding
+
+# The official CVE id pattern. Only a value matching this is treated as a real,
+# assigned CVE; the sentinel "CVE-XXXX-XXXXX" and any malformed value fail it and
+# fall back to the internal finding id.
+_CVE_RE = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,}$")
 
 # Pinned OpenVEX context (spec version). Carried as the ``@context`` member.
 OPENVEX_CONTEXT = "https://openvex.dev/ns/v0.2.0"
@@ -43,6 +49,18 @@ _ACTION_STATEMENT_PLACEHOLDER = (
 
 # The valid OpenVEX statement status labels.
 _VALID_STATUSES = {"not_affected", "affected", "fixed", "under_investigation"}
+
+
+def _vuln_name(finding: "Finding") -> str:
+    """The statement's vulnerability name: the real CVE, or the internal id.
+
+    A stored ``cve`` is used only when it matches the official CVE pattern. The
+    sentinel ``CVE-XXXX-XXXXX`` or any malformed value falls back to the finding
+    id, so a local draft never appears to reference a non-existent assigned CVE.
+    """
+    if finding.cve and _CVE_RE.match(finding.cve):
+        return finding.cve
+    return finding.id
 
 
 def _purl(finding: "Finding") -> str:
@@ -72,8 +90,11 @@ def finding_to_openvex(finding: "Finding") -> dict:
         "version": 1,
         "statements": [
             {
-                # Never fabricate a CVE: fall back to the internal finding id.
-                "vulnerability": {"name": finding.cve or finding.id},
+                # Never fabricate OR echo a placeholder/malformed CVE: only a value
+                # matching the real CVE pattern is used; otherwise fall back to the
+                # internal finding id so the draft never appears to name a
+                # non-existent assigned CVE.
+                "vulnerability": {"name": _vuln_name(finding)},
                 "products": [{"@id": _purl(finding)}],
                 # A verified finding is affected; we never assert otherwise.
                 "status": "affected",

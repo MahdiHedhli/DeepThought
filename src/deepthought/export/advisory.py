@@ -26,10 +26,20 @@ from .osv import _details
 if TYPE_CHECKING:  # pragma: no cover
     from ..schema.finding import Finding
 
-# Fixed footer. This is the guarantee, verbatim, that the document is a draft.
-_DRAFT_STATUS = (
-    "DRAFT — no CVE assigned, nothing transmitted, finding remains verified."
-)
+def _status_footer(finding: "Finding") -> str:
+    """A DRAFT footer that reflects the finding's ACTUAL status and CVE.
+
+    ``publish`` renders advisories for verified/disclosed/patched findings, so a
+    hardcoded "no CVE assigned, remains verified" line would misstate a disclosed
+    or patched finding. The footer derives its CVE and status from the finding,
+    and always asserts the load-bearing invariant: Deep Thought transmitted
+    nothing (any real disclosure is a human act).
+    """
+    cve = f"CVE {finding.cve}" if finding.cve else "no CVE assigned"
+    return (
+        f"DRAFT rendering — {cve}; finding status: {finding.status.value}; "
+        f"nothing transmitted (Deep Thought emits local artifacts only)."
+    )
 
 
 def _inline(text: object) -> str:
@@ -119,6 +129,6 @@ def finding_to_advisory(finding: "Finding") -> str:
             parts.append(f"- {_inline(entry.date)}: {_inline(entry.event)}")
 
     parts.append("## Status")
-    parts.append(_DRAFT_STATUS)
+    parts.append(_status_footer(finding))
 
     return "\n\n".join(parts) + "\n"
