@@ -31,11 +31,17 @@ def _add_session(store, stype, sid, gate_outcome="proceed", close_state="clean",
                                gate_outcome=gate_outcome, close_state=close_state, **kw))
 
 
-def _past_recon(store):
-    """Advance the store past the recon rungs: a status baseline, real MAP
-    progress (Coverage exists), and a completed DISCOVER."""
+def _cover_scope(store, project):
+    """Record Coverage for every in-scope area (what a completed MAP produces)."""
+    for area in project.scope_allowlist:
+        store.save_coverage(make_coverage(area=area))
+
+
+def _past_recon(store, project):
+    """Advance the store past the recon rungs: a status baseline, MAP progress for
+    every in-scope area, and a completed DISCOVER."""
     _add_session(store, "status", "S-1")
-    store.save_coverage(make_coverage())     # MAP made progress
+    _cover_scope(store, project)             # MAP made progress for every area
     _add_session(store, "discover", "S-3")   # DISCOVER done
 
 
@@ -52,8 +58,8 @@ def test_ladder_advances_status_then_map_then_discover(state_dir):
     p = _proj(store)
     _add_session(store, "status", "S-1")
     assert select_next_action(store, p).kind is ActionKind.map
-    # MAP is "done" only once it records Coverage — not by the session alone.
-    store.save_coverage(make_coverage())
+    # MAP is "done" only once every in-scope area has Coverage — not by the session.
+    _cover_scope(store, p)
     assert select_next_action(store, p).kind is ActionKind.discover
     _add_session(store, "discover", "S-3")
     # nothing found -> fixed point
@@ -69,8 +75,24 @@ def test_map_reruns_when_it_produced_no_coverage(state_dir):
     _add_session(store, "status", "S-1")
     _add_session(store, "map", "S-2")  # a MAP session that recorded NO coverage
     assert select_next_action(store, p).kind is ActionKind.map  # re-proposed
-    store.save_coverage(make_coverage())                        # now MAP made progress
+    _cover_scope(store, p)                                      # now MAP made progress
     assert select_next_action(store, p).kind is ActionKind.discover
+
+
+def test_broadened_scope_triggers_a_new_map(state_dir):
+    """Broadening an already-mapped project's scope (a human action) re-triggers MAP
+    for the newly in-scope area, instead of one existing coverage file masking it."""
+    store = FileStore(state_dir)
+    p = make_project(scope_allowlist=["src"])
+    store.save_project(p)
+    _add_session(store, "status", "S-1")
+    store.save_coverage(make_coverage(area="src"))
+    _add_session(store, "discover", "S-3")
+    assert select_next_action(store, p) is None  # fully mapped+discovered for ['src']
+    # the operator adds 'lib' to the scope -> the new area must be mapped
+    broadened = p.model_copy(update={"scope_allowlist": ["src", "lib"]})
+    action = select_next_action(store, broadened)
+    assert action is not None and action.kind is ActionKind.map
 
 
 def test_refused_discover_attempt_is_not_counted_as_done(state_dir):
@@ -80,7 +102,7 @@ def test_refused_discover_attempt_is_not_counted_as_done(state_dir):
     store = FileStore(state_dir)
     p = _proj(store)
     _add_session(store, "status", "S-1")
-    store.save_coverage(make_coverage())
+    _cover_scope(store, p)
     _add_session(store, "discover", "S-3", gate_outcome="refuse")  # a REFUSED attempt
     assert select_next_action(store, p).kind is ActionKind.discover  # re-proposed
     _add_session(store, "discover", "S-4", gate_outcome="proceed")   # now it succeeds
@@ -93,7 +115,7 @@ def test_interrupted_discover_is_not_counted_as_done(state_dir):
     store = FileStore(state_dir)
     p = _proj(store)
     _add_session(store, "status", "S-1")
-    store.save_coverage(make_coverage())
+    _cover_scope(store, p)
     _add_session(store, "discover", "S-3", gate_outcome="proceed", close_state="interrupted")
     assert select_next_action(store, p).kind is ActionKind.discover  # re-proposed
     _add_session(store, "discover", "S-4", gate_outcome="proceed", close_state="clean")
@@ -108,7 +130,7 @@ def test_refused_sibling_hunt_in_prior_trace_is_not_counted(state_dir):
 
     store = FileStore(state_dir)
     p = _proj(store)
-    _past_recon(store)
+    _past_recon(store, p)
     store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
     store.save_loop_run(LoopRun(
         id="L-1", project="php-src", started="t", stop_reason="gate_refused",
@@ -123,7 +145,7 @@ def test_refused_sibling_hunt_in_prior_trace_is_not_counted(state_dir):
 def test_verified_finding_yields_sibling_hunt_then_disclosure(state_dir):
     store = FileStore(state_dir)
     p = _proj(store)
-    _past_recon(store)
+    _past_recon(store, p)
     store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
 
     a = select_next_action(store, p)
@@ -140,7 +162,7 @@ def test_verified_finding_yields_sibling_hunt_then_disclosure(state_dir):
 def test_candidate_yields_a_verify_escalation(state_dir):
     store = FileStore(state_dir)
     p = _proj(store)
-    _past_recon(store)
+    _past_recon(store, p)
     store.save_finding(make_finding(id="F-9", project="php-src", status="candidate"))
     a = select_next_action(store, p)
     assert a.kind is ActionKind.verify_escalation
@@ -153,7 +175,7 @@ def test_disclosure_precedes_verify_escalation(state_dir):
     escalation for candidates."""
     store = FileStore(state_dir)
     p = _proj(store)
-    _past_recon(store)
+    _past_recon(store, p)
     store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
     store.save_finding(make_finding(id="F-9", project="php-src", status="candidate"))
     done = {("sibling_hunt", "F-1")}

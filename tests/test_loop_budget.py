@@ -34,6 +34,14 @@ def test_non_positive_limits_are_refused():
             LoopBudget(**kw)
 
 
+def test_non_finite_limits_are_refused():
+    """A NaN/inf wall limit would pass a '> 0' check but make would_exceed never
+    trip (x >= NaN is always False), leaving no effective cap — reject it."""
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValidationError):
+            LoopBudget(max_wall_seconds=bad)
+
+
 def test_budget_is_immutable():
     """The loop never raises its own budget mid-run — the model is frozen."""
     b = LoopBudget(max_sessions=3)

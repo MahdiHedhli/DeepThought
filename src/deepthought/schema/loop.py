@@ -8,6 +8,7 @@ loop run. Every id is a ``RecordId`` (a safe path segment). The loop never has a
 
 from __future__ import annotations
 
+import math
 import re
 from enum import Enum
 
@@ -59,7 +60,14 @@ class LoopBudget(BaseModel):
                 "LoopBudget requires at least one limit — the loop is never unbounded"
             )
         for limit in limits:
-            if limit is not None and limit <= 0:
+            if limit is None:
+                continue
+            # A non-finite (NaN/inf) wall/token limit would pass a ``> 0`` check but
+            # make ``would_exceed`` never trip (``x >= NaN`` is always False), giving
+            # NO effective cap — reject it so a budget is always a real bound.
+            if isinstance(limit, float) and not math.isfinite(limit):
+                raise ValueError("every set LoopBudget limit must be finite")
+            if limit <= 0:
                 raise ValueError("every set LoopBudget limit must be > 0")
         return self
 

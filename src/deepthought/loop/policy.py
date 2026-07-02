@@ -45,15 +45,18 @@ def select_next_action(
         return LoopAction(kind=ActionKind.status, project=pid)
 
     # Progress, not mere session existence, is the completion signal for the recon
-    # rungs: a MAP that produced no Coverage (e.g. a project with no checkout yet)
-    # is NOT "done" — otherwise the loop could never recover once the operator adds
-    # the local_path its own MAP next-steps ask for. The in-run `done` set still
-    # bounds it to one MAP/DISCOVER per run.
-    has_coverage = bool(store.list_coverage(pid))
+    # rungs. MAP is done PER AREA: it is complete only when every in-scope area has
+    # a Coverage record — so a MAP that recorded nothing (no checkout yet) re-runs,
+    # AND broadening the scope (a human action outside the loop) re-triggers MAP for
+    # the newly in-scope areas rather than being masked by one existing coverage
+    # file. The in-run `done` set still bounds it to one MAP per run.
+    covered_areas = {c.area for c in store.list_coverage(pid)}
+    in_scope = [a.strip() for a in project.scope_allowlist if a.strip()]
+    has_coverage = bool(covered_areas)
+    unmapped = [area for area in in_scope if area not in covered_areas]
 
-    # 2. MAP — map the in-scope surface. Re-runnable across invocations until it
-    #    actually records Coverage (an empty allowlist means nothing is in scope).
-    if project.scope_allowlist and not has_coverage and fresh(ActionKind.map, pid):
+    # 2. MAP — map the in-scope surface while any in-scope area lacks Coverage.
+    if unmapped and fresh(ActionKind.map, pid):
         return LoopAction(kind=ActionKind.map, project=pid)
 
     # 3. DISCOVER — produce candidates over the MAPPED surface (gated on Coverage,
