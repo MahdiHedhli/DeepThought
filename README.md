@@ -8,13 +8,24 @@ version-controlled knowledge base. An autonomous loop is only safe behind gates,
 so authorization, scope, sandboxing, and a strict finding lifecycle are
 non-negotiable and live in a constitution the platform enforces.
 
-This repository is **feature 001, the platform spine**: durable file-based
-state, a typed Agent Session Protocol, an orchestrator-plus-workers execution
-model, and the three operator verbs. It is proven end to end with the two
-lowest-risk session types — `NEW PROJECT` and `STATUS`. There is no code
-execution, no discovery, and no disclosure transmission in this build. Those
-arrive behind their own gates in later features. This feature is what makes them
-safe to add.
+It began as **feature 001, the platform spine**: durable file-based state, a
+typed Agent Session Protocol, an orchestrator-plus-workers execution model, and
+the three operator verbs. Later features add capability behind their own gates —
+each proven test-first and merged only after an independent adversarial review.
+Shipped so far:
+
+| Feature | Session / capability | Risk posture |
+|---|---|---|
+| **001** | `NEW PROJECT`, `STATUS` — the spine | read-only |
+| **002** | `MAP`, `DISCOVER` — static reasoning → candidate findings | read-only |
+| **003** | `VERIFY` — sandboxed reproduction | execution behind a hard stop; `NoopSandbox` dry-run only, real execution needs sign-off |
+| **004** | `SIBLING HUNT` — cross-project variant analysis | read-only |
+| **005** | `DISCLOSURE` — draft advisory + CVE + CSAF + OpenVEX | **draft-only; transmits nothing** |
+
+No untrusted target code executes without an explicit human sign-off, and no
+disclosure ever leaves the machine — drafting is done by an agent, sending by a
+person (Constitution Article V). The autonomous loop and limit awareness (feature
+006) arrive next, behind the same gates.
 
 > Built with GitHub Spec Kit. Intent is the source of truth (`specs/`,
 > `.specify/memory/constitution.md`); the platform is the regenerated output.
@@ -25,8 +36,21 @@ safe to add.
 
 ```
 deepthought playbook   # run the Agent Session Protocol for a session type; list findings
-deepthought check      # validate state: schema, lifecycle, orphans, identity, OSV conformance
+deepthought check      # validate state: schema, lifecycle, orphans, identity, OSV/CSAF/OpenVEX conformance
 deepthought publish    # emit prepared local artifacts, assert the human gate, transmit nothing
+```
+
+`playbook` fans out to the typed sessions:
+
+```
+deepthought playbook new-project ...                                   # register a target (gate: basis + scope)
+deepthought playbook status  --project <id>
+deepthought playbook map     --project <id>                            # 002, read-only coverage
+deepthought playbook discover --project <id> [--sarif <path>]          # 002, candidate findings
+deepthought playbook verify  --project <id> --finding <F-NNNN>         # 003, NoopSandbox dry-run (no execution)
+deepthought playbook sibling-hunt --project <id> --finding <F-NNNN> [--sibling <id> ...]  # 004, read-only variants
+deepthought playbook disclose --project <id> --finding <F-NNNN>        # 005, draft-only advisory/CVE/CSAF/OpenVEX
+deepthought publish --format osv|csaf|openvex|cve-draft|advisory|all   # local artifacts only
 ```
 
 ## Quickstart
@@ -93,21 +117,26 @@ src/deepthought/
   store/                 # base.py (Store interface), filestore.py (files in git)
   schema/                # Pydantic canonical models incl. worker envelope
   orchestrator/          # conductor.py (envelope ingest), ledger.py (primitive ledger + exploit graph)
-  export/                # osv.py (Finding -> OSV) + pinned OSV schema
-  sessions/              # new_project.py, status.py
+  ingest/                # sarif.py (SARIF -> findings, in-scope containment)
+  sandbox/               # base.py, docker.py (config-only argv builder), noop.py (003; no execution)
+  sibling/               # signature.py (variant signature, input firewall) (004)
+  export/                # osv.py + csaf.py + openvex.py + cve.py + advisory.py + pinned schemas (005)
+  sessions/              # new_project, status, map, discover, verify, sibling_hunt, disclosure
 .claude/skills/          # the orchestrator protocol skill + a Marvin worker stub
+scripts/                 # smoke.sh, smoke_002..005.sh (hermetic end-to-end)
 state/                   # the version-controlled store
 .specify/memory/         # the constitution
-specs/001-core-loop/     # spec, plan, data model, contracts, tasks
+specs/                   # 001-core-loop … 005-disclosure (spec, plan, data model, contracts, tasks)
+docs/build-log/          # a per-feature build log
 ```
 
 ## Design decisions
 
 1. **State** is flat files in git behind a `Store` interface. A vector DB is a
    later, contained swap — one interface, a second implementation.
-2. **Schema aligns to standards.** SARIF in (features 002/003), OSV for the
-   finding record, CSAF and OpenVEX out (feature 005). `check` validates every
-   finding's OSV against a pinned schema from day one.
+2. **Schema aligns to standards.** SARIF in (features 002/003); OSV for the
+   finding record; CSAF, OpenVEX, and a CVE 5.1 draft out (feature 005). `check`
+   validates every finding's OSV, CSAF, and OpenVEX against pinned schemas.
 3. **Topology** is an orchestrator plus a worker pool. Workers keep their own
    context; the orchestrator captures only distilled envelopes, so it holds the
    working memory to chain exploits. The envelope doubles as an injection
