@@ -154,13 +154,18 @@ def validate_openvex(doc: dict) -> list[str]:
     if not isinstance(doc, dict):
         return ["<root>: document must be an object"]
 
-    # String document members must be non-empty STRINGS, not merely truthy — a
-    # corrupted persisted draft with e.g. a numeric @id must be reported.
-    for field in ("@context", "@id", "author", "timestamp"):
+    # @context must be the pinned OpenVEX context (this validator gates the drafts
+    # we produce; a different/garbage value is not an OpenVEX v0.2 draft).
+    if doc.get("@context") != OPENVEX_CONTEXT:
+        errors.append(f"@context: must be {OPENVEX_CONTEXT!r}")
+    # These string members must be non-empty STRINGS, not merely truthy.
+    for field in ("@id", "author", "timestamp"):
         if not _nonempty_str(doc.get(field)):
             errors.append(f"{field}: must be a non-empty string")
-    if not doc.get("version"):
-        errors.append("version: is a required document field")
+    # version is a positive integer (not a bool, string, or float).
+    version = doc.get("version")
+    if not (isinstance(version, int) and not isinstance(version, bool) and version >= 1):
+        errors.append("version: must be a positive integer")
 
     statements = doc.get("statements")
     if not isinstance(statements, list) or not statements:

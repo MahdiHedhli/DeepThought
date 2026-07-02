@@ -213,6 +213,22 @@ def test_products_are_deduplicated_and_uniqueness_is_validated():
     assert any("unique" in e for e in validate_openvex(doc))
 
 
+def test_validate_enforces_context_and_version_values():
+    """@context must be the pinned OpenVEX context and version a positive integer —
+    a corrupted draft with a wrong context or a non-integer version is reported."""
+    doc = finding_to_openvex(make_finding())
+    assert validate_openvex(doc) == []  # our draft is conformant
+
+    bad_ctx = finding_to_openvex(make_finding())
+    bad_ctx["@context"] = "https://example.test/not-openvex"
+    assert any("@context" in e for e in validate_openvex(bad_ctx))
+
+    for bad_version in ("1", 1.5, True, 0):
+        bad = finding_to_openvex(make_finding())
+        bad["version"] = bad_version
+        assert any("version" in e for e in validate_openvex(bad)), bad_version
+
+
 def test_validate_does_not_crash_on_non_string_status():
     """A non-string status (JSON object/array — unhashable) is REPORTED, not a
     crash — the set-membership test is guarded by an isinstance check."""
