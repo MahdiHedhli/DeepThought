@@ -183,6 +183,19 @@ def test_csaf_non_v3_vector_omits_scores_and_still_validates():
     assert validate_csaf(doc) == [], validate_csaf(doc)
 
 
+def test_csaf_omits_scores_for_a_non_finite_cvss_score():
+    """A non-finite score omits the score block (no bare NaN) — the doc stays
+    strict-JSON-serializable and schema-conformant."""
+    import json as _json
+
+    doc = finding_to_csaf(
+        make_finding(severity=Severity(cvss_vector=_CVSS_30, cvss_score=float("nan")))
+    )
+    assert "scores" not in doc["vulnerabilities"][0]
+    _json.dumps(doc, allow_nan=False)  # raises if a bare NaN leaked in
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
 def test_csaf_omits_an_incomplete_cvss_vector():
     """A prefixed-but-partial vector is not a well-formed CVSS v3 vector, so the
     score is OMITTED (never emitted as a valid-looking-but-invalid score) rather

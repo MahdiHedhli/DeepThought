@@ -138,6 +138,17 @@ def test_cve_bounds_and_skips_empty_versions():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_omits_metric_for_a_non_finite_cvss_score():
+    """A non-finite score (NaN) would serialize as bare NaN (invalid JSON); the
+    metric is omitted so the draft is strict-JSON-valid and schema-conformant."""
+    draft = finding_to_cve_draft(
+        make_finding(severity=Severity(cvss_vector=_CVSS_30, cvss_score=float("nan")))
+    )
+    assert "metrics" not in draft["containers"]["cna"]
+    json.dumps(draft, allow_nan=False)  # raises if a bare NaN leaked in
+    assert validate_cve_draft(draft) == []
+
+
 def test_cve_dedupes_versions_and_references():
     """affected[].versions and references are uniqueItems: duplicate stored
     versions/urls are collapsed so the persisted draft stays conformant."""

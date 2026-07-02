@@ -9,6 +9,7 @@ them here means one source of truth — the CSAF ``cvss_v3`` branch and the CVE
 
 from __future__ import annotations
 
+import math
 import re
 
 # The official FIRST.org CVSS 3.x vectorString shape: the EIGHT base metrics are
@@ -116,6 +117,13 @@ def cvss3_metric(vector: str, score: float) -> dict | None:
         return None
     minor = version.split(".")[1]  # the pattern/schema key is the MINOR ("0"/"1")
     if not re.match(_vector_pattern(minor), vector or ""):
+        return None
+    # The score must be a FINITE number in 0..10. A non-finite score (NaN/Inf from
+    # e.g. `.nan` in YAML) would serialize as bare NaN — invalid JSON — so omit the
+    # metric rather than emit an unparseable/non-conformant artifact.
+    if not isinstance(score, (int, float)) or isinstance(score, bool):
+        return None
+    if not math.isfinite(score) or not (0.0 <= score <= 10.0):
         return None
     return {
         "version": version,
