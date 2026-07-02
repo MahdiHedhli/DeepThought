@@ -143,7 +143,7 @@ def _cvss_registry() -> Registry:
 
 
 def _base_severity(score: float) -> str:
-    """CVSS 3.1 qualitative severity band for a base score."""
+    """CVSS 3.x qualitative severity band for a base score."""
     if score <= 0.0:
         return "NONE"
     if score < 4.0:
@@ -153,6 +153,24 @@ def _base_severity(score: float) -> str:
     if score < 9.0:
         return "HIGH"
     return "CRITICAL"
+
+
+def _cvss3_version(vector: str) -> str | None:
+    """The CVSS 3.x minor version a vector declares, or ``None``.
+
+    CSAF's ``cvss_v3`` is ``oneOf: [v3.0, v3.1]``, and each branch pins both the
+    ``version`` enum and the ``vectorString`` prefix. Emitting the wrong version
+    (e.g. ``3.1`` for a ``CVSS:3.0/...`` vector) fails BOTH branches, which would
+    turn ``check`` red. Only v3.0/v3.1 have bundled schemas; any other version
+    (2.0, 4.0, …) returns ``None`` so the caller omits the score rather than emit
+    an unvalidatable one.
+    """
+    v = (vector or "").strip()
+    if v.startswith("CVSS:3.0/"):
+        return "3.0"
+    if v.startswith("CVSS:3.1/"):
+        return "3.1"
+    return None
 
 
 def _product_tree(finding: "Finding") -> dict:
@@ -197,14 +215,22 @@ def _notes(finding: "Finding") -> list[dict]:
 
 
 def _scores(finding: "Finding") -> list[dict] | None:
-    """CVSS v3.1 score block, or ``None`` when there is no severity to report."""
+    """CVSS v3 score block, or ``None`` when there is no v3 severity to report.
+
+    The ``version`` is derived from the stored vector so a ``CVSS:3.0/...``
+    finding is emitted as v3.0 (and validates against the v3.0 oneOf branch). A
+    non-v3 vector (2.0/4.0) yields no score block rather than a mislabelled one.
+    """
     severity = finding.severity
     if severity is None:
+        return None
+    version = _cvss3_version(severity.cvss_vector)
+    if version is None:
         return None
     return [
         {
             "cvss_v3": {
-                "version": "3.1",
+                "version": version,
                 "vectorString": severity.cvss_vector,
                 "baseScore": severity.cvss_score,
                 "baseSeverity": _base_severity(severity.cvss_score),

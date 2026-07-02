@@ -13,8 +13,12 @@ from deepthought.export.csaf import (
     finding_to_csaf,
     validate_csaf,
 )
+from deepthought.schema import Severity
 
 from .conftest import make_finding
+
+_CVSS_30 = "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+_CVSS_40 = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
 
 
 def test_csaf_schema_valid():
@@ -150,3 +154,21 @@ def test_csaf_corrupt_doc_is_reported():
     doc = finding_to_csaf(make_finding())
     del doc["document"]["title"]  # title is required by CSAF
     assert validate_csaf(doc) != []
+
+
+def test_csaf_cvss_30_vector_is_versioned_30_and_validates():
+    """A CVSS:3.0 vector must be emitted as version 3.0 (matching the v3.0 oneOf
+    branch) so check stays green — not hardcoded 3.1."""
+    doc = finding_to_csaf(make_finding(severity=Severity(cvss_vector=_CVSS_30, cvss_score=9.8)))
+    score = doc["vulnerabilities"][0]["scores"][0]["cvss_v3"]
+    assert score["version"] == "3.0"
+    assert score["vectorString"] == _CVSS_30
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
+def test_csaf_non_v3_vector_omits_scores_and_still_validates():
+    """A non-v3 vector (e.g. CVSS 4.0) has no bundled v3 schema branch, so the
+    score block is omitted rather than mislabelled — and the doc still validates."""
+    doc = finding_to_csaf(make_finding(severity=Severity(cvss_vector=_CVSS_40, cvss_score=9.3)))
+    assert "scores" not in doc["vulnerabilities"][0]
+    assert validate_csaf(doc) == [], validate_csaf(doc)

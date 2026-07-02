@@ -30,11 +30,15 @@ from deepthought.export.cve import (
     validate_cve_draft,
 )
 
+from deepthought.schema import Severity
+
 from .conftest import make_finding
 
 # The official CVE identifier pattern. The draft sentinel is designed to fail it.
 OFFICIAL_CVE_ID_PATTERN = r"^CVE-[0-9]{4}-[0-9]{4,19}$"
 ZEROED_UUID = "00000000-0000-4000-8000-000000000000"
+_CVSS_30 = "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+_CVSS_40 = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N"
 
 # The official schema references sibling CVSS/tag files we don't bundle; resolve
 # them to permissive stubs so the *unfiltered* official schema can run at all.
@@ -165,4 +169,33 @@ def test_cve_injection_inertness():
     assert re.match(OFFICIAL_CVE_ID_PATTERN, draft["cveMetadata"]["cveId"]) is None
 
     # And the document still validates.
+    assert validate_cve_draft(draft) == []
+
+
+def test_validate_reports_a_malformed_cveid_not_just_the_sentinel():
+    """validate_cve_draft tolerates ONLY the exact sentinel's pattern miss. A
+    genuinely malformed cveId (wrong type, or a different bad string) must still
+    be reported — not masked by a blanket cveId suppression."""
+    for bad in (123, "", "not-a-cve"):
+        draft = finding_to_cve_draft(make_finding())
+        draft["cveMetadata"]["cveId"] = bad
+        errors = validate_cve_draft(draft)
+        assert any("cveId" in e for e in errors), f"{bad!r} should be reported: {errors}"
+
+
+def test_cve_cvss_30_vector_uses_cvssV3_0_key():
+    """A CVSS:3.0 vector is keyed as cvssV3_0 with version 3.0 (not mislabelled
+    as cvssV3_1)."""
+    draft = finding_to_cve_draft(make_finding(severity=Severity(cvss_vector=_CVSS_30, cvss_score=9.8)))
+    metric = draft["containers"]["cna"]["metrics"][0]
+    assert "cvssV3_0" in metric and "cvssV3_1" not in metric
+    assert metric["cvssV3_0"]["version"] == "3.0"
+    assert validate_cve_draft(draft) == []
+
+
+def test_cve_non_v3_vector_omits_metrics():
+    """A non-v3 vector (CVSS 4.0) yields no metrics block rather than a
+    mislabelled one; the draft still validates structurally."""
+    draft = finding_to_cve_draft(make_finding(severity=Severity(cvss_vector=_CVSS_40, cvss_score=9.3)))
+    assert "metrics" not in draft["containers"]["cna"]
     assert validate_cve_draft(draft) == []

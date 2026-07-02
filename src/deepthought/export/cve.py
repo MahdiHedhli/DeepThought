@@ -97,7 +97,7 @@ def _registry() -> Registry:
 
 
 def _base_severity(score: float) -> str:
-    """CVSS v3.1 qualitative severity band for a base score."""
+    """CVSS v3.x qualitative severity band for a base score."""
     if score <= 0.0:
         return "NONE"
     if score < 4.0:
@@ -107,6 +107,22 @@ def _base_severity(score: float) -> str:
     if score < 9.0:
         return "HIGH"
     return "CRITICAL"
+
+
+def _cvss3_version(vector: str) -> str | None:
+    """The CVSS 3.x minor version a vector declares, or ``None``.
+
+    The CVE metric object keys the score by version (``cvssV3_0`` vs
+    ``cvssV3_1``), so the key and ``version`` are derived from the stored vector.
+    A non-v3 vector (2.0/4.0) returns ``None`` and the caller omits the metric
+    rather than mislabel it.
+    """
+    v = (vector or "").strip()
+    if v.startswith("CVSS:3.0/"):
+        return "3.0"
+    if v.startswith("CVSS:3.1/"):
+        return "3.1"
+    return None
 
 
 def _description_value(finding: "Finding") -> str:
@@ -159,18 +175,22 @@ def finding_to_cve_draft(finding: "Finding") -> dict:
         ],
     }
 
-    # Omit the metrics block entirely when there is no severity to report.
+    # Omit the metrics block entirely when there is no severity — or when the
+    # vector is not CVSS v3 (the metric is keyed by version: cvssV3_0/cvssV3_1).
     if finding.severity is not None:
-        cna["metrics"] = [
-            {
-                "cvssV3_1": {
-                    "version": "3.1",
-                    "vectorString": finding.severity.cvss_vector,
-                    "baseScore": finding.severity.cvss_score,
-                    "baseSeverity": _base_severity(finding.severity.cvss_score),
+        version = _cvss3_version(finding.severity.cvss_vector)
+        if version is not None:
+            key = "cvssV3_1" if version == "3.1" else "cvssV3_0"
+            cna["metrics"] = [
+                {
+                    key: {
+                        "version": version,
+                        "vectorString": finding.severity.cvss_vector,
+                        "baseScore": finding.severity.cvss_score,
+                        "baseSeverity": _base_severity(finding.severity.cvss_score),
+                    }
                 }
-            }
-        ]
+            ]
 
     # references is required (minItems 1). Use the first finding reference; fall
     # back to a stable placeholder URL if the finding has none.
@@ -192,28 +212,45 @@ def finding_to_cve_draft(finding: "Finding") -> dict:
     }
 
 
-def _passes_cveid(error) -> bool:
-    """True if a validation error is attributable to the sentinel ``cveId``."""
-    if any(str(p) == "cveId" for p in error.absolute_path):
-        return True
-    return any(str(p) == "cveId" for p in error.absolute_schema_path)
+def _is_sentinel_cveid_error(error) -> bool:
+    """True only for the INTENDED sentinel deviation: a ``pattern`` failure at
+    ``cveId``.
+
+    Suppressing every ``cveId`` error would mask a genuinely malformed id (an
+    integer, ``null``, an empty string — which fail with ``type``/``minLength``).
+    Only the sentinel's ``pattern`` failure is the deliberate, tolerated
+    deviation; the caller further gates this on the value actually being the
+    sentinel, so a non-sentinel pattern miss is still reported.
+    """
+    if error.validator != "pattern":
+        return False
+    return any(str(p) == "cveId" for p in error.absolute_path) or any(
+        str(p) == "cveId" for p in error.absolute_schema_path
+    )
 
 
 def validate_cve_draft(doc: dict) -> list[str]:
-    """Return CVE-schema violations, dropping the intentional cveId deviation.
+    """Return CVE-schema violations, dropping ONLY the intentional cveId sentinel.
 
     A structurally-complete draft returns ``[]`` even though its ``cveId`` is the
-    non-submittable sentinel: any error whose path passes through ``cveId`` is
-    the deliberate placeholder deviation and is dropped. Every other violation is
-    reported as a sorted ``"path: message"`` string.
+    non-submittable sentinel ``CVE-XXXX-XXXXX``: the sentinel's ``pattern`` failure
+    is the deliberate placeholder deviation and is dropped — but ONLY when the
+    ``cveId`` really is the sentinel. A malformed ``cveId`` (wrong type, empty, or
+    any other non-sentinel value) is still reported, as is every other violation,
+    each as a sorted ``"path: message"`` string.
     """
     schema = _published_schema()
     validator_cls = jsonschema.validators.validator_for(schema)
     validator_cls.check_schema(schema)
     validator = validator_cls(schema, registry=_registry())
     errors = sorted(validator.iter_errors(doc), key=lambda e: list(e.absolute_path))
+
+    metadata = doc.get("cveMetadata")
+    cveid = metadata.get("cveId") if isinstance(metadata, dict) else None
+    tolerate_sentinel = cveid == _SENTINEL_CVE_ID
+
     return [
         f"{'/'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}"
         for e in errors
-        if not _passes_cveid(e)
+        if not (tolerate_sentinel and _is_sentinel_cveid_error(e))
     ]

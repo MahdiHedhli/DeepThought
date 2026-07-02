@@ -125,3 +125,16 @@ def test_injection_inertness():
 
     # the DRAFT footer is intact
     assert DRAFT_FOOTER in md
+
+
+def test_summary_with_embedded_heading_cannot_forge_a_section():
+    """A summary carrying a newline + Markdown heading must NOT become a real
+    top-level section: it is collapsed onto the title line and quoted in the
+    Summary body, so no forged heading appears."""
+    md = finding_to_advisory(make_finding(summary="benign\n## INJECTED SECTION\n- x"))
+    assert not any(
+        line.lstrip().startswith("## INJECTED") for line in md.splitlines()
+    )
+    assert "INJECTED SECTION" in md  # still carried, inertly
+    assert md.startswith("# Advisory: benign ## INJECTED SECTION - x")
+    assert "## Summary" in md and "## Status" in md
