@@ -172,3 +172,11 @@ def test_status_footer_reflects_the_finding_status_and_cve():
     # And the verified/no-CVE case reads accordingly.
     md2 = finding_to_advisory(make_finding(status="verified", cve=None))
     assert "no CVE assigned" in md2 and "finding status: verified" in md2
+
+
+def test_status_footer_escapes_an_adversarial_cve():
+    """A malformed/adversarial cve in the footer is escaped like all free text —
+    it cannot forge a heading or inject raw HTML into the draft."""
+    md = finding_to_advisory(make_finding(status="disclosed", cve="CVE-1\n## PWNED <img src=x>"))
+    assert not any(line.lstrip().startswith("## PWNED") for line in md.splitlines())
+    assert "<img" not in md

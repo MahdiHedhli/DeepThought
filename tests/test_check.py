@@ -216,3 +216,28 @@ def test_check_fails_when_all_disclosure_drafts_are_deleted(state_dir):
     report = run_check(store)
     assert not report.ok
     assert any("missing expected draft" in e for e in report.errors)
+
+
+def test_check_requires_the_non_schema_disclosure_artifacts_too(state_dir):
+    """Deleting the advisory or CVE-draft artifact (not schema-gated, but part of
+    the human-review set) still fails the gate via the existence check."""
+    from deepthought.protocol import HermesUltraCodeGate, run_session
+    from deepthought.sessions import DisclosureSession
+
+    for name in ("disclosure-advisory.md", "disclosure-cve-draft.json"):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            store = FileStore(Path(d) / "state")
+            store.save_project(make_project())
+            ev = store.write_detail("S-seed", "evidence.txt", "resolving evidence")
+            store.save_finding(make_finding(status="verified", evidence_ref=ev))
+            session = DisclosureSession("php-src", "F-0007")
+            run_session(store, HermesUltraCodeGate(), session)
+            assert run_check(store).ok
+
+            (store.root / session.artifact_refs[name]).unlink()
+            report = run_check(store)
+            assert not report.ok, name
+            assert any("missing expected draft" in e for e in report.errors)

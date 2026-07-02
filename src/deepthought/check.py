@@ -171,32 +171,38 @@ def _check_openvex(findings: list[Finding], report: CheckReport) -> None:
             report.fail(f"finding {finding.id!r} OpenVEX non-conformance: {err}")
 
 
-# The persisted drafts that are schema-gated, and the validator for each. The CVE
-# draft is intentionally non-submittable, so it is not gated; the advisory is
-# Markdown, not a schema type.
-_DISCLOSURE_DRAFTS = (
-    ("disclosure-csaf.json", validate_csaf),
-    ("disclosure-openvex.json", validate_openvex),
+# Every artifact a successful DISCLOSURE session writes. All FOUR must exist (they
+# are the human-review set); the two JSON drafts are additionally schema-validated.
+# The CVE draft is intentionally non-submittable, and the advisory is Markdown, so
+# those two are existence-checked only, not schema-gated.
+_DISCLOSURE_ARTIFACTS = (
+    "disclosure-advisory.md",
+    "disclosure-csaf.json",
+    "disclosure-openvex.json",
+    "disclosure-cve-draft.json",
 )
+_DISCLOSURE_SCHEMA_DRAFTS = {
+    "disclosure-csaf.json": validate_csaf,
+    "disclosure-openvex.json": validate_openvex,
+}
 
 
 def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
-    """Validate the PERSISTED CSAF/OpenVEX drafts, not just a re-derivation.
+    """Validate the PERSISTED disclosure drafts, not just a re-derivation.
 
-    A DISCLOSURE session writes ``detail/<session>/disclosure-*.json``. Those
-    durable artifacts are the ones a human reviews, so a corrupted OR missing
-    persisted draft must fail the gate — validating a fresh re-derivation would
-    miss it. A session that DREW drafts is identified by the record-level signal
-    ``findings_touched`` (only a successful draft sets it; every refusal leaves it
-    empty), so even a fully-deleted draft set is caught. A refused session is
-    skipped.
+    A DISCLOSURE session writes four ``detail/<session>/disclosure-*`` artifacts —
+    the durable set a human reviews. A session that DREW drafts is identified by
+    the record-level signal ``findings_touched`` (only a successful draft sets it;
+    every refusal leaves it empty). For such a session ALL four artifacts must
+    exist (a missing one fails the gate), and the two JSON drafts must additionally
+    be schema-conformant. A refused session is skipped.
     """
     for session in store.list_sessions():
         if session.type is not SessionType.disclosure:
             continue
         if not session.findings_touched:
             continue  # a refused disclosure session drafts nothing
-        for name, validate in _DISCLOSURE_DRAFTS:
+        for name in _DISCLOSURE_ARTIFACTS:
             ref = f"detail/{session.id}/{name}"
             content = store.read_detail(ref)
             if content is None:
@@ -204,6 +210,9 @@ def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
                     f"disclosure session {session.id!r} is missing expected draft {name!r}"
                 )
                 continue
+            validate = _DISCLOSURE_SCHEMA_DRAFTS.get(name)
+            if validate is None:
+                continue  # non-schema artifact (advisory / CVE draft): existence only
             try:
                 doc = json.loads(content)
             except json.JSONDecodeError as exc:
