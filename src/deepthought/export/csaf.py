@@ -67,10 +67,16 @@ def _cvss3_schema(minor: str) -> dict:
     cia_req = {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "NOT_DEFINED"]}
     score = {"type": "number", "minimum": 0, "maximum": 10}
     severity = {"type": "string", "enum": ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]}
-    metric = (
-        r"(AV:[NALP]|AC:[LH]|PR:[NLH]|UI:[NR]|S:[UC]|[CIA]:[NLH]|E:[XUPFH]|"
-        r"RL:[XOTWU]|RC:[XURC]|[CIA]R:[XLMH]|MAV:[XNALP]|MAC:[XLH]|"
-        r"MPR:[XNLH]|MUI:[XNR]|MS:[XUC]|M[CIA]:[XNLH])"
+    # The official FIRST.org CVSS 3.x vectorString pattern: the EIGHT base metrics
+    # are mandatory and ORDERED (AV/AC/PR/UI/S/C/I/A), followed by the optional
+    # temporal + environmental metrics. A permissive "(token/)*token" would wrongly
+    # accept a partial vector like "CVSS:3.1/AV:N", so `check` must key on the real
+    # shape.
+    _base = "AV:[NALP]/AC:[LH]/PR:[NLH]/UI:[NR]/S:[UC]/C:[NLH]/I:[NLH]/A:[NLH]"
+    _opt = (
+        "(/E:[XUPFH])?(/RL:[XOTWU])?(/RC:[XURC])?(/CR:[XLMH])?(/IR:[XLMH])?"
+        "(/AR:[XLMH])?(/MAV:[XNALP])?(/MAC:[XLH])?(/MPR:[XNLH])?(/MUI:[XNR])?"
+        "(/MS:[XUC])?(/MC:[XNLH])?(/MI:[XNLH])?(/MA:[XNLH])?"
     )
     return {
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -79,7 +85,7 @@ def _cvss3_schema(minor: str) -> dict:
             "version": {"type": "string", "enum": [f"3.{minor}"]},
             "vectorString": {
                 "type": "string",
-                "pattern": rf"^CVSS:3[.]{minor}/({metric}/)*{metric}$",
+                "pattern": rf"^CVSS:3[.]{minor}/{_base}{_opt}$",
             },
             "attackVector": {
                 "type": "string",

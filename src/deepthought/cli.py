@@ -366,12 +366,18 @@ def playbook_disclose(
         raise typer.Exit(code=2)
 
     _echo_session(record)
-    typer.echo("")
-    typer.echo(
-        "HUMAN GATE: nothing was transmitted, no CVE was assigned, and the finding "
-        "is unchanged (still verified). Coordinated disclosure requires a human to "
-        "review the drafts and send. Deep Thought drafts local artifacts only."
-    )
+    # Only assert the drafting human gate when drafts were actually produced. On a
+    # gate hold/refuse or a non-verified refusal the session writes nothing, and
+    # the teach-back above already states the reason — a success banner there would
+    # misstate the disclosure state.
+    if session.artifact_refs:
+        typer.echo("")
+        typer.echo(
+            "HUMAN GATE: nothing was transmitted, no CVE was assigned, and the "
+            "finding is unchanged (still verified). Coordinated disclosure requires "
+            "a human to review the drafts and send. Deep Thought drafts local "
+            "artifacts only."
+        )
 
 
 @playbook_app.command("findings")

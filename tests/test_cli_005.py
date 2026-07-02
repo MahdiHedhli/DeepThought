@@ -60,6 +60,9 @@ def test_disclose_refuses_a_non_verified_finding(tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert "not verified" in result.output
+    # The success banner must NOT appear on a refusal — it would misstate state.
+    assert "unchanged (still verified)" not in result.output
+    assert "review the drafts and send" not in result.output
 
 
 def test_publish_format_csaf_is_namespaced_and_validates(tmp_path):

@@ -172,3 +172,13 @@ def test_csaf_non_v3_vector_omits_scores_and_still_validates():
     doc = finding_to_csaf(make_finding(severity=Severity(cvss_vector=_CVSS_40, cvss_score=9.3)))
     assert "scores" not in doc["vulnerabilities"][0]
     assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
+def test_csaf_rejects_an_incomplete_cvss_vector():
+    """A prefixed-but-partial vector (missing mandatory base metrics) must FAIL
+    validation — the vectorString pattern requires the full ordered base, so a
+    finding with a malformed CVSS vector cannot green-light check."""
+    doc = finding_to_csaf(
+        make_finding(severity=Severity(cvss_vector="CVSS:3.1/AV:N", cvss_score=5.0))
+    )
+    assert validate_csaf(doc) != []
