@@ -141,7 +141,13 @@ docs/build-log/          # a per-feature build log
    context; the orchestrator captures only distilled envelopes, so it holds the
    working memory to chain exploits. The envelope doubles as an injection
    firewall.
-4. **Runtime** is Python for the core. The three verbs stay the contract.
+4. **Identifiers are safe by construction.** A record id is a file name in the
+   store, so every id is a single safe path segment enforced at the model boundary
+   (`RecordId`) — no traversal, separators, or control characters. The `Store`
+   guards its raw lookups, keeps detail access inside `detail/` (symlinks and
+   `..` included), and refuses a same-id/different-identity overwrite; unsafe
+   operator input becomes a controlled refusal, never a crash.
+5. **Runtime** is Python for the core. The three verbs stay the contract.
 
 ## Development
 

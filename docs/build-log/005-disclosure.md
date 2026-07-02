@@ -32,6 +32,9 @@ finding id (whitespace / path separators / CVE-shaped) — points at the root:
 `Finding.id` (and `Project.id`) are unconstrained, which is also a latent risk for
 the FileStore (records are files named by id). Harden the identifier fields at the
 Pydantic model boundary in a focused follow-up to close the class at the source.
+**RESOLVED** by PR #5 (squash `40031de`, 2026-07-02) — the `RecordId` constrained
+type plus FileStore path/identity hardening; see
+[`hardening-safe-ids.md`](hardening-safe-ids.md).
 
 ## What shipped
 
