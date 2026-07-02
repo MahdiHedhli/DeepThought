@@ -158,9 +158,11 @@ def _ranges_to_version_entries(ranges: list) -> list[dict]:
             continue  # a range with no events maps to nothing
         vtype = type_map.get(str(rng.get("type", "")).upper(), "custom")
         intro: str | None = "0"  # OSV implicit introduced-at-0
+        saw_introduced = False
         for event in events:
             if "introduced" in event:
                 intro = _bounded(event["introduced"]) or "0"
+                saw_introduced = True
             elif "fixed" in event and intro is not None:
                 entries.append({"version": intro, "lessThan": _bounded(event["fixed"]) or "*",
                                 "status": "affected", "versionType": vtype})
@@ -169,7 +171,11 @@ def _ranges_to_version_entries(ranges: list) -> list[dict]:
                 entries.append({"version": intro, "lessThanOrEqual": _bounded(event["last_affected"]) or "*",
                                 "status": "affected", "versionType": vtype})
                 intro = None
-        if intro is not None:  # an introduced with no closing event -> unbounded
+        # An EXPLICIT introduced with no closing event is an unbounded range. But a
+        # range with only a boundary/unhandled event (e.g. a bare `limit`) and no
+        # introduced/fixed/last_affected must NOT become "all affected" — the
+        # implicit intro='0' only anchors a fixed/last_affected that DID close.
+        if intro is not None and saw_introduced:
             entries.append({"version": intro, "lessThan": "*", "status": "affected", "versionType": vtype})
     return entries
 

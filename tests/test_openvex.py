@@ -263,6 +263,23 @@ def test_validate_does_not_crash_on_non_string_status():
     assert any("status" in e for e in errors)
 
 
+def test_range_affected_package_keeps_a_versionless_product():
+    """A package with exact versions AND OSV ranges emits a versionless product
+    PURL for the range scope, so the range is not dropped."""
+    from deepthought.schema import AffectedPackage
+
+    doc = finding_to_openvex(
+        make_finding(affected=[AffectedPackage(
+            ecosystem="PyPI", package="foo", versions=["1.0"],
+            ranges=[{"type": "ECOSYSTEM", "events": [{"introduced": "2.0"}, {"fixed": "3.0"}]}],
+        )])
+    )
+    ids = {p["@id"] for p in doc["statements"][0]["products"]}
+    assert "pkg:pypi/foo@1.0" in ids       # the exact version
+    assert "pkg:pypi/foo" in ids            # the versionless (range) product
+    assert validate_openvex(doc) == []
+
+
 def test_validate_does_not_crash_on_non_list_statements():
     """A truthy-but-non-list statements value must be REPORTED, not raise — the
     validator's list[str] contract holds for any input."""

@@ -101,7 +101,11 @@ def _products(finding: "Finding") -> list[dict]:
     products: list[dict] = []
     seen: set[str] = set()  # OpenVEX statement products must be unique
     for pkg in finding.affected or []:
-        versions = list(pkg.versions) if pkg.versions else [None]
+        versions: list[str | None] = [v for v in (pkg.versions or []) if v]
+        # A range-affected package is represented by its versionless PURL, so range
+        # scope is not dropped when the package also lists exact versions.
+        if pkg.ranges or not versions:
+            versions.append(None)
         for version in versions:
             pid = _purl_for(pkg, version) or local
             if pid in seen:

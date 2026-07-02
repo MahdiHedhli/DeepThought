@@ -137,6 +137,22 @@ def test_advisory_defuses_markdown_links_in_free_text():
     assert "\\[here\\]" in md
 
 
+def test_advisory_renders_affected_ranges():
+    """A range-only finding shows its OSV bounds in the Affected section, not
+    '(unspecified)' — consistent with the CSAF/CVE drafts."""
+    from deepthought.schema import AffectedPackage
+
+    md = finding_to_advisory(
+        make_finding(affected=[AffectedPackage(
+            ecosystem="PyPI", package="foo", versions=[],
+            ranges=[{"type": "ECOSYSTEM", "events": [{"introduced": "1.0"}, {"fixed": "2.0"}]}],
+        )])
+    )
+    # The range bounds contain finding data, so '>'/'<' are HTML-escaped (inert).
+    assert "&gt;=1.0" in md and "&lt;2.0" in md
+    assert "(unspecified)" not in md
+
+
 def test_advisory_body_details_are_escaped_too():
     """The Details block (scraped body prose) is escaped like every other free
     text — raw HTML in the body must not become active markup."""

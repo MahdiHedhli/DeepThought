@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ._ranges import range_labels
 from .osv import _details
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -110,13 +111,13 @@ def finding_to_advisory(finding: "Finding") -> str:
     parts.append("## Affected")
     if finding.affected:
         for pkg in finding.affected:
-            versions = (
-                ", ".join(_inline(v) for v in pkg.versions)
-                if pkg.versions
-                else "(unspecified)"
-            )
+            # Exact versions AND OSV range bounds — so a range-only finding keeps
+            # its actual scope in the human-readable advisory too.
+            scope = [_inline(v) for v in pkg.versions if v and v.strip()]
+            scope += [_inline(label) for label in range_labels(pkg.ranges)]
+            scope_text = ", ".join(scope) if scope else "(unspecified)"
             parts.append(
-                f"- {_inline(pkg.ecosystem)}: {_inline(pkg.package)} — versions {versions}"
+                f"- {_inline(pkg.ecosystem)}: {_inline(pkg.package)} — {scope_text}"
             )
     else:
         parts.append("- (no affected packages recorded)")

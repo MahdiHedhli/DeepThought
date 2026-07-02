@@ -124,6 +124,27 @@ def test_cve_bounds_overlong_product_and_url():
     assert validate_cve_draft(draft) == []
 
 
+def test_cve_limit_only_range_is_not_all_affected():
+    """A range with only a boundary/unhandled event (e.g. a bare 'limit') and no
+    introduced/fixed/last_affected must NOT become {version: 0, lessThan: '*'}
+    (all affected) — it contributes nothing, so the package falls back to
+    'unspecified'."""
+    from deepthought.schema import AffectedPackage
+
+    draft = finding_to_cve_draft(
+        make_finding(
+            affected=[AffectedPackage(
+                ecosystem="Git", package="p", versions=[],
+                ranges=[{"type": "GIT", "events": [{"limit": "refs/tags/v9"}]}],
+            )]
+        )
+    )
+    versions = draft["containers"]["cna"]["affected"][0]["versions"]
+    assert versions == [{"version": "unspecified", "status": "affected", "versionType": "custom"}]
+    assert not any(v.get("lessThan") == "*" for v in versions)
+    assert validate_cve_draft(draft) == []
+
+
 def test_cve_range_with_implicit_introduced_zero_is_not_dropped():
     """An OSV range starting with a bare 'fixed' (no 'introduced') implies
     introduced at 0 — it maps to [0, fixed) rather than being dropped."""

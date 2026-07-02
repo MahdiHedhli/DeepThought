@@ -36,6 +36,7 @@ from referencing import Registry, Resource
 from ..schema.common import iso_z, utcnow
 from ._cvss import cvss3_metric, cvss3_schema
 from ._formats import format_checker, is_safe_http_url
+from ._ranges import range_labels
 from .osv import _details, osv_id_for
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -58,34 +59,6 @@ _CVE_RE = re.compile(r"^CVE-[0-9]{4}-[0-9]{4,19}$")
 # "external" reference — including the published advisory/fix links a disclosed or
 # patched finding carries.
 _SELF_REF_TYPES = frozenset({"self", "source", "detection", "location"})
-
-
-def _range_labels(ranges: list) -> list[str]:
-    """Human-readable version-range labels from OSV-style ``ranges``, deduped.
-
-    Each range's introduced/fixed/last_affected events become a readable bound
-    string (e.g. ``>=1.0, <2.0``) carried as a CSAF ``product_version_range`` name,
-    so range-only affected scope is preserved rather than dropped. Ranges with no
-    recognizable events yield no label.
-    """
-    labels: list[str] = []
-    for rng in ranges or []:
-        if not isinstance(rng, dict):
-            continue
-        parts: list[str] = []
-        for event in rng.get("events") or []:
-            if not isinstance(event, dict):
-                continue
-            if "introduced" in event:
-                parts.append(f">={_nonempty(event['introduced'], '0')}")
-            elif "fixed" in event:
-                parts.append(f"<{_nonempty(event['fixed'], '?')}")
-            elif "last_affected" in event:
-                parts.append(f"<={_nonempty(event['last_affected'], '?')}")
-        label = ", ".join(parts).strip()
-        if label:
-            labels.append(label)
-    return list(dict.fromkeys(labels))
 
 
 def _nonempty(text: object, fallback: str) -> str:
@@ -183,7 +156,7 @@ def _products(finding: "Finding") -> tuple[dict, list[str]]:
         # (product_version_range) — so a range-only finding keeps its actual bounds
         # instead of collapsing to "unspecified".
         leaves: list[tuple[str, str]] = [("product_version", v) for v in versions]
-        leaves += [("product_version_range", label) for label in _range_labels(pkg.ranges)]
+        leaves += [("product_version_range", label) for label in range_labels(pkg.ranges)]
         if not leaves:
             leaves = [("product_version", "unspecified")]
         version_branches = []
