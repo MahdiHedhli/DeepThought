@@ -188,9 +188,31 @@ def test_check_fails_when_a_persisted_disclosure_draft_is_deleted(state_dir):
     run_session(store, HermesUltraCodeGate(), session)
     assert run_check(store).ok
 
-    # Delete just the OpenVEX draft; the advisory/csaf/cve-draft remain, so the
-    # session is still recognizably a drafting session.
+    # Delete just the OpenVEX draft; the session's record still shows it drafted.
     (store.root / session.artifact_refs["disclosure-openvex.json"]).unlink()
+    report = run_check(store)
+    assert not report.ok
+    assert any("missing expected draft" in e for e in report.errors)
+
+
+def test_check_fails_when_all_disclosure_drafts_are_deleted(state_dir):
+    """Even deleting the ENTIRE draft set fails the gate — the record-level
+    findings_touched signal (not artifact presence) marks the drafting session."""
+    from deepthought.protocol import HermesUltraCodeGate, run_session
+    from deepthought.sessions import DisclosureSession
+
+    store = FileStore(state_dir)
+    store.save_project(make_project())
+    ev = store.write_detail("S-seed", "evidence.txt", "resolving evidence")
+    store.save_finding(make_finding(status="verified", evidence_ref=ev))
+
+    session = DisclosureSession("php-src", "F-0007")
+    record = run_session(store, HermesUltraCodeGate(), session)
+    assert run_check(store).ok
+
+    # Wipe every persisted draft; the Session record still says it drafted.
+    for ref in session.artifact_refs.values():
+        (store.root / ref).unlink()
     report = run_check(store)
     assert not report.ok
     assert any("missing expected draft" in e for e in report.errors)

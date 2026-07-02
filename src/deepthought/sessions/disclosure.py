@@ -129,7 +129,9 @@ class DisclosureSession(BaseSession):
                         f"to verified on resolving evidence), then re-run "
                         f"DISCLOSURE to draft its advisory and VEX."
                     ),
-                    findings_touched=[finding.id],
+                    # A refusal drafts nothing, so it touches no finding — an empty
+                    # findings_touched is the record-level signal that no drafts
+                    # exist (only a successful draft sets findings_touched).
                 )
             )
 

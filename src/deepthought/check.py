@@ -171,16 +171,6 @@ def _check_openvex(findings: list[Finding], report: CheckReport) -> None:
             report.fail(f"finding {finding.id!r} OpenVEX non-conformance: {err}")
 
 
-# Every artifact a SUCCESSFUL DISCLOSURE session writes. The presence of ANY of
-# them marks the session as having drafted (vs a refusal, which writes none), so a
-# later-deleted draft is distinguishable from a refusal and reported as missing.
-_DISCLOSURE_ARTIFACTS = (
-    "disclosure-advisory.md",
-    "disclosure-csaf.json",
-    "disclosure-openvex.json",
-    "disclosure-cve-draft.json",
-)
-
 # The persisted drafts that are schema-gated, and the validator for each. The CVE
 # draft is intentionally non-submittable, so it is not gated; the advisory is
 # Markdown, not a schema type.
@@ -196,17 +186,15 @@ def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
     A DISCLOSURE session writes ``detail/<session>/disclosure-*.json``. Those
     durable artifacts are the ones a human reviews, so a corrupted OR missing
     persisted draft must fail the gate — validating a fresh re-derivation would
-    miss it. A session that drafted (any artifact present) MUST carry conformant
-    CSAF and OpenVEX drafts; a refused session (no artifacts) is skipped.
+    miss it. A session that DREW drafts is identified by the record-level signal
+    ``findings_touched`` (only a successful draft sets it; every refusal leaves it
+    empty), so even a fully-deleted draft set is caught. A refused session is
+    skipped.
     """
     for session in store.list_sessions():
         if session.type is not SessionType.disclosure:
             continue
-        drafted = any(
-            store.detail_exists(f"detail/{session.id}/{name}")
-            for name in _DISCLOSURE_ARTIFACTS
-        )
-        if not drafted:
+        if not session.findings_touched:
             continue  # a refused disclosure session drafts nothing
         for name, validate in _DISCLOSURE_DRAFTS:
             ref = f"detail/{session.id}/{name}"

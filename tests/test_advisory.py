@@ -165,7 +165,8 @@ def test_status_footer_reflects_the_finding_status_and_cve():
     names the real CVE and status (so a rendered disclosed/patched advisory does
     not misstate its state), while always asserting nothing was transmitted."""
     md = finding_to_advisory(make_finding(status="disclosed", cve="CVE-2026-12345"))
-    assert "CVE CVE-2026-12345" in md
+    assert "CVE-2026-12345" in md
+    assert "CVE CVE-2026-12345" not in md  # no duplicated CVE prefix
     assert "finding status: disclosed" in md
     assert "nothing transmitted" in md
     # And the verified/no-CVE case reads accordingly.

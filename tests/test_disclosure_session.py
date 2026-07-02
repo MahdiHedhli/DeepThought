@@ -117,7 +117,9 @@ def test_refuses_a_non_verified_finding(state_dir):
             assert record.close_state is CloseState.clean
             assert "not verified" in session.outcome.summary
             assert session.artifact_refs == {}
-            assert session.outcome.findings_touched == ["F-0007"]
+            # A refusal drafts nothing, so it touches no finding — this empty
+            # signal is what check uses to tell a refusal from a drafting session.
+            assert session.outcome.findings_touched == []
 
 
 def test_does_not_transition_the_finding_or_mutate_it(state_dir, monkeypatch):

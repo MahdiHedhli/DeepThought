@@ -307,18 +307,27 @@ class FileStore(Store):
         self._write(self.root / "detail" / session_id / name, content)
         return ref
 
+    def _detail_path(self, ref: str) -> Path | None:
+        """Resolve a ``detail/...`` ref to a path INSIDE the store, or ``None``.
+
+        The ref can be derived from a (possibly tampered) session id, so a ref
+        that escapes the store root via ``..`` or an absolute path is rejected —
+        detail access never reads outside the store boundary.
+        """
+        rel = ref[len("state/") :] if ref.startswith("state/") else ref
+        base = self.root.resolve()
+        target = (self.root / rel).resolve()
+        if target != base and base not in target.parents:
+            return None
+        return target
+
     def detail_exists(self, ref: str) -> bool:
-        rel = ref
-        if rel.startswith("state/"):
-            rel = rel[len("state/") :]
-        return (self.root / rel).exists()
+        path = self._detail_path(ref)
+        return path is not None and path.exists()
 
     def read_detail(self, ref: str) -> str | None:
-        rel = ref
-        if rel.startswith("state/"):
-            rel = rel[len("state/") :]
-        path = self.root / rel
-        if not path.is_file():
+        path = self._detail_path(ref)
+        if path is None or not path.is_file():
             return None
         return path.read_text(encoding="utf-8")
 

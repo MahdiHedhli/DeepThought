@@ -35,7 +35,9 @@ def _status_footer(finding: "Finding") -> str:
     and always asserts the load-bearing invariant: Deep Thought transmitted
     nothing (any real disclosure is a human act).
     """
-    cve = f"CVE {finding.cve}" if finding.cve else "no CVE assigned"
+    # finding.cve already carries the "CVE-" prefix; render it directly so the
+    # footer reads "CVE-2026-..." not "CVE CVE-2026-...".
+    cve = finding.cve if finding.cve else "no CVE assigned"
     return (
         f"DRAFT rendering — {cve}; finding status: {finding.status.value}; "
         f"nothing transmitted (Deep Thought emits local artifacts only)."

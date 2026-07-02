@@ -239,3 +239,22 @@ def test_get_coverage_corrupt_legacy_returns_none(state_dir):
     legacy.write_text("not a valid record — no front matter")
     # A corrupt legacy file must not crash the lookup.
     assert store.get_coverage("p", "ext/soap") is None
+
+
+def test_detail_write_read_roundtrip(state_dir):
+    store = FileStore(state_dir)
+    ref = store.write_detail("S-1", "note.txt", "hello")
+    assert store.detail_exists(ref)
+    assert store.read_detail(ref) == "hello"
+    assert store.read_detail("detail/S-1/absent.txt") is None
+
+
+def test_detail_access_rejects_path_traversal(state_dir, tmp_path):
+    """A ref that escapes the store root (via ``..``) must not be read or reported
+    as existing — detail access stays inside the store boundary."""
+    store = FileStore(state_dir)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET")
+    assert store.read_detail(f"detail/../../{secret.name}") is None
+    assert store.detail_exists(f"detail/../../{secret.name}") is False
+    assert store.read_detail(f"detail/S-1/../../../{secret.name}") is None
