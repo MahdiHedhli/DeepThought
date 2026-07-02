@@ -171,9 +171,19 @@ def _check_openvex(findings: list[Finding], report: CheckReport) -> None:
             report.fail(f"finding {finding.id!r} OpenVEX non-conformance: {err}")
 
 
-# The persisted disclosure drafts a DISCLOSURE session writes, and the validator
-# for each. The CVE draft is intentionally non-submittable, so it is not gated;
-# the advisory is Markdown, not a schema type.
+# Every artifact a SUCCESSFUL DISCLOSURE session writes. The presence of ANY of
+# them marks the session as having drafted (vs a refusal, which writes none), so a
+# later-deleted draft is distinguishable from a refusal and reported as missing.
+_DISCLOSURE_ARTIFACTS = (
+    "disclosure-advisory.md",
+    "disclosure-csaf.json",
+    "disclosure-openvex.json",
+    "disclosure-cve-draft.json",
+)
+
+# The persisted drafts that are schema-gated, and the validator for each. The CVE
+# draft is intentionally non-submittable, so it is not gated; the advisory is
+# Markdown, not a schema type.
 _DISCLOSURE_DRAFTS = (
     ("disclosure-csaf.json", validate_csaf),
     ("disclosure-openvex.json", validate_openvex),
@@ -184,17 +194,28 @@ def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
     """Validate the PERSISTED CSAF/OpenVEX drafts, not just a re-derivation.
 
     A DISCLOSURE session writes ``detail/<session>/disclosure-*.json``. Those
-    durable artifacts are the ones a human reviews, so a corrupted persisted draft
-    must fail the gate — validating a fresh re-derivation would miss it.
+    durable artifacts are the ones a human reviews, so a corrupted OR missing
+    persisted draft must fail the gate — validating a fresh re-derivation would
+    miss it. A session that drafted (any artifact present) MUST carry conformant
+    CSAF and OpenVEX drafts; a refused session (no artifacts) is skipped.
     """
     for session in store.list_sessions():
         if session.type is not SessionType.disclosure:
             continue
+        drafted = any(
+            store.detail_exists(f"detail/{session.id}/{name}")
+            for name in _DISCLOSURE_ARTIFACTS
+        )
+        if not drafted:
+            continue  # a refused disclosure session drafts nothing
         for name, validate in _DISCLOSURE_DRAFTS:
             ref = f"detail/{session.id}/{name}"
             content = store.read_detail(ref)
             if content is None:
-                continue  # a refused disclosure session drafts nothing
+                report.fail(
+                    f"disclosure session {session.id!r} is missing expected draft {name!r}"
+                )
+                continue
             try:
                 doc = json.loads(content)
             except json.JSONDecodeError as exc:
