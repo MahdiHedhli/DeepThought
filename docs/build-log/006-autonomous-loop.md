@@ -1,19 +1,39 @@
 # Build Session Log — Feature 006, Autonomous loop & limit awareness
 
-> **STATUS: built, green, in dual-gate review.** The last numbered feature: a
-> deterministic, bounded, gated driver over the existing sessions. It chains the
-> safe, read-only, draft-only work (STATUS → MAP → DISCOVER → SIBLING HUNT /
-> DISCLOSURE) behind the Gate, under a required budget, and stops for exactly one
-> recorded reason. It **cannot expand its own scope** (no NEW PROJECT, no scope
-> write — Article IX), **executes no target code** (it constructs no verify
-> session and no sandbox — a candidate needing real reproduction is an escalation,
-> Article III), and **transmits nothing** (disclosure stays draft-only, Article V).
-> **549 tests green (513 baseline + 36 new); all six smokes pass.**
+> **STATUS: MERGED to `main` (PR #6, squash `69c8fc1`, 2026-07-02).** The last
+> numbered feature: a deterministic, bounded, gated driver over the existing
+> sessions. It chains the safe, read-only, draft-only work (STATUS → MAP → DISCOVER
+> → SIBLING HUNT / DISCLOSURE) behind the Gate, under a required budget, and stops
+> for exactly one recorded reason. It **cannot expand its own scope** (no NEW
+> PROJECT, no scope write — Article IX), **executes no target code** (it constructs
+> no verify session and no sandbox, and the loop's IMPORT closure excludes them — a
+> candidate needing real reproduction is an escalation, Article III), and
+> **transmits nothing** (disclosure stays draft-only; the human review-and-send is
+> a persistent escalation, Article V). **570 tests green (513 baseline + 57 new);
+> all six smokes pass.** Reviewed to a clean dual-gate (codex gpt-5.5 + agy/Gemini
+> adversarial, both CLEAN on the same HEAD `092ccb7`) over 11 rounds.
 
-**Feature:** 006-autonomous-loop
-**Branch:** `006-autonomous-loop`
+**Feature:** 006-autonomous-loop (merged and deleted)
 **Predecessor gate:** the safe-id/FileStore hardening merged to `main` (PR #5,
 squash `40031de`).
+**Merge:** PR #6, squash `69c8fc1`, 2026-07-02 — dual-gate clean (codex + agy).
+
+## Review & merge (summary)
+
+An exceptionally deep dual-gate — 11 rounds. agy was clean from round 2 (bar one
+round); codex drove the depth, each round surfacing a real, distinct correctness
+defect in the loop's state machine. The findings clustered and were closed at the
+root, not edge-by-edge: **completion signals** (a rung is done only on gate-proceed
++ clean-close; MAP per-area; DISCOVER stale once coverage post-dates it),
+**budgets** (all-None / non-positive / non-finite refused; wall = real elapsed time,
+enforced every iteration), **disclosure** (drafted requires drafts that resolve AND
+validate; the Article V send is a persistent escalation), **escalations**
+(enumerated in one bounded pass, not a per-escalation selector loop), the
+**import-level** hard stop (the loop loads none of verify/sandbox), and audit
+integrity (LoopRun check-visible + trace-orphan validated; missing-project refusal
+unpersisted; gap-safe run ids). Two follow-ups were tracked, not scope-crept: a
+legacy-store RecordId migration and a `generate_session_id` gap-collision fix (the
+same pattern fixed here for `generate_loop_run_id`).
 
 ## What shipped
 
