@@ -38,6 +38,60 @@ def test_fails_on_schema_violation(state_dir):
     assert any("schema violation" in e for e in report.errors)
 
 
+def test_check_validates_loop_run_records(state_dir):
+    """A LoopRun is a first-class Store record, so `check` must load and validate
+    it (not silently skip the loop/ directory) — a valid run passes and a corrupt
+    one is reported, never dismissed as an unknown kind."""
+    from deepthought.loop import LoopBudget
+    from deepthought.schema.loop import LoopRun
+
+    store = _consistent_store(state_dir)
+    store.save_loop_run(LoopRun(
+        id="L-2026-07-02-0001", project="php-src", started="2026-07-02T00:00:00Z",
+        stop_reason="fixed_point", budget=LoopBudget(max_sessions=5),
+        body="## Summary\n\nran\n\n## Next steps\n\ndone",
+    ))
+    report = run_check(store)
+    assert report.ok, report.errors
+    assert not any("unknown record kind" in e for e in report.errors)
+
+    # A corrupted loop record (stray front-matter key) is caught, not skipped.
+    path = state_dir / "loop" / "L-2026-07-02-0001.md"
+    path.write_text(path.read_text().replace("stop_reason:", "bogus_key: x\nstop_reason:"))
+    bad = run_check(store)
+    assert not bad.ok
+    assert any("schema violation" in e for e in bad.errors)
+
+
+def test_check_flags_loop_trace_orphans(state_dir):
+    """A LoopRun trace that names a deleted finding/session/project must be reported
+    — the audit record cannot silently point at missing state."""
+    from deepthought.loop import LoopBudget
+    from deepthought.schema.loop import LoopRun, LoopStep
+
+    store = _consistent_store(state_dir)
+    store.save_loop_run(LoopRun(
+        id="L-1", project="php-src", started="t", stop_reason="hard_stop",
+        budget=LoopBudget(max_sessions=5),
+        trace=[
+            LoopStep(kind="sibling_hunt", session_id="S-missing", finding="F-0007"),
+            LoopStep(kind="verify_escalation", finding="F-missing"),
+        ],
+        body="## Summary\n\nx\n\n## Next steps\n\ny",
+    ))
+    report = run_check(store)
+    assert not report.ok
+    assert any("F-missing" in e for e in report.errors)
+    assert any("S-missing" in e for e in report.errors)
+
+    # An unknown project reference is flagged too.
+    store.save_loop_run(LoopRun(
+        id="L-2", project="ghost", started="t", stop_reason="fixed_point",
+        budget=LoopBudget(max_sessions=5), body="## Summary\n\nx\n\n## Next steps\n\ny",
+    ))
+    assert any("ghost" in e for e in run_check(store).errors)
+
+
 def test_fails_on_illegal_lifecycle_state(state_dir):
     store = FileStore(state_dir)
     store.save_project(make_project())

@@ -415,6 +415,7 @@ class FileStore(Store):
             "session": (self.root / "sessions").glob("*.md"),
             "coverage": (self.root / "coverage").glob("*/*.md"),
             "methodology": (self.root / "methodology").glob("*.md"),
+            "loop": (self.root / "loop").glob("*.md"),
         }
         for kind, paths in globs.items():
             for path in sorted(paths):

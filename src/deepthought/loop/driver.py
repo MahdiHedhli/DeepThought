@@ -16,7 +16,7 @@ from datetime import datetime
 
 from ..protocol import run_session
 from ..protocol.gate import Gate
-from ..schema import GateOutcome
+from ..schema import CloseState, GateOutcome
 from ..schema.common import ContextCost, iso_z, safe_record_id, utcnow
 from ..schema.loop import ActionKind, LoopAction, LoopRun, LoopStep, StopReason
 from ..sessions import (
@@ -131,11 +131,24 @@ def run_loop(
         ))
         spent = spent.plus(record.context_cost)
         if record.gate_outcome is not GateOutcome.proceed:
+            # Carry the gate's own remediation reason into the teach-back rather
+            # than falling back to the generic fixed-point message.
+            outstanding.append(
+                f"Gate {record.gate_outcome.value} on {action.project!r}: "
+                f"{record.gate_reason} — resolve authorization/scope, then re-run."
+            )
             stop_reason = (
                 StopReason.gate_held if record.gate_outcome is GateOutcome.hold
                 else StopReason.gate_refused
             )
             break
+        # A drafted disclosure still needs a human to review and SEND it — the
+        # transmission boundary is a hard stop (Article V). Name it in the audit.
+        if action.kind is ActionKind.disclosure and record.close_state is CloseState.clean:
+            outstanding.append(
+                f"{action.finding} disclosure drafted — human review and send "
+                f"required (Article V); Deep Thought drafts only, never transmits."
+            )
 
     return _persist(store, project.id, budget, now, clock, stop_reason, spent,
                     trace, outstanding, planned)

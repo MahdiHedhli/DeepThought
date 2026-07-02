@@ -35,6 +35,7 @@ from .schema import (
     Session,
     SessionType,
 )
+from .schema.loop import LoopRun
 from .store import Store
 
 _MODEL_BY_KIND = {
@@ -43,6 +44,7 @@ _MODEL_BY_KIND = {
     "session": Session,
     "coverage": Coverage,
     "methodology": Methodology,
+    "loop": LoopRun,
 }
 
 
@@ -124,6 +126,26 @@ def _check_orphans(parsed: dict[str, list], report: CheckReport) -> None:
             if fid not in finding_ids:
                 report.fail(
                     f"session {session.id!r} touched unknown finding {fid!r}"
+                )
+
+    # A LoopRun is a durable audit; its project and every trace reference must
+    # still resolve, so a hand-edited/conflicted run cannot point at deleted state.
+    session_ids = {s.id for s in parsed["session"]}
+    for run in parsed["loop"]:
+        if run.project not in project_ids:
+            report.fail(
+                f"loop run {run.id!r} references unknown project {run.project!r}"
+            )
+        for step in run.trace:
+            if step.finding is not None and step.finding not in finding_ids:
+                report.fail(
+                    f"loop run {run.id!r} trace references unknown finding "
+                    f"{step.finding!r}"
+                )
+            if step.session_id is not None and step.session_id not in session_ids:
+                report.fail(
+                    f"loop run {run.id!r} trace references unknown session "
+                    f"{step.session_id!r}"
                 )
 
 

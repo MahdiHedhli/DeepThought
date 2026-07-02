@@ -93,6 +93,23 @@ def test_unauthorized_project_stops_at_the_gate(state_dir, tmp_path):
     assert run.stop_reason is StopReason.gate_refused
     assert run.sessions_run == 1
     assert run.trace and run.trace[0].gate_outcome.value == "refuse"
+    # the gate's remediation reason is carried into the durable teach-back, not
+    # replaced by the generic "no further safe work" fixed-point message.
+    assert run.has_next_steps()
+    assert any("authorization basis" in a for a in run.outstanding_actions), run.outstanding_actions
+
+
+def test_second_loop_run_does_not_rehunt_or_redraft(state_dir, tmp_path):
+    """A verified finding hunted/drafted in one run is not re-hunted or re-drafted
+    on the next — repeated loop runs converge (no duplicate sessions)."""
+    store = _seed(state_dir, tmp_path)
+    store.save_finding(make_finding(id="F-1", project="php-src", status="verified"))
+    run1 = run_loop(store, GATE, "php-src", LoopBudget(max_sessions=20))
+    assert sum(s.kind is ActionKind.sibling_hunt for s in run1.trace) == 1
+    assert sum(s.kind is ActionKind.disclosure for s in run1.trace) == 1
+    run2 = run_loop(store, GATE, "php-src", LoopBudget(max_sessions=20))
+    assert not any(s.kind is ActionKind.sibling_hunt for s in run2.trace)
+    assert not any(s.kind is ActionKind.disclosure for s in run2.trace)
 
 
 def test_loop_expands_no_scope_and_constructs_no_sandbox(state_dir, tmp_path):
@@ -104,7 +121,9 @@ def test_loop_expands_no_scope_and_constructs_no_sandbox(state_dir, tmp_path):
     assert len(store.list_projects()) == 1                          # no new project
     # a verified finding is drafted (disclosure) but never advanced to disclosed
     assert store.get_finding("F-1").status.value == "verified"
-    assert run.stop_reason in (StopReason.fixed_point, StopReason.hard_stop)
+    # the disclosure SEND is a human hard stop, named in the durable audit
+    assert any("F-1" in a and "send" in a.lower() for a in run.outstanding_actions)
+    assert run.stop_reason is StopReason.hard_stop
     # structural: the driver constructs no VerifySession / sandbox and imports no
     # network module — the hard stops cannot be crossed even in principle.
     src = inspect.getsource(driver_module)

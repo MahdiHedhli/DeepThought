@@ -46,9 +46,19 @@ def select_next_action(
     findings = store.list_findings(pid)
     verified = [f for f in findings if f.status is FindingStatus.verified]
 
+    # A verified finding hunted in a PRIOR loop run is recorded in that run's
+    # trace — the cross-run "done" signal, so repeated `deepthought loop`
+    # invocations converge instead of re-hunting the same finding forever.
+    hunted_before = {
+        step.finding
+        for run in store.list_loop_runs(pid)
+        for step in run.trace
+        if step.kind is ActionKind.sibling_hunt and step.finding
+    }
+
     # 4. SIBLING HUNT — variants of the first verified finding not yet hunted.
     for f in verified:
-        if fresh(ActionKind.sibling_hunt, f.id):
+        if f.id not in hunted_before and fresh(ActionKind.sibling_hunt, f.id):
             return LoopAction(kind=ActionKind.sibling_hunt, project=pid, finding=f.id)
 
     # 5. DISCLOSURE (draft) — for the first verified finding lacking drafts. A
