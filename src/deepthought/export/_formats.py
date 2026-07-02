@@ -40,19 +40,26 @@ def _is_date_time(value: object) -> bool:
         return False
 
 
+# A disclosure URI must be a clean, whitespace/control-free http(s) URL with an
+# authority — matching the SARIF ingest's posture. This refuses active/foreign
+# schemes (javascript:, file:, data:, …) so a draft never carries a dangerous link
+# into a human-reviewed artifact.
+_SAFE_HTTP_URL_RE = re.compile(r"^https?://(?![/?#])[!-~]+$", re.IGNORECASE)
+
+
+def is_safe_http_url(value: object) -> bool:
+    """Whether ``value`` is a clean http(s) URL (no whitespace, safe scheme)."""
+    return isinstance(value, str) and bool(_SAFE_HTTP_URL_RE.match(value))
+
+
 def _is_uri(value: object) -> bool:
+    # Only a string is a uri; a non-string is a type error handled by the schema's
+    # own "type" keyword. Disclosure uri fields (publisher namespace, references)
+    # are web links, so restrict them to safe http(s) — an active scheme like
+    # javascript:/file: is refused rather than emitted into a draft.
     if not isinstance(value, str):
         return True
-    # A URI cannot contain whitespace or control characters (urlparse would still
-    # accept "https://exa mple.com"); reject those before the structural check.
-    if not value or any(c.isspace() or ord(c) < 0x20 for c in value):
-        return False
-    try:
-        parsed = urlparse(value)
-    except ValueError:
-        return False
-    # A URI needs a scheme and some hierarchical/opaque part.
-    return bool(parsed.scheme) and bool(parsed.netloc or parsed.path)
+    return is_safe_http_url(value)
 
 
 def format_checker() -> jsonschema.FormatChecker:

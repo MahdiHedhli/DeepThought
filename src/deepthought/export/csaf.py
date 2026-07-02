@@ -35,7 +35,7 @@ from referencing import Registry, Resource
 
 from ..schema.common import iso_z, utcnow
 from ._cvss import cvss3_metric, cvss3_schema
-from ._formats import format_checker
+from ._formats import format_checker, is_safe_http_url
 from .osv import _details, osv_id_for
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -252,7 +252,9 @@ def _references(finding: "Finding") -> list[dict]:
     """
     refs: list[dict] = []
     for ref in finding.references:
-        if not (ref.url and ref.url.strip()):
+        # Only clean http(s) links — never carry an active/foreign scheme
+        # (javascript:, file:, …) into a human-reviewed draft.
+        if not is_safe_http_url(ref.url):
             continue
         rtype = ref.type.strip()
         category = "self" if rtype in _SELF_REF_TYPES else "external"

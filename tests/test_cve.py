@@ -365,6 +365,22 @@ def test_validate_does_not_crash_on_non_object_input():
         assert isinstance(errors, list) and errors
 
 
+def test_cve_drops_dangerous_scheme_references():
+    """A javascript:/file: reference is dropped from the CVE draft; a safe http(s)
+    reference is kept and the draft validates."""
+    from deepthought.schema import Reference
+
+    draft = finding_to_cve_draft(
+        make_finding(references=[
+            Reference(type="web", url="file:///etc/passwd"),
+            Reference(type="advisory", url="https://ok.test/a"),
+        ])
+    )
+    urls = {r["url"] for r in draft["containers"]["cna"]["references"]}
+    assert urls == {"https://ok.test/a"}
+    assert validate_cve_draft(draft) == []
+
+
 def test_cve_references_skip_empty_urls_and_never_emit_blank():
     """An empty reference url must not become an invalid "" in the draft, and
     valid later urls are preserved; with no usable url a placeholder is used."""

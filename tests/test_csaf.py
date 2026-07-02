@@ -335,6 +335,22 @@ def test_csaf_reference_with_blank_type_gets_a_default_summary():
     assert validate_csaf(doc) == [], validate_csaf(doc)
 
 
+def test_csaf_drops_dangerous_scheme_references():
+    """A javascript:/file: reference is dropped (never carried into the draft); a
+    safe http(s) reference is kept, and the draft validates."""
+    from deepthought.schema import Reference
+
+    doc = finding_to_csaf(
+        make_finding(references=[
+            Reference(type="web", url="javascript:alert(1)"),
+            Reference(type="advisory", url="https://ok.test/a"),
+        ])
+    )
+    urls = {r["url"] for r in doc["vulnerabilities"][0].get("references", [])}
+    assert urls == {"https://ok.test/a"}
+    assert validate_csaf(doc) == [], validate_csaf(doc)
+
+
 def test_csaf_skips_empty_reference_urls():
     """An empty reference url is skipped rather than emitted as an invalid ""; a
     finding whose only reference has an empty url still validates."""

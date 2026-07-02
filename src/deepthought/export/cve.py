@@ -35,7 +35,7 @@ from referencing.jsonschema import DRAFT7
 
 from ..schema.common import iso_z, utcnow  # noqa: F401  (re-exported timestamp helper)
 from ._cvss import cvss3_metric, cvss3_schema
-from ._formats import format_checker
+from ._formats import format_checker, is_safe_http_url
 from .osv import _details, osv_id_for  # reuse body-prose scraping + id mapping
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -258,7 +258,9 @@ def finding_to_cve_draft(finding: "Finding") -> dict:
     seen_urls: set[str] = set()
     for ref in finding.references:
         url = ref.url
-        if not (url and url.strip()) or len(url) > _URL_MAX or url in seen_urls:
+        # Only clean http(s) links within the length limit, deduped — never an
+        # active/foreign scheme (javascript:, file:, …).
+        if not is_safe_http_url(url) or len(url) > _URL_MAX or url in seen_urls:
             continue
         seen_urls.add(url)
         ref_urls.append(url)
