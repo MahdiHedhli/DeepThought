@@ -142,6 +142,20 @@ def test_publish_disclosure_formats_are_status_filtered(tmp_path):
     assert not (out / "csaf" / "x_F-0008.json").exists()   # candidate -> filtered out
 
 
+def test_publish_stem_is_filesystem_safe():
+    """A finding id with path separators / '..' must not produce an artifact path
+    that escapes the format directory."""
+    from deepthought.cli import _safe_stem
+
+    for bad in ("F/../../etc/passwd", "F\\..\\x", "a/b/c", "..", "F-0007"):
+        stem = _safe_stem(bad)
+        assert "/" not in stem and "\\" not in stem
+        assert stem not in ("", ".", "..")
+        assert not stem.startswith("..")
+    # normal ids are unchanged (aside from the x_ prefix)
+    assert _safe_stem("F-0007") == "x_F-0007"
+
+
 def test_publish_unknown_format_is_refused(tmp_path):
     state = tmp_path / "state"
     _seed_verified(state)

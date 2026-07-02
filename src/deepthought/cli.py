@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -428,9 +429,21 @@ _DISCLOSURE_STATUSES = frozenset(
 )
 
 
+def _safe_stem(finding_id: str) -> str:
+    """A filesystem-safe artifact filename stem for a finding id.
+
+    A finding id can contain path separators or ``..`` (the model and check do not
+    forbid it, and records can be hand-edited); using it raw in ``out/<fmt>/<stem>``
+    could traverse out of the format directory. Non-``[A-Za-z0-9._-]`` characters
+    are replaced with ``_``, and the stable ``x_`` prefix keeps the result from
+    ever being ``.`` / ``..``.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", osv_id_for(finding_id)) or "artifact"
+
+
 def _write_format(fmt: str, finding, dest: Path) -> Path:
     """Emit ONE finding in ONE format as a LOCAL artifact; return the path."""
-    stem = osv_id_for(finding.id)
+    stem = _safe_stem(finding.id)
     if fmt == "advisory":
         path = dest / f"{stem}.md"
         path.write_text(finding_to_advisory(finding) + "\n", encoding="utf-8")
