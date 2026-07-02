@@ -6,10 +6,10 @@ Examples: the severity rubric, the impact-statement template.
 
 from __future__ import annotations
 
-from .common import Record
+from .common import Record, RecordId
 
 
 class Methodology(Record):
-    id: str
+    id: RecordId
     purpose: str
     version: str

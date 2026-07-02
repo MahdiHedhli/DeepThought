@@ -258,3 +258,16 @@ def test_detail_access_rejects_path_traversal(state_dir, tmp_path):
     assert store.read_detail(f"detail/../../{secret.name}") is None
     assert store.detail_exists(f"detail/../../{secret.name}") is False
     assert store.read_detail(f"detail/S-1/../../../{secret.name}") is None
+
+
+def test_get_lookups_reject_traversal_ids(state_dir):
+    """The get_* lookups take a RAW string id (never model-validated), so a
+    traversal id must be refused (returns not-found) — a crafted id can never read
+    a record outside the store."""
+    store = FileStore(state_dir)
+    for bad in ("../../etc/passwd", "a/b", "a\\b", "..", ".", "with space", ""):
+        assert store.get_finding(bad) is None, bad
+        assert store.get_project(bad) is None, bad
+        assert store.get_session(bad) is None, bad
+        assert store.get_methodology(bad) is None, bad
+        assert store.get_coverage(bad, "some/area") is None, bad

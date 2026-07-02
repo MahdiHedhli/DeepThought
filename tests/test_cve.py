@@ -340,9 +340,12 @@ def test_cve_injection_inertness():
 
 
 def test_cve_fallback_url_encodes_a_whitespace_finding_id():
-    """A finding with no usable reference url and a whitespace id yields a VALID
-    placeholder URI (the id segment is percent-encoded)."""
-    draft = finding_to_cve_draft(make_finding(id="F 0007", references=[]))
+    """DEFENCE-IN-DEPTH: the Finding model now forbids a whitespace id, but if one
+    ever bypassed validation the fallback URL must still be valid (the id segment is
+    percent-encoded). Smuggle a bad id past validation to prove it."""
+    f = make_finding(references=[])
+    object.__setattr__(f, "id", "F 0007")
+    draft = finding_to_cve_draft(f)
     urls = [r["url"] for r in draft["containers"]["cna"]["references"]]
     assert all(" " not in u for u in urls)
     assert validate_cve_draft(draft) == []

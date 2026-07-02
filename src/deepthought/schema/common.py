@@ -11,13 +11,24 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 # A record file is exactly: a YAML front-matter block delimited by --- lines,
 # then a Markdown body. The body may itself be empty.
 _FRONT_MATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.DOTALL)
+
+# A record id is used VERBATIM as a filename (e.g. ``findings/<id>.md``), so it
+# must be a single safe path segment: it starts and ends with an alphanumeric and
+# in between allows only ``._-``. This forbids path separators, ``..``/``.``,
+# whitespace, control characters, and leading/trailing punctuation — so a crafted
+# id can never traverse out of the store or collide with a special name. Bounded
+# to 128 chars to stay a valid filename. (Existing ids — ``F-0007``, ``php-src``,
+# ``S-2026-07-02-0001`` — all conform.)
+_SAFE_ID_PATTERN = r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$"
+RecordId = Annotated[str, StringConstraints(pattern=_SAFE_ID_PATTERN)]
 
 
 class RecordError(ValueError):

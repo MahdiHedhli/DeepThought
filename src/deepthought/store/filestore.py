@@ -8,6 +8,7 @@ repository alone. The lifecycle guard is enforced here, at the boundary.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -19,7 +20,18 @@ from ..schema import (
     Project,
     Session,
 )
-from ..schema.common import iso_z, utcnow
+from ..schema.common import _SAFE_ID_PATTERN, iso_z, utcnow
+
+# A record id is a single safe path segment (findings/<id>.md). Record MODELS
+# enforce this on construction, but the ``get_*`` lookups take a RAW string
+# argument that is never model-validated — so an id with ``..`` or a separator
+# would traverse out of the store on READ. This guard refuses such an argument
+# (the lookup returns "not found") — defence in depth at the path boundary.
+_SAFE_ID_RE = re.compile(_SAFE_ID_PATTERN)
+
+
+def _safe_id(ident: str) -> bool:
+    return isinstance(ident, str) and bool(_SAFE_ID_RE.match(ident))
 from ..schema.finding import TransitionLogEntry
 from .base import (
     BACKWARD_EDGES,
@@ -85,6 +97,8 @@ class FileStore(Store):
         return project
 
     def get_project(self, project_id: str) -> Project | None:
+        if not _safe_id(project_id):
+            return None
         path = self.root / "projects" / f"{project_id}.md"
         if not path.exists():
             return None
@@ -113,6 +127,8 @@ class FileStore(Store):
         return finding
 
     def get_finding(self, finding_id: str) -> Finding | None:
+        if not _safe_id(finding_id):
+            return None
         path = self.root / "findings" / f"{finding_id}.md"
         if not path.exists():
             return None
@@ -210,6 +226,8 @@ class FileStore(Store):
         return session
 
     def get_session(self, session_id: str) -> Session | None:
+        if not _safe_id(session_id):
+            return None
         path = self.root / "sessions" / f"{session_id}.md"
         if not path.exists():
             return None
@@ -256,6 +274,8 @@ class FileStore(Store):
         return coverage
 
     def get_coverage(self, project: str, area: str) -> Coverage | None:
+        if not _safe_id(project):
+            return None
         path = self._coverage_path(project, area)
         if path.exists():
             return Coverage.from_markdown(self._read(path))
@@ -290,6 +310,8 @@ class FileStore(Store):
         return methodology
 
     def get_methodology(self, methodology_id: str) -> Methodology | None:
+        if not _safe_id(methodology_id):
+            return None
         path = self.root / "methodology" / f"{methodology_id}.md"
         if not path.exists():
             return None
