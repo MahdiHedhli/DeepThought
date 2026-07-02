@@ -140,6 +140,10 @@ class Store(ABC):
     def detail_exists(self, ref: str) -> bool:
         """Whether an evidence/detail ref resolves to stored content."""
 
+    @abstractmethod
+    def read_detail(self, ref: str) -> str | None:
+        """Return stored detail content for a ``detail/...`` ref, or ``None``."""
+
     # --- Consistency (for check) -----------------------------------------
     @abstractmethod
     def raw_records(self) -> list[RawRecord]:

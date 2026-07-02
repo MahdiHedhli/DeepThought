@@ -313,6 +313,15 @@ class FileStore(Store):
             rel = rel[len("state/") :]
         return (self.root / rel).exists()
 
+    def read_detail(self, ref: str) -> str | None:
+        rel = ref
+        if rel.startswith("state/"):
+            rel = rel[len("state/") :]
+        path = self.root / rel
+        if not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8")
+
     # --- Consistency (for check) -----------------------------------------
     def raw_records(self) -> list[RawRecord]:
         out: list[RawRecord] = []

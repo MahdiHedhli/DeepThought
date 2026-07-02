@@ -16,6 +16,7 @@ run is wrapped and any exception becomes a failure rather than a crash.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from .export.csaf import finding_to_csaf, validate_csaf
@@ -28,6 +29,7 @@ from .schema import (
     Methodology,
     Project,
     Session,
+    SessionType,
 )
 from .store import Store
 
@@ -60,6 +62,7 @@ def run_check(store: Store) -> CheckReport:
         _check_osv(parsed["finding"], report)
         _check_csaf(parsed["finding"], report)
         _check_openvex(parsed["finding"], report)
+        _check_disclosure_drafts(store, report)
     except Exception as exc:  # a check that raises is a failed check
         report.fail(f"check raised: {exc!r}")
     return report
@@ -166,3 +169,36 @@ def _check_openvex(findings: list[Finding], report: CheckReport) -> None:
         errors = validate_openvex(finding_to_openvex(finding))
         for err in errors:
             report.fail(f"finding {finding.id!r} OpenVEX non-conformance: {err}")
+
+
+# The persisted disclosure drafts a DISCLOSURE session writes, and the validator
+# for each. The CVE draft is intentionally non-submittable, so it is not gated;
+# the advisory is Markdown, not a schema type.
+_DISCLOSURE_DRAFTS = (
+    ("disclosure-csaf.json", validate_csaf),
+    ("disclosure-openvex.json", validate_openvex),
+)
+
+
+def _check_disclosure_drafts(store: Store, report: CheckReport) -> None:
+    """Validate the PERSISTED CSAF/OpenVEX drafts, not just a re-derivation.
+
+    A DISCLOSURE session writes ``detail/<session>/disclosure-*.json``. Those
+    durable artifacts are the ones a human reviews, so a corrupted persisted draft
+    must fail the gate — validating a fresh re-derivation would miss it.
+    """
+    for session in store.list_sessions():
+        if session.type is not SessionType.disclosure:
+            continue
+        for name, validate in _DISCLOSURE_DRAFTS:
+            ref = f"detail/{session.id}/{name}"
+            content = store.read_detail(ref)
+            if content is None:
+                continue  # a refused disclosure session drafts nothing
+            try:
+                doc = json.loads(content)
+            except json.JSONDecodeError as exc:
+                report.fail(f"disclosure draft {ref!r} is not valid JSON: {exc}")
+                continue
+            for err in validate(doc):
+                report.fail(f"disclosure draft {ref!r} non-conformance: {err}")

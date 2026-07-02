@@ -148,3 +148,26 @@ def test_raising_disclosure_exporter_is_a_failed_check_not_a_crash(state_dir, mo
     report = run_check(store)
     assert not report.ok
     assert any("check raised" in e for e in report.errors)
+
+
+def test_check_validates_persisted_disclosure_drafts(state_dir):
+    """A corrupted PERSISTED disclosure draft (not just a re-derivation) fails the
+    gate — check reads the actual detail artifacts the session wrote."""
+    from deepthought.protocol import HermesUltraCodeGate, run_session
+    from deepthought.sessions import DisclosureSession
+
+    store = FileStore(state_dir)
+    store.save_project(make_project())
+    ev = store.write_detail("S-seed", "evidence.txt", "resolving evidence")
+    store.save_finding(make_finding(status="verified", evidence_ref=ev))
+
+    session = DisclosureSession("php-src", "F-0007")
+    run_session(store, HermesUltraCodeGate(), session)
+    assert run_check(store).ok, run_check(store).errors  # fresh drafts are conformant
+
+    # Corrupt the persisted CSAF draft to a valid-JSON but schema-invalid doc.
+    ref = session.artifact_refs["disclosure-csaf.json"]
+    (store.root / ref).write_text('{"document": {}}', encoding="utf-8")
+    report = run_check(store)
+    assert not report.ok
+    assert any("disclosure draft" in e for e in report.errors)
