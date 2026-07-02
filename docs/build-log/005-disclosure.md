@@ -1,16 +1,37 @@
 # Build Session Log — Feature 005, Disclosure (draft-only advisory & VEX)
 
-> **STATUS: built on branch `005-disclosure` (off `main`, features 001–004
-> merged). DRAFT-ONLY build — DISCLOSURE transmits nothing.** From a *verified*
-> finding it drafts four LOCAL artifacts (advisory Markdown, CVE JSON 5.1 draft,
-> CSAF 2.0, OpenVEX) and stops. It never advances a finding to `disclosed`, never
-> fabricates a CVE or advisory reference, and adds no network code.
-> **428 tests green (380 baseline + 48 new); all five smokes (`smoke.sh`,
-> `smoke_002.sh`, `smoke_003.sh`, `smoke_004.sh`, `smoke_005.sh`) pass.**
+> **STATUS: MERGED to `main` (PR #4, squash `a99340f`, 2026-07-02).** DRAFT-ONLY
+> feature — DISCLOSURE transmits nothing. From a *verified* finding it drafts four
+> LOCAL artifacts (advisory Markdown, CVE JSON 5.1 draft, CSAF 2.0, OpenVEX) and
+> stops. It never advances a finding to `disclosed`, never fabricates a CVE or
+> advisory reference, and adds no network code. **500 tests green (380 baseline +
+> ~120 new); all five smokes (`smoke.sh`, `smoke_002.sh`, `smoke_003.sh`,
+> `smoke_004.sh`, `smoke_005.sh`) pass.** Reviewed to a clean dual-gate (codex
+> gpt-5.5 + agy/Gemini adversarial) on the same HEAD, after ~34 review rounds that
+> hardened the exporters to emit schema-valid, safe drafts for ANY finding.
 
-**Feature:** 005-disclosure
+**Feature:** 005-disclosure (merged and deleted)
 **Branch:** `005-disclosure`
 **Predecessor gate:** 004 merged to `main` (PR #3, squash `93ce057`).
+**Merge:** PR #4, squash `a99340f`, 2026-07-02 — dual-gate clean (codex + agy).
+
+## Review & merge (summary)
+
+The dual-gate review (codex CLI gpt-5.5 + agy/Gemini adversarial, both clean on
+the same HEAD) was exceptionally deep — ~34 codex rounds plus several agy rounds,
+~70 real findings, each fixed test-first. The bulk hardened the four exporters to
+produce schema-conformant, injection-inert, safe output for ANY `Finding` (not
+just the clean `F-NNNN` findings the live pipeline emits): non-empty/length-bounded
+fields, deduped versions/references/products, finite CVSS, OSV version-range
+mapping across all four formats, http(s)-only reference links (dangerous schemes
+dropped), RFC3339/URI format enforcement in the check gate, percent-encoded
+id-derived URLs and publish filenames, and validation of the persisted drafts.
+
+**Follow-up (tracked):** the recurring review class — a pathological, model-valid
+finding id (whitespace / path separators / CVE-shaped) — points at the root:
+`Finding.id` (and `Project.id`) are unconstrained, which is also a latent risk for
+the FileStore (records are files named by id). Harden the identifier fields at the
+Pydantic model boundary in a focused follow-up to close the class at the source.
 
 ## What shipped
 
@@ -64,24 +85,23 @@ and the `publish` scaffold with its HUMAN GATE banner.
 
 ## Tests
 
-- `tests/test_advisory.py` (7), `tests/test_csaf.py` (11), `tests/test_openvex.py`
-  (6), `tests/test_cve.py` (7) — per-exporter: schema-validity, field mapping,
-  no-fabricated-cve, injection-inertness, plus per-format specials (draft status,
-  affected⇒action_statement, sentinel-cveId rejection, zeroed UUID, no CWE).
-- `tests/test_disclosure_session.py` (6) — drafts-all-four, refuse-wrong-project,
-  refuse-non-verified, no-transition/no-mutation, transmits-nothing, human-gate
-  next steps.
-- `tests/test_cli_005.py` (7) — `disclose` human gate + refusal, `publish
-  --format` selector, namespacing, status filter, unknown-format + red-check
-  refusal.
-- `tests/test_check.py` (+4) — CSAF/OpenVEX draft conformance in the gate; a
-  raising exporter is a failed check.
+- `tests/test_advisory.py` (13), `tests/test_csaf.py` (28), `tests/test_openvex.py`
+  (19), `tests/test_cve.py` (27), `tests/test_formats.py` (5) — per-exporter:
+  schema-validity, field mapping, no-fabricated-cve, injection-inertness, plus the
+  hardening added across review (bounds/dedup/type-guards, finite CVSS, OSV range
+  mapping, dangerous-scheme filtering, RFC3339/URI format checks, percent-encoded
+  ids).
+- `tests/test_disclosure_session.py` (7) — drafts-all-four, refuse-wrong-project,
+  refuse-non-verified, refuse-missing, no-transition/no-mutation, transmits-nothing,
+  human-gate next steps.
+- `tests/test_cli_005.py` (10) — `disclose` human gate + refusals + pre-checks,
+  `publish --format` selector, namespacing, status filter, safe filenames,
+  unknown-format + red-check refusal.
+- `tests/test_check.py` / `tests/test_store.py` (+) — persisted CSAF/OpenVEX/CVE
+  draft conformance (present + valid + traversal-safe reads); a raising exporter
+  is a failed check.
 
-**428 passed** (380 baseline + 48 new). All five smokes pass.
+**500 passed** (380 baseline + ~120 new). All five smokes pass.
 
-## Review & merge
-
-To be reviewed under the standing dual-gate (both clean on the same HEAD):
-**codex** (GitHub bot, or the local `codex review --base main` CLI when the bot
-lags) and **agy** (Antigravity/Gemini adversarial CLI). The transmit /
-auto-transition / fabricate-authority hard stops remain human-only.
+The transmit / auto-transition-to-disclosed / fabricate-authority hard stops
+remain human-only (Constitution Article V) — this feature drafts, a human sends.
