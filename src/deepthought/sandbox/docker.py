@@ -638,8 +638,12 @@ class DockerSandbox(Sandbox):
         ``--context default`` forces the local socket so a remote DEFAULT context in
         the operator's config cannot redirect the run off-host; env sanitization
         (_runtime_env) removes the env-based override. Together they guarantee the
-        signed-off repro runs locally, never streaming inputs/output to another host."""
-        if self.runtime == "docker":
+        signed-off repro runs locally, never streaming inputs/output to another host.
+
+        Matches the runtime's BASENAME so an absolute path ("/usr/bin/docker") still
+        gets the context pin."""
+        base = os.path.basename(self.runtime).lower()
+        if base in ("docker", "docker.exe"):
             return [self.runtime, "--context", "default"]
         return [self.runtime]
 

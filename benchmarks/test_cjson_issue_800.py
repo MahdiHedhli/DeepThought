@@ -56,12 +56,23 @@ TRIGGER = '{"1":1,'      # the 7-byte ground-truth input, baked into the image
 REPRO_REF = "detail/seed/trigger"
 
 
+def _local_docker_env() -> dict:
+    """os.environ minus the remote-endpoint selectors — so this probe queries the SAME
+    LOCAL daemon DockerSandbox.run() forces (--context default + sanitized env), never
+    a remote one that could skip or falsely enable the execution tests."""
+    env = dict(os.environ)
+    for key in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
+        env.pop(key, None)
+    return env
+
+
 def _image_present() -> bool:
     if shutil.which("docker") is None:
         return False
     try:
         out = subprocess.run(
-            ["docker", "images", "-q", IMAGE], capture_output=True, text=True, timeout=30
+            ["docker", "--context", "default", "images", "-q", IMAGE],
+            capture_output=True, text=True, timeout=30, env=_local_docker_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return False

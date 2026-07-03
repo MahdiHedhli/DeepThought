@@ -195,6 +195,9 @@ def test_runtime_pins_the_local_daemon():
     # docker runs are forced onto the LOCAL socket (--context default) so a remote
     # default context cannot redirect a signed-off repro off-host.
     assert DockerSandbox(runtime="docker")._runtime() == ["docker", "--context", "default"]
+    # an absolute-path runtime still gets the context pin (basename match)
+    assert DockerSandbox(runtime="/usr/bin/docker")._runtime() == \
+        ["/usr/bin/docker", "--context", "default"]
     assert DockerSandbox(runtime="podman")._runtime() == ["podman"]
 
 
