@@ -88,8 +88,11 @@ _RUNTIME_ERROR_EXITS = frozenset({125, 126, 127})
 
 # Signatures a container CLIENT (docker OR podman/other OCI runtimes) writes when it
 # cannot run the container, used to tell a genuine launch failure from a target that
-# merely exited 125/126/127. Covers both engines so a non-docker runtime's launch
-# failure is not misread as a negative result.
+# merely exited 125/126/127. These are RUNTIME-ATTRIBUTABLE phrases the engine emits,
+# NOT generic ones a target could print to itself (e.g. "no such file or directory",
+# "exec: ") — so a target cannot forge an IsolationUnavailable classification and
+# drop its own negative result. A 125/126/127 without one of these is treated as an
+# ordinary (non-reproducing) target exit.
 _RUNTIME_ERROR_MARKERS = (
     # docker
     "error response from daemon",
@@ -97,18 +100,14 @@ _RUNTIME_ERROR_MARKERS = (
     # podman
     "cannot connect to podman",
     "error preparing container",
-    "unable to start container",
+    "unable to start container process",
     "image not known",
     "unable to find image",
-    "short-name",
-    # shared / OCI runtime (runc, crun) + exec failures
+    "short-name resolution",
+    # OCI runtimes name themselves in their error diagnostics
     "oci runtime",
-    "runc:",
-    "crun:",
-    "executable file not found",
-    "no such file or directory",
-    "exec format error",
-    "exec: ",
+    "runc create failed",
+    "crun: ",
 )
 
 # The trusted authenticity code: the in-image wrapper (benchmarks/tier2/runner.c)
@@ -184,50 +183,29 @@ class DockerSandbox(Sandbox):
 
     # --- pure config builder (inspection only) -----------------------------
 
-    def build_command(self, spec: SandboxSpec) -> list[str]:
-        """Render the hardened ``docker run`` argv for ``spec`` and its policy.
-
-        Pure: same input, same output, no side effects, no execution. Returns a
-        ``list[str]`` of argv tokens for inspection — never a shell string.
-        """
-        return self.build_argv(spec, spec.policy)
-
-    def build_argv(self, spec: SandboxSpec, policy: SandboxPolicy) -> list[str]:
-        """The argv mapping (contract name). ``build_command`` delegates here."""
-        # argv[0] is the CONFIGURED runtime, not a hardcoded "docker": the same
-        # value drives the preflight which-check AND the timeout cleanup, so a
-        # non-docker runtime (e.g. "podman") cannot launch under one binary while
-        # being checked/cleaned under another (which would defeat fail-closed and
-        # leak the container). self.runtime is trusted operator config.
-        argv: list[str] = [self.runtime, "run"]
-
+    def _hardening_flags(self, policy: SandboxPolicy, workdir: str) -> list[str]:
+        """The default-deny isolation flags rendered from ``policy`` (network,
+        read-only rootfs, dropped caps, no-new-privileges, non-root user, pid/memory/
+        cpu bounds, stop grace, workdir). Shared by ``build_argv`` and the input-read
+        preflight so a read is NEVER less isolated than the real run."""
+        flags: list[str] = []
         if policy.ephemeral:
-            argv.append("--rm")  # ephemeral: built fresh, torn down after
-
-        # Default-deny egress. The only network value in this slice is "none".
-        argv.append(f"--network={policy.network}")
-
-        # Never pull from a registry. A missing image would otherwise trigger a
-        # host-side registry fetch (network egress) BEFORE --network=none takes
-        # effect, breaking default-deny / no-transmission. The image must be
-        # preloaded; a real signed-off backend fails closed if it is absent.
-        argv.append("--pull=never")
-
+            flags.append("--rm")  # ephemeral: built fresh, torn down after
+        # Default-deny egress (the only network value in this slice is "none").
+        flags.append(f"--network={policy.network}")
+        # Never pull from a registry: a missing image would trigger a host-side fetch
+        # (network egress) BEFORE --network=none takes effect.
+        flags.append("--pull=never")
         if policy.read_only_rootfs:
-            argv.append("--read-only")
-
+            flags.append("--read-only")
         if policy.drop_all_caps:
-            argv.append("--cap-drop=ALL")
-
+            flags.append("--cap-drop=ALL")
         if policy.no_new_privileges:
-            argv.append("--security-opt=no-new-privileges")
-
-        # Non-root user. Require a STRICTLY NUMERIC, non-zero UID — never a name.
-        # A named user ("root", "toor", "nobody", ...) can alias to UID 0 in the
-        # image's /etc/passwd, which we cannot inspect at argv-build time, so any
-        # non-numeric uid is refused. int() == 0 additionally rejects every numeric
-        # zero spelling ("0", "00", "000"); the regex rejects "+0"/"-0"/""/":gid".
-        # A gid, if present, must also be numeric.
+            flags.append("--security-opt=no-new-privileges")
+        # Non-root user. Require a STRICTLY NUMERIC, non-zero UID — never a name, which
+        # could alias to UID 0 in the image's /etc/passwd (uninspectable here). int()
+        # == 0 rejects "0"/"00"/…; the regex rejects "+0"/"-0"/""/":gid". A gid, if
+        # present, must also be numeric.
         if policy.run_as_non_root:
             user = policy.user
             uid_raw, sep, gid_raw = user.partition(":")
@@ -243,24 +221,37 @@ class DockerSandbox(Sandbox):
                     f"run_as_non_root requires a numeric gid; user {user!r} has a"
                     " non-numeric gid"
                 )
-            # Render the NORMALIZED (stripped) numeric value — NOT the raw string.
-            # Validating the stripped parts but rendering the raw " 1000 : 2000 "
-            # would let docker fail numeric parsing and fall back to a passwd lookup.
-            argv += ["--user", f"{uid}:{gid}" if sep else uid]
-
+            # Render the NORMALIZED (stripped) numeric value, not the raw string.
+            flags += ["--user", f"{uid}:{gid}" if sep else uid]
         # Resource bounds. Presence is fixed and tested.
-        argv += ["--pids-limit", str(policy.pids_limit)]
-        argv += ["--memory", f"{policy.memory_mib}m"]
-        argv += ["--cpus", _format_cpus(policy.cpus)]
-        # --stop-timeout is a short, FIXED teardown grace (SIGKILL delay after a
-        # stop signal) — NOT policy.wall_timeout_seconds, which would block the
-        # runner for minutes when killing a hung container. The wall-clock
-        # EXECUTION limit (wall_timeout_seconds) is enforced externally by the
-        # runner when a real backend is wired (a distinct, signed-off change); it
-        # is not a docker run flag.
-        argv += ["--stop-timeout", str(_STOP_GRACE_SECONDS)]
+        flags += ["--pids-limit", str(policy.pids_limit)]
+        flags += ["--memory", f"{policy.memory_mib}m"]
+        flags += ["--cpus", _format_cpus(policy.cpus)]
+        # --stop-timeout is a short, FIXED teardown grace (SIGKILL delay), NOT the
+        # wall-clock execution limit (which the reader enforces via the deadline).
+        flags += ["--stop-timeout", str(_STOP_GRACE_SECONDS)]
+        flags += ["--workdir", workdir]
+        return flags
 
-        argv += ["--workdir", spec.workdir]
+    def build_command(self, spec: SandboxSpec) -> list[str]:
+        """Render the hardened ``docker run`` argv for ``spec`` and its policy.
+
+        Pure: same input, same output, no side effects, no execution. Returns a
+        ``list[str]`` of argv tokens for inspection — never a shell string.
+        """
+        return self.build_argv(spec, spec.policy)
+
+    def build_argv(self, spec: SandboxSpec, policy: SandboxPolicy) -> list[str]:
+        """The argv mapping (contract name). ``build_command`` delegates here."""
+        # argv[0] is the CONFIGURED runtime, not a hardcoded "docker": the same
+        # value drives the preflight which-check AND the timeout cleanup, so a
+        # non-docker runtime (e.g. "podman") cannot launch under one binary while
+        # being checked/cleaned under another (which would defeat fail-closed and
+        # leak the container). self.runtime is trusted operator config.
+        # The default-deny isolation flags, rendered from the policy. Shared with the
+        # input-read preflight so both enforce the SAME hardening (never a weaker read).
+        argv: list[str] = [self.runtime, "run"]
+        argv += self._hardening_flags(policy, spec.workdir)
 
         # Force EXACTLY spec.command to run, independent of the image's
         # ENTRYPOINT/CMD. `docker run IMAGE cmd...` appends the trailing tokens as
@@ -530,13 +521,13 @@ class DockerSandbox(Sandbox):
             if not self._wait_client(proc, remaining):
                 timed_out = True
 
-        # On a timeout/overflow the container is still alive; stop it by name (a
-        # subprocess-level kill reaches only the local client) and report whether
-        # removal was CONFIRMED so run() only clears the active-container state on
-        # success. Otherwise the container exited and --rm removed it.
-        container_gone = True
-        if timed_out or overflowed:
-            container_gone = self._force_remove(run_id)
+        # Force-remove by name on EVERY path — never trust --rm blindly. It is
+        # idempotent: after a clean exit + --rm, ``rm -f`` reports "No such
+        # container" (counted as gone); if --rm silently failed, this removes the
+        # leak; if removal cannot be confirmed, container_gone is False and run()
+        # keeps it queued for a teardown retry. (On a timeout/overflow the container
+        # is still alive, so this is also the stop.)
+        container_gone = self._force_remove(run_id)
         self._reap(proc)  # reap the local client, killing it if it will not exit
         stdout = bytes(bufs[fd_out]).decode("utf-8", "replace")
         stderr = bytes(bufs[fd_err]).decode("utf-8", "replace")
@@ -617,17 +608,19 @@ class DockerSandbox(Sandbox):
             raise SandboxError(
                 f"repro_ref {spec.repro_ref!r} does not resolve; refusing to run"
             )
-        # Validate the image here too (not only in build_argv), so a direct call is
-        # safe regardless of ordering; "--" ends option parsing so an input_path
-        # beginning with '-' is a filename to cat, never a flag. The read goes
-        # through the SAME bounded, NAMED, cleanup-guaranteed path as the real run
-        # (_stream_capture): output is capped (_CAPTURE_MAX) and a hung/oversized
-        # read is killed and force-removed by name — a large or streaming input_path
-        # cannot exhaust memory or leak a container.
+        # The read mirrors the run's policy exactly (_hardening_flags: same user,
+        # workdir, caps, limits) so it can neither pass nor fail under different
+        # permissions than the harness, and reads a RELATIVE input_path against the
+        # same workdir. Validate the image here too (not only in build_argv), so a
+        # direct call is safe regardless of ordering; "--" ends option parsing so an
+        # input_path beginning with '-' is a filename to cat, never a flag. The read
+        # goes through the SAME bounded, NAMED, cleanup-guaranteed path as the real
+        # run (_stream_capture): output is capped (_CAPTURE_MAX) and a hung/oversized
+        # read is killed and force-removed by name.
         base = [
-            self.runtime, "run", "--rm", "--network=none", "--pull=never",
-            "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-            "--user", "65534:65534", "--entrypoint", "/bin/cat",
+            self.runtime, "run",
+            *self._hardening_flags(spec.policy, spec.workdir),
+            "--entrypoint", "/bin/cat",
             _safe_image(spec.image), "--", spec.input_path,
         ]
         run_id = self._run_id(base)

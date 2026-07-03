@@ -319,6 +319,33 @@ def test_verify_baked_input_uses_a_named_container_double_dash_and_stripped_imag
     idx = argv.index("--")
     assert argv[idx + 1] == "/seeds/trigger"   # input_path is a filename, not a flag
     assert argv[idx - 1] == "my-image:latest"
+    # the read mirrors the SAME policy hardening as the real run
+    joined = " ".join(argv)
+    assert "--network=none" in joined and "--read-only" in joined
+    assert "--cap-drop=ALL" in joined and "--security-opt=no-new-privileges" in joined
+    assert "--user" in argv and "--workdir" in argv
+
+
+def test_verify_baked_input_read_mirrors_a_non_default_policy_user(monkeypatch):
+    # A non-default policy user must be applied to the READ too (not a hardcoded
+    # 65534), so the seed check runs under the same permissions as the harness.
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker", store=_FakeStore())
+    captured = {}
+
+    def _cap(argv, run_id, timeout):
+        captured["argv"] = argv
+        return (0, '{"1":1,', "", False, False, True)
+
+    monkeypatch.setattr(box, "_stream_capture", _cap)
+    spec = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                       command=["/runner", "/harness", "/seeds/trigger"],
+                       repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                       policy=SandboxPolicy(user="1000:2000"))
+    box._verify_baked_input(spec)
+    argv = captured["argv"]
+    assert "1000:2000" in argv                 # the policy user, not a hardcoded 65534
+    assert "65534:65534" not in argv
 
 
 def test_run_raises_when_the_exit_code_is_unavailable(monkeypatch):
