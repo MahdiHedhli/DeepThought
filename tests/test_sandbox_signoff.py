@@ -42,9 +42,13 @@ SUMMARY: AddressSanitizer: heap-buffer-overflow /src/cJSON/cJSON.c:786:9 in pars
 """
 
 
+_IMAGE_DIGEST = "sha256:deadbeefcafe"
+
+
 def _spec() -> SandboxSpec:
     return SandboxSpec(
         image="deepthought/cjson-asan:tier2",
+        image_digest=_IMAGE_DIGEST,
         command=["/runner", "/harness", "/seeds/trigger"],  # trusted wrapper + harness
         repro_ref="detail/seed/trigger",
         input_path="/seeds/trigger",
@@ -178,6 +182,7 @@ def _enabled_box(monkeypatch, **kw) -> DockerSandbox:
     kw.setdefault("runtime", "docker")
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True, **kw)
     monkeypatch.setattr(box, "_preflight_runtime", lambda: None)     # daemon reachable
+    monkeypatch.setattr(box, "_image_id", lambda _img: _IMAGE_DIGEST)  # image attests
     monkeypatch.setattr(box, "_verify_baked_input", lambda _spec: None)  # input bound
     return box
 
@@ -231,6 +236,28 @@ def test_hardening_disables_swap():
     argv = DockerSandbox().build_argv(_spec(), _spec().policy)
     mem = argv[argv.index("--memory") + 1]
     assert argv[argv.index("--memory-swap") + 1] == mem
+
+
+def test_run_requires_an_attested_image_digest(monkeypatch):
+    # No image_digest -> refuse (a tag alone cannot attest the runtime image).
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (99, CJSON_ASAN, "", False, False, True))
+    no_digest = SandboxSpec(image="deepthought/cjson-asan:tier2", image_digest="",
+                            command=["/runner", "/harness", "/seeds/trigger"],
+                            repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                            policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(no_digest)
+
+
+def test_run_refuses_an_unattested_image(monkeypatch):
+    # The image's actual content ID differs from the attested digest (a re-tagged or
+    # fake image) -> refuse before crediting anything it produces.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_image_id", lambda _img: "sha256:0000different")
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (99, CJSON_ASAN, "", False, False, True))
+    with pytest.raises(SandboxError):
+        box.run(_spec())
 
 
 def test_run_returns_a_typed_timeout_result(monkeypatch):
@@ -310,7 +337,7 @@ def test_run_validates_image_before_verifying_input(monkeypatch):
         raise AssertionError("_verify_baked_input should not be called for invalid image")
     monkeypatch.setattr(box, "_verify_baked_input", _boom)
 
-    unbound = SandboxSpec(image=" --privileged",
+    unbound = SandboxSpec(image=" --privileged", image_digest=_IMAGE_DIGEST,
                           command=["/runner", "/harness", "/seeds/trigger"],
                           repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
                           policy=SandboxPolicy())
@@ -567,6 +594,7 @@ def test_run_fails_closed_without_store_backed_provenance(monkeypatch):
     no_store = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                              runtime="docker")  # store defaults None
     monkeypatch.setattr(no_store, "_preflight_runtime", lambda: None)
+    monkeypatch.setattr(no_store, "_image_id", lambda _img: _IMAGE_DIGEST)
     monkeypatch.setattr(no_store, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False, True))
     with pytest.raises(SandboxError):
         no_store.run(_spec())

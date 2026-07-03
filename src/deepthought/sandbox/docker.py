@@ -335,6 +335,23 @@ class DockerSandbox(Sandbox):
         # run exit non-zero without the target ever executing; probe first so that
         # reads as IsolationUnavailable, not a negative verification result.
         self._preflight_runtime()
+        # ATTEST the image by content digest before trusting anything it produces. A
+        # tag is locally MUTABLE (a re-tagged or fake preloaded image could ship a fake
+        # /runner that just exits 99), and --pull=never/the build-time commit check do
+        # not prove the RUNTIME image is the signed-off build. Inspect the actual
+        # content ID and refuse on mismatch — so exit 99 is only ever credited from the
+        # attested image.
+        if not spec.image_digest:
+            raise SandboxError(
+                "executing run requires spec.image_digest (the expected sha256 image "
+                "ID) to attest the image the repro runs in"
+            )
+        actual_digest = self._image_id(spec.image)
+        if actual_digest != spec.image_digest:
+            raise SandboxError(
+                f"image {spec.image!r} has content digest {actual_digest!r}, not the "
+                f"attested {spec.image_digest!r}; refusing to run an unattested image"
+            )
         # Provenance, FAIL CLOSED. The repro input is delivered to the container BY
         # THE IMAGE (baked in at the path in spec.command) — the hardening forbids
         # host bind mounts, so no host file crosses the boundary. Every executing run
@@ -770,6 +787,26 @@ class DockerSandbox(Sandbox):
                 f"could not confirm removal of the input-read container {run_id!r}; "
                 f"refusing to continue (teardown will retry the cleanup)"
             )
+
+    def _image_id(self, image: str) -> str:
+        """The LOCAL image's content ID (``sha256:...``) via ``image inspect`` on the
+        LOCAL daemon. Refuses (SandboxError) if the image is absent or the runtime
+        errors — a run must not proceed on an unattestable image."""
+        try:
+            proc = subprocess.run(
+                [*self._runtime(), "image", "inspect", "--format", "{{.Id}}",
+                 _safe_image(image)],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=15, check=False, env=self._runtime_env(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SandboxError(f"could not inspect image {image!r}: {exc}") from exc
+        if proc.returncode != 0:
+            raise SandboxError(
+                f"could not inspect image {image!r} (exit {proc.returncode}); "
+                f"cannot attest it"
+            )
+        return proc.stdout.strip()
 
     def _preflight_runtime(self) -> None:
         """Confirm the runtime DAEMON is reachable, not merely that the client binary

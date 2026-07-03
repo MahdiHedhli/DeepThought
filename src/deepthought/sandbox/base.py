@@ -183,6 +183,11 @@ class SandboxSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     image: Ref
+    # The EXPECTED content digest (``sha256:...`` image ID) of ``image``. A tag is
+    # locally mutable — a re-tagged or fake preloaded image could carry a fake
+    # /runner that just exits 99 — so an executing backend inspects the image's actual
+    # ID and refuses unless it equals this attested digest. Required for a real run.
+    image_digest: Short = ""
     # At least one argv token: an empty command would run the image's default
     # entrypoint/cmd — not the minimized repro. A repro must be explicit.
     command: list[Short] = Field(min_length=1)

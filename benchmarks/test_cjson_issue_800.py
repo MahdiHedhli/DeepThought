@@ -60,10 +60,26 @@ def _local_docker_env() -> dict:
     """os.environ minus the remote-endpoint selectors — so this probe queries the SAME
     LOCAL daemon DockerSandbox.run() forces (--context default + sanitized env), never
     a remote one that could skip or falsely enable the execution tests."""
+    # The SAME set DockerSandbox strips (docker.py _REMOTE_ENDPOINT_ENV), including the
+    # podman vars, so the probe and the run never split-brain across daemons.
     env = dict(os.environ)
-    for key in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
+    for key in ("DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
+                "CONTAINER_HOST", "CONTAINER_CONNECTION"):
         env.pop(key, None)
     return env
+
+
+def _image_id() -> str:
+    """The LOCAL content ID of the Tier 2 image, to ATTEST it: the sandbox refuses to
+    run unless the image's actual digest matches this. Empty if the image is absent."""
+    try:
+        out = subprocess.run(
+            ["docker", "--context", "default", "image", "inspect", "--format", "{{.Id}}", IMAGE],
+            capture_output=True, text=True, timeout=30, env=_local_docker_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
 
 
 def _image_present() -> bool:
@@ -177,6 +193,7 @@ def _register_and_discover(store, tmp_path):
 def _verify_spec() -> SandboxSpec:
     return SandboxSpec(
         image=IMAGE,
+        image_digest=_image_id(),   # attest the exact local image the repro runs in
         # The trusted wrapper forks the harness (a real signal death -> exit 99);
         # the harness replays the baked libFuzzer input.
         command=["/runner", "/harness", "/seeds/trigger"],
