@@ -45,7 +45,7 @@ SUMMARY: AddressSanitizer: heap-buffer-overflow /src/cJSON/cJSON.c:786:9 in pars
 def _spec() -> SandboxSpec:
     return SandboxSpec(
         image="deepthought/cjson-asan:tier2",
-        command=["/harness", "/seeds/trigger"],
+        command=["/runner", "/harness", "/seeds/trigger"],  # trusted wrapper + harness
         repro_ref="detail/seed/trigger",
         workdir="/",
         policy=SandboxPolicy(),
@@ -192,13 +192,24 @@ def test_run_aborts_when_output_overflows(monkeypatch):
 
 
 def test_run_raises_on_a_container_launch_failure(monkeypatch):
-    # docker exit 125/126/127 = the container never ran -> isolation failure, NOT a
-    # negative verification result.
+    # docker exit 125 WITH a runtime-error signature = the container never ran ->
+    # isolation failure, NOT a negative verification result.
     box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture",
-                        lambda *_a: (125, "", "docker: No such image (pull=never)", False, False, True))
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (
+        125, "", "docker: Error response from daemon: No such image (pull=never)",
+        False, False, True))
     with pytest.raises(IsolationUnavailable):
         box.run(_spec())
+
+
+def test_run_treats_a_bare_125_exit_as_a_negative_result(monkeypatch):
+    # A target that merely EXITS 125 (no runtime-error signature) is a normal,
+    # non-reproducing result — not a false IsolationUnavailable that loses evidence.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture",
+                        lambda *_a: (125, "just a program that exited 125", "", False, False, True))
+    result = box.run(_spec())
+    assert result.reproduced is False and result.exit_code == 125
 
 
 def test_run_raises_when_the_exit_code_is_unavailable(monkeypatch):
@@ -219,23 +230,36 @@ def test_run_rejects_spoofed_asan_on_a_clean_exit(monkeypatch):
     assert result.reproduced is False and result.crash is None
 
 
-def test_run_rejects_spoofed_asan_on_a_plain_nonzero_exit(monkeypatch):
-    # A non-zero exit is NOT enough: a target can print fake ASan and exit(1). Only a
-    # DEADLY-SIGNAL termination (docker exit >=128, a real abort_on_error crash) is
-    # credited — exit 1 with ASan-shaped text must NOT reproduce.
-    box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (1, CJSON_ASAN, "", False, False, True))
-    result = box.run(_spec())
-    assert result.reproduced is False and result.crash is None
+def test_run_rejects_spoofed_asan_on_any_forgeable_exit(monkeypatch):
+    # A crash is credited ONLY on the trusted wrapper's code (99). ASan-shaped text
+    # with ANY self-chosen exit — a clean 0, a plain 1, or even 134 (which docker
+    # cannot tell from a real SIGABRT death) — must NOT reproduce: the wrapper only
+    # emits 99 when the OS observed a real signal death.
+    for forged in (0, 1, 134, 139):
+        box = _enabled_box(monkeypatch)
+        monkeypatch.setattr(box, "_stream_capture",
+                            lambda *_a, rc=forged: (rc, CJSON_ASAN, "", False, False, True))
+        result = box.run(_spec())
+        assert result.reproduced is False and result.crash is None, f"exit {forged} wrongly credited"
 
 
-def test_run_reproduces_only_on_a_deadly_signal_exit(monkeypatch):
-    # 134 = 128 + SIGABRT: a real sanitizer abort. Crash credited.
+def test_run_reproduces_only_on_the_trusted_sanitizer_exit(monkeypatch):
+    # Exit 99 = the in-image wrapper observed the child die by a deadly signal. Crash
+    # credited (with the ASan report present).
     box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False, True))
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (99, CJSON_ASAN, "", False, False, True))
     result = box.run(_spec())
     assert result.reproduced is True
     assert result.crash is not None and result.crash.faulting_function == "parse_string"
+
+
+def test_run_does_not_reproduce_on_exit_99_without_a_sanitizer_report(monkeypatch):
+    # Exit 99 but no parseable ASan report -> no crash object, not reproduced.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture",
+                        lambda *_a: (99, "runner: child signaled, but no report\n", "", False, False, True))
+    result = box.run(_spec())
+    assert result.reproduced is False and result.crash is None
 
 
 def test_preflight_fails_closed_when_the_daemon_is_unreachable(monkeypatch):
@@ -331,6 +355,18 @@ def test_teardown_force_removes_an_active_container(monkeypatch):
     assert removed == ["sandbox-abc"] and box._active_container is None
     box.teardown()  # idempotent: nothing in flight, no-op
     assert removed == ["sandbox-abc"]
+
+
+def test_teardown_fails_closed_when_removal_cannot_be_confirmed(monkeypatch):
+    # A container that STILL cannot be confirmed removed must surface (raise), not
+    # pass as a clean teardown — a leaked, still-running container fails the session.
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+    monkeypatch.setattr(box, "_force_remove", lambda _name: False)  # never confirms
+    box._active_container = "sandbox-stuck"
+    with pytest.raises(SandboxError):
+        box.teardown()
+    assert box._active_container == "sandbox-stuck"  # still flagged, not silently dropped
 
 
 def _fake_popen(monkeypatch, stdout_bytes: bytes, wait_code: int):

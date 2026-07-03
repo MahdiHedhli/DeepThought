@@ -157,7 +157,9 @@ def _register_and_discover(store, tmp_path):
 def _verify_spec() -> SandboxSpec:
     return SandboxSpec(
         image=IMAGE,
-        command=["/harness", "/seeds/trigger"],  # the baked libFuzzer replay input
+        # The trusted wrapper forks the harness (a real signal death -> exit 99);
+        # the harness replays the baked libFuzzer input.
+        command=["/runner", "/harness", "/seeds/trigger"],
         repro_ref=REPRO_REF,
         workdir="/",
         policy=SandboxPolicy(),  # default-deny hardening

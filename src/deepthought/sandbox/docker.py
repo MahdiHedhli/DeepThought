@@ -81,9 +81,29 @@ _CAPTURE_MAX = 1024 * 1024
 
 # docker/podman reserve these exit codes for "could not run the container" — a bad
 # flag or missing image under --pull=never (125), an un-executable entrypoint
-# (126), or an entrypoint not found (127). The target never ran, so these are
-# ISOLATION failures, never a negative verification result.
+# (126), or an entrypoint not found (127). But docker also PROPAGATES a target's own
+# exit of those codes, so a code alone is ambiguous: we treat it as an isolation
+# failure only when the captured output also carries a runtime-error signature.
 _RUNTIME_ERROR_EXITS = frozenset({125, 126, 127})
+
+# Signatures the docker/OCI CLIENT writes when it cannot run the container, used to
+# tell a genuine launch failure from a target that merely exited 125/126/127.
+_RUNTIME_ERROR_MARKERS = (
+    "error response from daemon",
+    "oci runtime",
+    "executable file not found",
+    "no such file or directory",
+    "cannot connect to the docker daemon",
+    "exec format error",
+    "exec: ",
+)
+
+# The trusted authenticity code: the in-image wrapper (benchmarks/tier2/runner.c)
+# forks the harness and returns this ONLY when the OS reports the child died by a
+# deadly signal (WIFSIGNALED) — a real sanitizer abort. A crash is credited on this
+# code alone, so target-printed ASan text with any self-chosen exit cannot forge a
+# reproduction (the child cannot make the wrapper observe a signal it did not raise).
+_SANITIZER_CRASH_EXIT = 99
 
 
 class DockerSandbox(Sandbox):
@@ -101,14 +121,17 @@ class DockerSandbox(Sandbox):
     ``build_command`` stays a pure, execution-free argv renderer, so construction
     and isolation inspection need no sign-off.
 
-    **Trust model.** The sandbox runs a platform-built, sanitizer-instrumented
-    IMAGE (pinned tag, ``--pull=never``, behind the sign-off): the sanitizer and
-    the code-under-test are compiled into one trusted binary — there is no separate
-    adversarial process. The untrusted quantity is the repro INPUT, not the code.
-    So a sanitizer crash reflects a real detection by the trusted binary; forging
-    ``reproduced`` would require substituting a malicious image, which the pinned /
-    no-pull / signed-off controls exclude. Verification evidence is only ever as
-    trustworthy as the image, which is exactly the property those controls protect.
+    **Trust model.** The sandbox runs a platform-built IMAGE (pinned tag,
+    ``--pull=never``, behind the sign-off) whose entrypoint is a trusted wrapper
+    that forks the harness and reports ``_SANITIZER_CRASH_EXIT`` (99) ONLY when the
+    OS observes the child die by a deadly signal — a real sanitizer abort. A crash
+    is credited on that code alone, never on target-printed ASan text or a
+    self-chosen exit (docker cannot tell a SIGABRT death from ``exit(134)`` by code,
+    so the wrapper's OS-level ``WIFSIGNALED`` check is what the target cannot forge).
+    The untrusted quantity is the repro INPUT, not the code. Forging ``reproduced``
+    would require substituting a malicious image, which the pinned / no-pull /
+    signed-off controls exclude — verification evidence is only ever as trustworthy
+    as the image, exactly the property those controls protect.
     """
 
     def __init__(
@@ -354,29 +377,30 @@ class DockerSandbox(Sandbox):
             raise SandboxError(
                 "container exit code could not be determined; run aborted"
             )
-        if returncode in _RUNTIME_ERROR_EXITS:
-            # The container could not be started/exec'd — an isolation failure, not
-            # a target run. Never let it read as "did not reproduce".
+
+        combined = f"{stdout}\n{stderr}"
+        if returncode in _RUNTIME_ERROR_EXITS and _looks_like_runtime_error(combined):
+            # The container could not be started/exec'd (the runtime, not the
+            # target, wrote the error) — an isolation failure, not a target run.
+            # Never let it read as "did not reproduce". A target that merely EXITED
+            # 125/126/127 (no runtime-error signature) falls through to a normal,
+            # non-reproducing result rather than a false IsolationUnavailable.
             raise IsolationUnavailable(
                 f"{self.runtime} could not run the container (exit {returncode}); "
                 f"the target did not execute"
             )
 
-        combined = f"{stdout}\n{stderr}"
-        # TRUST MODEL. The process is the platform-built, sanitizer-instrumented
-        # image binary (pinned tag + --pull=never + sign-off): the sanitizer is
-        # compiled INTO that trusted binary, and the code-under-test is statically
-        # linked, not a separate adversarial process. The untrusted quantity is the
-        # INPUT (spec.repro_ref), not the code. So a sanitizer abort IS a genuine
-        # detection — forging one would require a malicious IMAGE, which the pinned/
-        # no-pull/signed-off controls exclude, not merely target output.
-        #
-        # A crash is credited ONLY on a deadly-signal termination — docker reports a
-        # container killed by signal N as exit 128+N. Under ASAN_OPTIONS=abort_on_
-        # error=1 a real sanitizer error aborts the process, so a genuine crash lands
-        # at >=128; a clean exit (0) or a plain exit(1) never credits, so ASan-shaped
-        # text alone cannot promote a finding.
-        crash = parse_asan(combined) if returncode >= 128 else None
+        # TRUST MODEL. A crash is credited ONLY on the trusted wrapper's
+        # _SANITIZER_CRASH_EXIT (99): the in-image wrapper forks the harness and
+        # returns 99 solely when the OS reports the child died by a deadly SIGNAL
+        # (WIFSIGNALED) — a real sanitizer abort. This does not trust the target's
+        # stdout or its self-chosen exit code (docker collapses a SIGABRT death and
+        # a plain exit(134) to the same 134, so an exit code alone is forgeable);
+        # the child cannot make the wrapper observe a signal it never raised. The
+        # wrapper, harness, and sanitizer are one platform-built image (pinned tag +
+        # --pull=never + sign-off), so the evidence is as trustworthy as the image —
+        # exactly what those controls protect.
+        crash = parse_asan(combined) if returncode == _SANITIZER_CRASH_EXIT else None
         if crash is not None:
             # Page the full raw sanitizer report; the typed CrashReport carries
             # only bounded fields into orchestrator state.
@@ -550,16 +574,36 @@ class DockerSandbox(Sandbox):
         CONFIRMED, so this is a no-op then. Its job is the ABNORMAL exit — an
         interrupt/error between launch and cleanup, or a run whose ``rm -f`` could
         not be confirmed — where it (re)removes a container that would otherwise
-        keep running past the ``with`` block. Clears only on confirmed removal.
+        keep running past the ``with`` block.
+
+        FAILS CLOSED: if removal STILL cannot be confirmed, raise rather than
+        silently discard the sandbox — a leaked, still-running untrusted container
+        must surface (and fail the session), never pass as a clean teardown.
         """
-        if self._active_container is not None and self._force_remove(self._active_container):
+        leaked = self._active_container
+        if leaked is None:
+            return
+        if self._force_remove(leaked):
             self._active_container = None
+            return
+        raise SandboxError(
+            f"container {leaked!r} could not be confirmed removed; it may still be "
+            f"running — manual cleanup required ({self.runtime} rm -f {leaked})"
+        )
 
     def _page(self, run_id: str, name: str, content: Optional[str]) -> Optional[str]:
         """Page bounded raw output to the Store and return its ref, or None."""
         if self.store is None or not content:
             return None
         return self.store.write_detail(run_id, name, content[:_OUTPUT_MAX])
+
+
+def _looks_like_runtime_error(text: str) -> bool:
+    """Whether captured output carries a docker/OCI runtime-error signature — used
+    to tell a genuine container-launch failure from a target that merely exited a
+    125/126/127 status the daemon happens to reserve."""
+    low = text.lower()
+    return any(marker in low for marker in _RUNTIME_ERROR_MARKERS)
 
 
 def _format_cpus(cpus: float) -> str:

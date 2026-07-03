@@ -8,6 +8,10 @@ ENV ASAN_OPTIONS=symbolize=1:abort_on_error=1
 WORKDIR /src
 RUN git clone --depth 1 --branch v1.7.17 https://github.com/DaveGamble/cJSON.git
 COPY harness.c /src/harness.c
+COPY runner.c /src/runner.c
 COPY trigger /seeds/trigger
 RUN clang -g -O1 -fsanitize=address,fuzzer -I/src/cJSON /src/harness.c /src/cJSON/cJSON.c -o /harness
-ENTRYPOINT ["/harness"]
+# The trusted authenticity wrapper (no sanitizer): it forks the harness and turns
+# the OS-observed wait status into a code the target cannot forge.
+RUN clang -O2 /src/runner.c -o /runner
+ENTRYPOINT ["/runner", "/harness"]

@@ -68,8 +68,14 @@ and required Mahdi's sign-off (granted, scoped to `cjson`, 2026-07-04).
 
 ### Pieces
 - **The image** (`benchmarks/tier2/`) — a libFuzzer + AddressSanitizer harness
-  (`harness.c`) around `cJSON_ParseWithLength` on pinned cJSON **v1.7.17**, and the
-  7-byte `trigger`. Built as `deepthought/cjson-asan:tier2`.
+  (`harness.c`) around `cJSON_ParseWithLength` on pinned cJSON **v1.7.17**, the
+  7-byte `trigger`, and a trusted authenticity wrapper (`runner.c`) as the
+  entrypoint. Built as `deepthought/cjson-asan:tier2`.
+- **The trusted wrapper** — `runner.c` forks the harness and returns exit **99**
+  ONLY when the OS reports the child died by a deadly signal (`WIFSIGNALED`). A
+  crash is credited on that code alone, so target-printed ASan text with any
+  self-chosen exit cannot forge a reproduction (docker cannot tell a `SIGABRT`
+  death from `exit(134)` by code — the wrapper's OS-level check can).
 - **The real sandbox seam** — VERIFY reproduces the crash **only** inside the
   hardened `DockerSandbox` (`--network=none --read-only --cap-drop=ALL
   --security-opt=no-new-privileges --user 65534:65534`, memory/pid/cpu limits,
