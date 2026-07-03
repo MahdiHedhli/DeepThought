@@ -202,10 +202,14 @@ def _register_and_discover(store, tmp_path):
     return findings[0]
 
 
-def _verify_spec() -> SandboxSpec:
+def _verify_spec(image_digest: str | None = None) -> SandboxSpec:
+    # image_digest=None -> inspect the REAL local image (executing tests, opt-in). A
+    # non-executing refusal test passes an explicit dummy so a default `pytest
+    # benchmarks/` (no DEEPTHOUGHT_TIER2_EXECUTE=1) never shells out to `docker image
+    # inspect` — the opt-in guard promises default runs never contact the daemon.
     return SandboxSpec(
         image=IMAGE,
-        image_digest=_image_id(),   # attest the exact local image the repro runs in
+        image_digest=image_digest if image_digest is not None else _image_id(),
         # The trusted wrapper forks the harness (a real signal death -> exit 99);
         # the harness replays the baked libFuzzer input.
         command=["/runner", "/harness", "/seeds/trigger"],
@@ -315,8 +319,26 @@ def test_verify_refuses_a_sandbox_scoped_to_another_project(state_dir, tmp_path)
                         expires_at="2099-01-01T00:00:00Z"),
         execution_enabled=True, store=store, runtime="docker",
     )
-    run_session(store, GATE, VerifySession(PROJECT, finding.id, _verify_spec(), other))
+    # A DUMMY digest: this test refuses on the project-scope guard BEFORE the sandbox
+    # runs, so it never attests — and must not touch the docker daemon without opt-in.
+    spec = _verify_spec(image_digest="sha256:refusal-test-never-attested")
+    run_session(store, GATE, VerifySession(PROJECT, finding.id, spec, other))
     assert store.get_finding(finding.id).status is FindingStatus.candidate  # unpromoted, no run
+
+
+def test_refusal_spec_is_built_without_contacting_docker(monkeypatch):
+    # The opt-in guard promises a default `pytest benchmarks/` (no
+    # DEEPTHOUGHT_TIER2_EXECUTE=1) never touches the docker daemon. A non-executing test
+    # builds its spec with an explicit dummy digest, so _image_id() — which shells out
+    # to `docker image inspect` — must NOT run in that path.
+    import sys
+
+    def _boom() -> str:
+        raise AssertionError("_image_id (docker inspect) must not run without opt-in")
+
+    monkeypatch.setattr(sys.modules[__name__], "_image_id", _boom)
+    spec = _verify_spec(image_digest="sha256:dummy")
+    assert spec.image_digest == "sha256:dummy"     # dummy used, no daemon contact
 
 
 # --------------------------------------------------------------------------- #

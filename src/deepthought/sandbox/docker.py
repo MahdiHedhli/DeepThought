@@ -93,6 +93,15 @@ _RUNTIME_ERROR_EXITS = frozenset({125, 126, 127})
 # reproduction (the child cannot make the wrapper observe a signal it did not raise).
 _SANITIZER_CRASH_EXIT = 99
 
+# Runtimes we can PROVE stay on the local daemon. Only docker is pinned locally (via
+# --context default + env sanitization). A non-docker client (podman, nerdctl) can
+# select a REMOTE endpoint through its own config file (e.g. podman's containers.conf
+# active_service), which env-stripping cannot neutralize — so a signed-off repro could
+# stream inputs/output off-host. An executing run refuses any runtime not in this set
+# (fail closed); _runtime() applies the pin to exactly these. (Local podman pinning is
+# a documented follow-up.)
+_PINNABLE_RUNTIMES = frozenset({"docker", "docker.exe"})
+
 # The trusted wrapper's in-image path. Exit 99 is only authentic when the wrapper
 # ITSELF is the container entrypoint (command[0]); with any other entrypoint the
 # target could simply exit(99) after printing a forged report. An executing run
@@ -331,6 +340,18 @@ class DockerSandbox(Sandbox):
         if shutil.which(self.runtime) is None:
             # Fail CLOSED: never fall back to a weaker, unisolated execution.
             raise IsolationUnavailable(f"container runtime not found: {self.runtime}")
+        # LOCAL-ONLY, FAIL CLOSED. We can only PROVE a run stays on the local daemon for
+        # a pinnable runtime (docker: --context default + env sanitization). A non-docker
+        # client may route to a REMOTE endpoint via its own config file, which env
+        # sanitization cannot reach — a signed-off repro could then stream inputs/output
+        # off-host, breaking the Tier 2 no-network / execution-only-in-sandbox boundary.
+        # Refuse a runtime we cannot pin rather than execute it unpinned.
+        if os.path.basename(self.runtime).lower() not in _PINNABLE_RUNTIMES:
+            raise IsolationUnavailable(
+                f"runtime {self.runtime!r} cannot be pinned to the local daemon; "
+                f"refusing to execute (only docker is locally pinned). A non-docker "
+                f"client may route off-host, breaking the local-only guarantee."
+            )
         # The binary exists, but is its DAEMON reachable? A down daemon makes the
         # run exit non-zero without the target ever executing; probe first so that
         # reads as IsolationUnavailable, not a negative verification result.
@@ -670,7 +691,7 @@ class DockerSandbox(Sandbox):
         Matches the runtime's BASENAME so an absolute path ("/usr/bin/docker") still
         gets the context pin."""
         base = os.path.basename(self.runtime).lower()
-        if base in ("docker", "docker.exe"):
+        if base in _PINNABLE_RUNTIMES:
             return [self.runtime, "--context", "default"]
         return [self.runtime]
 

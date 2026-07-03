@@ -68,6 +68,15 @@ def parse_asan(text: str) -> CrashReport | None:
     report = text[err.start():]
     access = _ACCESS.search(report)
     frames = _FRAME.findall(report)  # list of (function, file:line)
+    # STRUCTURAL EVIDENCE REQUIRED. The trusted wrapper's exit 99 proves a real signal
+    # death, but the report TEXT is target-controlled: a bare header ("ERROR:
+    # AddressSanitizer: <type>") with NO faulting-access line AND NO stack frame is not
+    # a credible finding — it is what a truncated report or a spoofed echo looks like.
+    # Refuse to distil a crash from a header alone, so an executing VERIFY never
+    # promotes on header-only evidence. A real ASan abort always carries at least an
+    # access line or a symbolized frame (the genuine cJSON report has both).
+    if access is None and not frames:
+        return None
     # Slice to the CrashReport field caps: sanitizer output is target-controlled,
     # and a long C++ symbol (templates) could exceed the bound — truncate rather
     # than raise a ValidationError on an otherwise-valid crash.

@@ -281,6 +281,18 @@ def test_run_launches_the_attested_content_id_not_the_mutable_tag(monkeypatch):
     assert seen["verify_image"] == _IMAGE_DIGEST             # baked-input read pinned too
 
 
+def test_run_refuses_an_unpinnable_non_docker_runtime(monkeypatch):
+    # Only docker is pinned to the local daemon (--context default + env strip). A
+    # non-docker client can select a REMOTE endpoint via its own config, which env
+    # sanitization cannot reach — so an executing run must fail CLOSED rather than run
+    # unpinned and risk streaming the repro off-host (the Tier 2 local-only boundary).
+    box = _enabled_box(monkeypatch, runtime="podman")
+    monkeypatch.setattr(box, "_stream_capture",
+                        lambda *_a: (99, CJSON_ASAN, "", False, False, True))
+    with pytest.raises(IsolationUnavailable):
+        box.run(_spec())
+
+
 def test_run_returns_a_typed_timeout_result(monkeypatch):
     box = _enabled_box(monkeypatch)
     monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "partial", "", True, False, True))
@@ -873,6 +885,17 @@ def test_parse_asan_extracts_the_cjson_crash():
 def test_parse_asan_is_stable_and_clean_output_is_none():
     assert parse_asan(CJSON_ASAN).dedup_key == parse_asan(CJSON_ASAN).dedup_key
     assert parse_asan("harness: 100000 runs, 0 crashes, all good\n") is None
+
+
+def test_parse_asan_refuses_a_header_only_report():
+    # Structural evidence required: exit 99 proves a real signal, but a bare ASan
+    # header with NO access line and NO frame is not credible (truncated/spoofed) —
+    # refuse it so an executing VERIFY never promotes on header-only text.
+    header_only = "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x0\n"
+    assert parse_asan(header_only) is None
+    # An access line ALONE (real crash, symbols stripped) is enough to credit it.
+    with_access = header_only + "READ of size 1 at 0x0 thread T0\n"
+    assert parse_asan(with_access) is not None
 
 
 def test_parse_asan_uses_the_last_report_not_an_echoed_fake():
