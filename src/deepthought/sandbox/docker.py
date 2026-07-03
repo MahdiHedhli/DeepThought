@@ -380,11 +380,17 @@ class DockerSandbox(Sandbox):
         # A harness needing extra arguments (flags, multiple inputs) would require the
         # sandbox to STAGE the verified input itself — a documented follow-up beyond
         # this benchmark's single-input harness.
+        # Resolve the harness and input against the run's workdir before comparing:
+        # a RELATIVE harness ("trigger" with workdir "/seeds") can name the same file
+        # as the absolute input, and execv resolves it against that same workdir — so
+        # a lexical normpath compare would let the input be exec'd as the harness.
+        harness_abs = os.path.normpath(os.path.join(spec.workdir, spec.command[1]))
+        input_abs = os.path.normpath(os.path.join(spec.workdir, spec.input_path))
         if (
             len(spec.command) != 3
             or spec.command[0] != _TRUSTED_RUNNER
             or spec.command[2] != spec.input_path
-            or os.path.normpath(spec.command[1]) == os.path.normpath(spec.input_path)
+            or harness_abs == input_abs
         ):
             raise SandboxError(
                 f"spec.command {spec.command!r} must be exactly "

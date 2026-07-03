@@ -359,6 +359,14 @@ def test_run_refuses_to_execute_the_input_as_the_harness(monkeypatch):
                                  policy=SandboxPolicy())
     with pytest.raises(SandboxError):
         box.run(input_as_child)
+    # A RELATIVE harness that resolves (against workdir) to the input file would make
+    # the wrapper execv the input as code — the workdir-resolved compare refuses it.
+    aliased = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                          command=["/runner", "trigger", "/seeds/trigger"],
+                          repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                          workdir="/seeds", policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(aliased)
 
 
 def test_run_fails_closed_on_a_wrapper_infrastructure_exit(monkeypatch):

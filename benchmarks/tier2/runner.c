@@ -66,7 +66,12 @@ int main(int argc, char **argv) {
     }
     close(pfd[1]);
     int child_errno = 0;
-    ssize_t n = read(pfd[0], &child_errno, sizeof(child_errno));  /* 0 (EOF) if execv ran */
+    ssize_t n;
+    /* Retry on EINTR: an interrupted read must not be mistaken for "execv succeeded"
+     * (EOF), which would silently drop a real execv failure to a negative run. */
+    while ((n = read(pfd[0], &child_errno, sizeof(child_errno))) < 0 && errno == EINTR) {
+        /* interrupted — read again */
+    }
     close(pfd[0]);
 
     int status = 0, rc;
