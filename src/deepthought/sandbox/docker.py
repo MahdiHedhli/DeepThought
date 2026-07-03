@@ -117,6 +117,12 @@ _RUNTIME_ERROR_MARKERS = (
 # reproduction (the child cannot make the wrapper observe a signal it did not raise).
 _SANITIZER_CRASH_EXIT = 99
 
+# The trusted wrapper's in-image path. Exit 99 is only authentic when the wrapper
+# ITSELF is the container entrypoint (command[0]); with any other entrypoint the
+# target could simply exit(99) after printing a forged report. An executing run
+# requires this entrypoint.
+_TRUSTED_RUNNER = "/runner"
+
 # Wall budget for the baked-input read preflight — small; it only cats one file.
 _PREFLIGHT_READ_TIMEOUT = 30.0
 
@@ -364,6 +370,17 @@ class DockerSandbox(Sandbox):
                 f"{spec.input_path!r} as its sole, final argument; the executed argv "
                 f"must run exactly the verified input"
             )
+        # Exit 99 is only authentic when the TRUSTED WRAPPER is the entrypoint — it is
+        # what turns the OS-observed WIFSIGNALED into 99. With any other entrypoint
+        # (e.g. /bin/sh) the target could print a forged report and exit(99) itself,
+        # so refuse to run — and thus to ever credit _SANITIZER_CRASH_EXIT — unless
+        # command[0] is the bundled runner.
+        if spec.command[0] != _TRUSTED_RUNNER:
+            raise SandboxError(
+                f"executing run requires the trusted wrapper as entrypoint "
+                f"(command[0] must be {_TRUSTED_RUNNER!r}); exit "
+                f"{_SANITIZER_CRASH_EXIT} is only authentic when the wrapper reports it"
+            )
         base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         self._verify_baked_input(spec)
 
@@ -379,7 +396,9 @@ class DockerSandbox(Sandbox):
         # unwinds run() before the container is cleaned, teardown() (via the `with`
         # in VerifySession) force-removes it. Cleared once the container is gone.
         self._active_container = run_id
-        started = self._clock()
+        # MONOTONIC duration: a backward system-clock shift on a calendar-clock delta
+        # could yield a NEGATIVE wall_seconds and crash SandboxResult's ge=0.0 bound.
+        started = time.monotonic()
         returncode, stdout, stderr, timed_out, overflowed, container_gone = self._stream_capture(
             argv, run_id, spec.policy.wall_timeout_seconds
         )
@@ -389,7 +408,7 @@ class DockerSandbox(Sandbox):
         # the untrusted container stopped.
         if container_gone:
             self._active_container = None
-        wall = (self._clock() - started).total_seconds()
+        wall = time.monotonic() - started
 
         if timed_out:
             return SandboxResult(

@@ -256,8 +256,9 @@ class VerifySession(BaseSession):
                 f"REPRODUCED (exit_code={result.exit_code}, "
                 f"wall_seconds={result.wall_seconds}). Paged the typed result as "
                 f"evidence ({evidence_ref}) and promoted candidate -> verified "
-                f"through the Store lifecycle guard. No untrusted code executed in "
-                f"this slice; the sandbox seam was a NoopSandbox in tests."
+                f"through the Store lifecycle guard. Executed via the injected "
+                f"{type(self.sandbox).__name__} seam — a NoopSandbox runs nothing; a "
+                f"signed-off executing backend runs the repro in the hardened sandbox."
             )
             next_steps = (
                 f"{finding.id!r} is now verified on resolving evidence. Run `check` "

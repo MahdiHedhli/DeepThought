@@ -308,6 +308,20 @@ def test_run_refuses_when_command_does_not_run_the_bound_input(monkeypatch):
         box.run(not_last)
 
 
+def test_run_requires_the_trusted_wrapper_as_entrypoint(monkeypatch):
+    # Exit 99 is only authentic when the trusted /runner is command[0]. A non-runner
+    # entrypoint (e.g. /bin/sh) could print a forged report and exit(99) itself, so it
+    # is refused even though it satisfies the input binding.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (99, CJSON_ASAN, "", False, False, True))
+    forged = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                         command=["/bin/sh", "-c", "print-forged-report", "/seeds/trigger"],
+                         repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                         policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(forged)
+
+
 def test_verify_baked_input_uses_a_named_container_double_dash_and_stripped_image(monkeypatch):
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker", store=_FakeStore())
