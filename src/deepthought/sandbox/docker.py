@@ -86,14 +86,27 @@ _CAPTURE_MAX = 1024 * 1024
 # failure only when the captured output also carries a runtime-error signature.
 _RUNTIME_ERROR_EXITS = frozenset({125, 126, 127})
 
-# Signatures the docker/OCI CLIENT writes when it cannot run the container, used to
-# tell a genuine launch failure from a target that merely exited 125/126/127.
+# Signatures a container CLIENT (docker OR podman/other OCI runtimes) writes when it
+# cannot run the container, used to tell a genuine launch failure from a target that
+# merely exited 125/126/127. Covers both engines so a non-docker runtime's launch
+# failure is not misread as a negative result.
 _RUNTIME_ERROR_MARKERS = (
+    # docker
     "error response from daemon",
+    "cannot connect to the docker daemon",
+    # podman
+    "cannot connect to podman",
+    "error preparing container",
+    "unable to start container",
+    "image not known",
+    "unable to find image",
+    "short-name",
+    # shared / OCI runtime (runc, crun) + exec failures
     "oci runtime",
+    "runc:",
+    "crun:",
     "executable file not found",
     "no such file or directory",
-    "cannot connect to the docker daemon",
     "exec format error",
     "exec: ",
 )
@@ -124,14 +137,23 @@ class DockerSandbox(Sandbox):
     **Trust model.** The sandbox runs a platform-built IMAGE (pinned tag,
     ``--pull=never``, behind the sign-off) whose entrypoint is a trusted wrapper
     that forks the harness and reports ``_SANITIZER_CRASH_EXIT`` (99) ONLY when the
-    OS observes the child die by a deadly signal — a real sanitizer abort. A crash
-    is credited on that code alone, never on target-printed ASan text or a
-    self-chosen exit (docker cannot tell a SIGABRT death from ``exit(134)`` by code,
-    so the wrapper's OS-level ``WIFSIGNALED`` check is what the target cannot forge).
-    The untrusted quantity is the repro INPUT, not the code. Forging ``reproduced``
-    would require substituting a malicious image, which the pinned / no-pull /
-    signed-off controls exclude — verification evidence is only ever as trustworthy
-    as the image, exactly the property those controls protect.
+    OS observes the child die by a deadly signal. A crash is credited on that code
+    alone, never on target-printed ASan text or a self-chosen exit (docker cannot
+    tell a SIGABRT death from ``exit(134)`` by code, so the wrapper's OS-level
+    ``WIFSIGNALED`` check is what the target cannot forge), and the executed input is
+    bound byte-for-byte to the stored repro before the run.
+
+    The threat model is **untrusted INPUT to trusted, sanitizer-instrumented
+    code-under-test** — the fuzzing/reproduction model. The wrapper authenticates
+    "the process died by a signal", which distinguishes a real sanitizer abort from
+    a clean exit for code (like cJSON) that never self-signals. It does NOT — and
+    cannot, for ANY in-process signal — distinguish a sanitizer-raised signal from
+    one a fully-adversarial *target binary* raised itself after printing a forged
+    report; running attacker-controlled CODE (not input) is out of scope, since
+    arbitrary code execution dwarfs report authenticity. Forging ``reproduced`` thus
+    requires substituting a malicious IMAGE, which the pinned / no-pull / signed-off
+    controls exclude — evidence is only ever as trustworthy as the image, exactly
+    the property those controls protect.
     """
 
     def __init__(
@@ -328,6 +350,16 @@ class DockerSandbox(Sandbox):
                 f"executing run requires a store-backed repro: repro_ref "
                 f"{spec.repro_ref!r} must resolve in a configured store (provenance)"
             )
+        # BIND provenance to the executed input: read the baked input back and refuse
+        # unless it is byte-identical to the stored repro. spec.input_path is required
+        # for an executing run, so a stale or unrelated repro_ref cannot authorize a
+        # run that verifies a DIFFERENT baked input.
+        if not spec.input_path:
+            raise SandboxError(
+                "executing run requires spec.input_path (the in-image repro path) so "
+                "the executed input can be bound to the stored repro"
+            )
+        self._verify_baked_input(spec)
 
         base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         run_id = self._run_id(base_argv)
@@ -418,15 +450,20 @@ class DockerSandbox(Sandbox):
 
     def _stream_capture(
         self, argv: list[str], run_id: str, wall_timeout: float
-    ) -> tuple[Optional[int], str, str, bool, bool]:
+    ) -> tuple[Optional[int], str, str, bool, bool, bool]:
         """Launch the container and read stdout/stderr under a hard byte cap and a
         wall deadline, killing the container if either is exceeded.
 
-        Returns ``(returncode, stdout, stderr, timed_out, overflowed)``. Bounds BOTH
-        memory (buffers never exceed ``_CAPTURE_MAX``) and disk (nothing is spooled
-        to a file): a flooding target is stopped AT the cap, not at the timeout, and
-        a hung one is stopped at the deadline. ``stdin`` is closed to the target.
-        Undecodable bytes are replaced, never raised.
+        Returns ``(returncode, stdout, stderr, timed_out, overflowed, container_gone)``.
+        Bounds BOTH memory (buffers never exceed ``_CAPTURE_MAX``) and disk (nothing
+        is spooled to a file): a flooding target is stopped AT the cap, not at the
+        timeout, and a hung one is stopped at the deadline. ``stdin`` is closed to
+        the target. Undecodable bytes are replaced, never raised. ``container_gone``
+        is True only when removal is CONFIRMED, so the caller keeps an unconfirmed
+        container queued for a teardown retry.
+
+        Not thread-safe: a single instance must not be ``run`` concurrently (each run
+        mutates ``_active_container``); the driver constructs one per session.
         """
         proc = subprocess.Popen(
             argv,
@@ -478,15 +515,24 @@ class DockerSandbox(Sandbox):
             self._reap(proc)
             raise
 
-        # Normal exit: docker run returned => the container exited and --rm removed
-        # it. On a timeout/overflow the container is still alive; stop it by name
-        # (a subprocess-level kill reaches only the local client) BEFORE reaping the
-        # client, and report whether removal was CONFIRMED so run() only clears the
-        # active-container state on success.
+        # The read loop ended. EOF on both pipes does NOT prove the container
+        # exited — a target can close its stdout/stderr and keep running — so wait
+        # for the CLIENT to actually exit within the remaining wall budget. If it
+        # does not, the container is still alive past the deadline: treat it as a
+        # timeout so it is force-removed rather than leaked past wall_timeout.
+        if not (timed_out or overflowed):
+            remaining = (deadline - self._clock()).total_seconds()
+            if not self._wait_client(proc, remaining):
+                timed_out = True
+
+        # On a timeout/overflow the container is still alive; stop it by name (a
+        # subprocess-level kill reaches only the local client) and report whether
+        # removal was CONFIRMED so run() only clears the active-container state on
+        # success. Otherwise the container exited and --rm removed it.
         container_gone = True
         if timed_out or overflowed:
             container_gone = self._force_remove(run_id)
-        self._reap(proc)  # always reap the local client, killing it if it will not exit
+        self._reap(proc)  # reap the local client, killing it if it will not exit
         stdout = bytes(bufs[fd_out]).decode("utf-8", "replace")
         stderr = bytes(bufs[fd_err]).decode("utf-8", "replace")
         return proc.returncode, stdout, stderr, timed_out, overflowed, container_gone
@@ -528,6 +574,17 @@ class DockerSandbox(Sandbox):
         text = err.decode("utf-8", "replace") if isinstance(err, bytes) else str(err)
         return "no such container" in text.lower()
 
+    def _wait_client(self, proc: "subprocess.Popen", timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for the client to exit. Returns True if it
+        exited (the container is gone), False if it is still running — so a target
+        that closes its output but keeps running is caught as a timeout, not treated
+        as a clean exit."""
+        try:
+            proc.wait(timeout=max(0.0, timeout))
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
     def _reap(self, proc: "subprocess.Popen") -> None:
         """Reap the local client process, KILLING it if it will not exit.
 
@@ -543,6 +600,43 @@ class DockerSandbox(Sandbox):
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+
+    def _verify_baked_input(self, spec: SandboxSpec) -> None:
+        """Read the baked input at ``spec.input_path`` and refuse unless it is
+        byte-identical to the stored ``repro_ref`` — binding the EXECUTED input to
+        the provenance that authorized the run. The read runs in a hardened,
+        network-denied, read-only, non-root container (no host mount), and any read
+        failure or mismatch fails CLOSED."""
+        stored = self.store.read_detail(spec.repro_ref)
+        if stored is None:
+            raise SandboxError(
+                f"repro_ref {spec.repro_ref!r} does not resolve; refusing to run"
+            )
+        argv = [
+            self.runtime, "run", "--rm", "--network=none", "--pull=never",
+            "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+            "--user", "65534:65534", "--entrypoint", "/bin/cat",
+            spec.image, spec.input_path,
+        ]
+        try:
+            proc = subprocess.run(
+                argv, stdin=subprocess.DEVNULL, capture_output=True,
+                timeout=30, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SandboxError(
+                f"could not read baked input {spec.input_path!r}: {exc}"
+            ) from exc
+        if proc.returncode != 0:
+            raise SandboxError(
+                f"could not read baked input {spec.input_path!r} from the image "
+                f"(exit {proc.returncode})"
+            )
+        if proc.stdout != stored.encode("utf-8"):
+            raise SandboxError(
+                f"baked input {spec.input_path!r} does not match the stored repro "
+                f"{spec.repro_ref!r}; refusing to verify an unbound input"
+            )
 
     def _preflight_runtime(self) -> None:
         """Confirm the runtime DAEMON is reachable, not merely that the client binary

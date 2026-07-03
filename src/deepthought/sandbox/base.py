@@ -182,11 +182,15 @@ class SandboxSpec(BaseModel):
     # entrypoint/cmd — not the minimized repro. A repro must be explicit.
     command: list[Short] = Field(min_length=1)
     # The Store pointer to the repro input, for PROVENANCE. The input itself is
-    # delivered to the container BY THE IMAGE (baked in at the path named in
-    # ``command``): the sandbox never bind-mounts or copies a host file across the
-    # isolation boundary, so a run is tied to a stored artifact but no host
-    # filesystem crosses in. An executing backend requires this ref to resolve.
+    # delivered to the container BY THE IMAGE (baked in): the sandbox never
+    # bind-mounts or copies a host file across the isolation boundary. An executing
+    # backend requires this ref to resolve.
     repro_ref: Ref
+    # The in-image path of the baked repro input (e.g. ``/seeds/trigger``). When set,
+    # an executing backend reads it back and refuses unless it is byte-identical to
+    # ``repro_ref`` — BINDING the executed input to the provenance that authorized
+    # the run, so a stale or unrelated ref cannot verify a different input.
+    input_path: PathStr = ""
 
     @field_validator("command")
     @classmethod

@@ -15,6 +15,7 @@
  * So exit 99 from this wrapper means "the OS observed the child die by a signal",
  * a fact no amount of target-printed ASan text or self-chosen exit code can forge.
  */
+#include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -37,7 +38,13 @@ int main(int argc, char **argv) {
         _exit(71);
     }
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
+    int rc;
+    /* Retry on EINTR so a stray signal to the wrapper cannot be misreported as a
+     * waitpid failure while the child is still fine. */
+    while ((rc = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {
+        /* interrupted — wait again */
+    }
+    if (rc < 0) {
         perror("runner: waitpid");
         return 72;
     }

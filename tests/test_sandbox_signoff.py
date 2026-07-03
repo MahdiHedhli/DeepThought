@@ -47,6 +47,7 @@ def _spec() -> SandboxSpec:
         image="deepthought/cjson-asan:tier2",
         command=["/runner", "/harness", "/seeds/trigger"],  # trusted wrapper + harness
         repro_ref="detail/seed/trigger",
+        input_path="/seeds/trigger",
         workdir="/",
         policy=SandboxPolicy(),
     )
@@ -136,10 +137,14 @@ def test_missing_runtime_fails_closed(monkeypatch):
 
 class _FakeStore:
     """Minimal store for hermetic run() decision tests: the repro_ref resolves
-    (provenance passes) and paged output is discarded."""
+    (provenance passes), read_detail returns the 7-byte trigger, and paged output is
+    discarded."""
 
     def detail_exists(self, ref: str) -> bool:
         return True
+
+    def read_detail(self, ref: str) -> str:
+        return '{"1":1,'
 
     def write_detail(self, session_id: str, name: str, content: str) -> str:
         return f"detail/{session_id}/{name}"
@@ -161,9 +166,10 @@ def _enabled_box(monkeypatch, **kw) -> DockerSandbox:
 
     monkeypatch.setattr(docker_mod.shutil, "which", lambda _name: "/usr/bin/docker")
     kw.setdefault("store", _FakeStore())
-    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
-                        runtime="docker", **kw)
-    monkeypatch.setattr(box, "_preflight_runtime", lambda: None)  # daemon reachable
+    kw.setdefault("runtime", "docker")
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True, **kw)
+    monkeypatch.setattr(box, "_preflight_runtime", lambda: None)     # daemon reachable
+    monkeypatch.setattr(box, "_verify_baked_input", lambda _spec: None)  # input bound
     return box
 
 
@@ -210,6 +216,50 @@ def test_run_treats_a_bare_125_exit_as_a_negative_result(monkeypatch):
                         lambda *_a: (125, "just a program that exited 125", "", False, False, True))
     result = box.run(_spec())
     assert result.reproduced is False and result.exit_code == 125
+
+
+def test_run_detects_a_podman_launch_failure(monkeypatch):
+    # A non-docker runtime's launch failure is also recognized (its error signature
+    # is covered), so it fails closed rather than reading as a negative result.
+    box = _enabled_box(monkeypatch, runtime="podman")
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (
+        126, "", "Error: unable to start container: crun: executable file not found",
+        False, False, True))
+    with pytest.raises(IsolationUnavailable):
+        box.run(_spec())
+
+
+def test_run_requires_input_path_to_bind_the_repro(monkeypatch):
+    # An executing run with no spec.input_path cannot bind the executed input to the
+    # stored repro -> refused BEFORE the container runs.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (99, CJSON_ASAN, "", False, False, True))
+    unbound = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                          command=["/runner", "/harness", "/seeds/trigger"],
+                          repro_ref="detail/seed/trigger", input_path="",
+                          policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(unbound)
+
+
+def test_verify_baked_input_binds_bytes_and_refuses_a_mismatch(monkeypatch):
+    import deepthought.sandbox.docker as docker_mod
+
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker", store=_FakeStore())  # read_detail -> '{"1":1,'
+
+    def _cat(out: bytes):
+        return lambda *_a, **_k: subprocess.CompletedProcess([], 0, out, b"")
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", _cat(b'DIFFERENT BYTES'))
+    with pytest.raises(SandboxError):                 # baked != stored -> refuse
+        box._verify_baked_input(_spec())
+    monkeypatch.setattr(docker_mod.subprocess, "run", _cat(b'{"1":1,'))
+    box._verify_baked_input(_spec())                  # byte-identical -> OK, no raise
+    monkeypatch.setattr(docker_mod.subprocess, "run",
+                        lambda *_a, **_k: subprocess.CompletedProcess([], 1, b"", b"cat: no such file"))
+    with pytest.raises(SandboxError):                 # could not read baked input -> refuse
+        box._verify_baked_input(_spec())
 
 
 def test_run_raises_when_the_exit_code_is_unavailable(monkeypatch):
@@ -412,6 +462,41 @@ def test_stream_capture_caps_flooded_output_and_kills(monkeypatch):
     assert overflowed is True and timed_out is False
     assert removed == ["sandbox-flood"]
     assert len(out) == 16  # capped read; replacement chars, no decode error
+
+
+def test_stream_capture_catches_a_client_that_survives_eof(monkeypatch):
+    # A target can close stdout/stderr but keep running: the read loop ends on EOF,
+    # yet the client has not exited. That must be caught as a TIMEOUT and the
+    # container force-removed — never treated as a clean exit that leaks it.
+    import deepthought.sandbox.docker as docker_mod
+
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+    removed: list[str] = []
+    monkeypatch.setattr(box, "_force_remove", _rm_ok(removed))
+    r_out, w_out = os.pipe()
+    r_err, w_err = os.pipe()
+    os.close(w_out)   # both EOF immediately -> loop exits without a timeout...
+    os.close(w_err)
+
+    class _AliveAfterEof:
+        returncode = None
+
+        def __init__(self, *_a, **_k):
+            self.stdout = os.fdopen(r_out, "rb", buffering=0)
+            self.stderr = os.fdopen(r_err, "rb", buffering=0)
+
+        def wait(self, timeout=None):   # ...but the client never exits
+            raise subprocess.TimeoutExpired(["docker"], timeout)
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(docker_mod.subprocess, "Popen", _AliveAfterEof)
+    _rc, _o, _e, timed_out, overflowed, _gone = box._stream_capture(
+        ["docker", "run"], "sandbox-alive", 0.1)
+    assert timed_out is True and overflowed is False
+    assert removed == ["sandbox-alive"]   # container force-removed, not leaked
 
 
 def test_stream_capture_stops_a_hung_container_at_the_deadline(monkeypatch):

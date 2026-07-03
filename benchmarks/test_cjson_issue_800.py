@@ -161,6 +161,7 @@ def _verify_spec() -> SandboxSpec:
         # the harness replays the baked libFuzzer input.
         command=["/runner", "/harness", "/seeds/trigger"],
         repro_ref=REPRO_REF,
+        input_path="/seeds/trigger",   # bound to REPRO_REF's bytes before the run
         workdir="/",
         policy=SandboxPolicy(),  # default-deny hardening
     )
