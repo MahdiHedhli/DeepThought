@@ -415,6 +415,30 @@ def test_run_rejects_spoofed_asan_on_any_forgeable_exit(monkeypatch):
         assert result.reproduced is False and result.crash is None, f"exit {forged} wrongly credited"
 
 
+def test_run_pages_the_report_from_its_asan_header(monkeypatch):
+    # A crash whose report appears after a lot of pre-crash output must still page the
+    # ACTUAL report (from the ASan header) as evidence, not a truncated head that
+    # omits the report that justified promotion.
+    class _RecordingStore(_FakeStore):
+        def __init__(self):
+            self.details = {}
+
+        def write_detail(self, sid, name, content):
+            self.details[name] = content
+            return f"detail/{sid}/{name}"
+
+    store = _RecordingStore()
+    box = _enabled_box(monkeypatch, store=store)
+    noise = "x" * 200_000  # > _OUTPUT_MAX of pre-crash output
+    monkeypatch.setattr(box, "_stream_capture",
+                        lambda *_a: (99, noise + "\n" + CJSON_ASAN, "", False, False, True))
+    result = box.run(_spec())
+    assert result.reproduced is True
+    report = store.details["asan-report.txt"]
+    assert report.startswith("ERROR: AddressSanitizer")  # the report, not the noise head
+    assert "parse_string" in report
+
+
 def test_run_reproduces_only_on_the_trusted_sanitizer_exit(monkeypatch):
     # Exit 99 = the in-image wrapper observed the child die by a deadly signal. Crash
     # credited (with the ASan report present).

@@ -463,9 +463,13 @@ class DockerSandbox(Sandbox):
         # exactly what those controls protect.
         crash = parse_asan(combined) if returncode == _SANITIZER_CRASH_EXIT else None
         if crash is not None:
-            # Page the full raw sanitizer report; the typed CrashReport carries
-            # only bounded fields into orchestrator state.
-            crash.raw_ref = self._page(run_id, "asan-report.txt", combined)
+            # Page the report FROM its ASan header so the stored evidence contains the
+            # report that justified promotion. _page bounds it to _OUTPUT_MAX; slicing
+            # the head of `combined` instead could omit a report that appears after
+            # more than _OUTPUT_MAX of earlier output, leaving raw_ref unauditable.
+            header = combined.find("ERROR: AddressSanitizer")
+            report = combined[header:] if header >= 0 else combined
+            crash.raw_ref = self._page(run_id, "asan-report.txt", report)
         return SandboxResult(
             exit_code=returncode,
             timed_out=False,

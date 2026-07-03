@@ -76,7 +76,10 @@ def _image_present() -> bool:
 _EXEC_OPTIN = os.environ.get("DEEPTHOUGHT_TIER2_EXECUTE") == "1"
 
 requires_sandbox = pytest.mark.skipif(
-    not (_image_present() and _EXEC_OPTIN),
+    # Opt-in FIRST so the docker-images probe is skipped entirely when execution is
+    # not opted into (the default): an ordinary `pytest benchmarks/` never touches
+    # Docker and cannot block on a slow/unreachable daemon.
+    not (_EXEC_OPTIN and _image_present()),
     reason="Tier 2 EXECUTES target code (Article III): opt in for this run with "
     "DEEPTHOUGHT_TIER2_EXECUTE=1, and build deepthought/cjson-asan:tier2 "
     "(docker build -t deepthought/cjson-asan:tier2 benchmarks/tier2/)",
