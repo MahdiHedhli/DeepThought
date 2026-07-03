@@ -83,9 +83,19 @@ and required Mahdi's sign-off (granted, scoped to `cjson`, 2026-07-04).
   `execution_enabled=True`. Missing runtime → `IsolationUnavailable` (fail closed);
   no sign-off → `SignoffRequired`; not enabled → `SandboxExecutionDisabled`.
 - **ASan → evidence** — `parse_asan` distils the report to a typed `CrashReport`
-  (error class, faulting access, top frames, stable dedup key). VERIFY pages the
-  full report to the store and promotes candidate → verified **through the guard**,
-  which requires the resolving `evidence_ref`.
+  (error class, faulting access, top frames, stable dedup key). A header-only report
+  (no access line and no frame) is refused as non-credible, so a crash is credited
+  only on **structural** evidence. VERIFY pages the full report to the store and
+  promotes candidate → verified **through the guard**, which requires the resolving
+  `evidence_ref`.
+- **Trust hardening (driven by the dual-gate review)** — before it trusts anything
+  the image produces, `run()` **attests the image by content digest** and launches by
+  the resolved `sha256:` ID (not the mutable tag, closing a tag-repoint TOCTOU); it
+  **binds provenance** by reading the baked input back byte-for-byte against the
+  stored repro; and it is **local-only, fail closed** — docker is pinned to the local
+  daemon (`--context default` + stripped remote-endpoint env), and a runtime that
+  cannot be pinned is refused rather than run off-host. The benchmark's own
+  no-opt-in tests never contact the docker daemon.
 
 ### The execution hard stop (Article III) — crossed once, behind a sign-off
 The module **SKIPS (never fails)** where docker or the ASan image is absent — the

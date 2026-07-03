@@ -5,12 +5,13 @@ _As of 2026-07-02._
 ## TL;DR
 DeepThought is a **governed, autonomous security-research platform**. Its entire
 numbered feature roadmap — **001 → 006 — is built, reviewed, and merged to
-`main`**, plus a **Tier 1 rediscovery benchmark** (CVE-2007-4559). Repo:
-**`MahdiHedhli/DeepThought`** (public). State on `main`: **582 tests green; all
+`main`**, plus **two rediscovery benchmarks** — Tier 1 (CVE-2007-4559, read-only)
+and Tier 2 (cJSON issue #800, real signed-off sandbox execution). Repo:
+**`MahdiHedhli/DeepThought`** (public). State on `main`: **642 tests green; all
 six smoke scripts pass.** No further numbered feature remains; next work needs a
 human decision.
 
-## Benchmark (merged, PR #7 `2fe2435`)
+## Benchmark (Tier 1 merged PR #7 `2fe2435`; Tier 2 merged PR #8 `bb5a674`)
 A deterministic CI **rediscovery benchmark** proves the platform re-finds a known,
 patched CVE through the *shipped* pipeline **without executing the vulnerable
 sink** — see [`benchmarks/deep-thought-benchmark.md`](../benchmarks/deep-thought-benchmark.md).
@@ -19,8 +20,15 @@ sink** — see [`benchmarks/deep-thought-benchmark.md`](../benchmarks/deep-thoug
   an informational **alias**, never the authoritative `Finding.cve` — SARIF stays
   untrusted) → a candidate → OSV/`check` → the loop's `verify_escalation`. Every
   test runs with `TarFile.extractall`/`extract` monkeypatched to raise. **Built.**
-- **Tier 2 — cJSON memory-safety**: **not started** — it crosses the execution
-  hard stop and needs a wired sandbox + Mahdi's sign-off (Article III).
+- **Tier 2 — cJSON heap over-read** (GitHub issue #800 / CWE-125): the same pipeline,
+  but the reproduction **runs the target** — so it crosses the Article III execution
+  hard stop and required Mahdi's sign-off (granted, scoped to `cjson`). VERIFY replays
+  a 7-byte trigger through a libFuzzer+ASan harness inside the hardened `DockerSandbox`
+  (a trusted `runner.c` wrapper credits a crash only on an OS-observed signal death,
+  exit 99). The run **attests the image by content digest and launches by the resolved
+  `sha256:` ID**, **binds the baked input to the stored repro byte-for-byte**, is
+  **local-only / fail-closed**, and credits a crash only on **structural** ASan
+  evidence. Ground truth is public and patched, so no disclosure risk. **Built.**
 
 Every feature was built **gate-first / test-first** and merged only after an
 independent **dual-gate review** (both reviewers clean on the same HEAD). All
@@ -132,6 +140,16 @@ Both must return CLEAN on the same commit before merge. Feature 006 took **11
 rounds** — every codex finding was a real, distinct correctness bug in the loop's
 state machine, each fixed test-first; agy was clean the last four rounds.
 
+The **Tier 2** benchmark (real target execution) ran the longest — **~23 rounds**;
+codex kept surfacing genuine, progressively deeper hardening on the execution path
+(exit-code authenticity, image attestation + run-by-content-ID, local-daemon
+pinning, structural crash evidence, opt-in-clean tests), while agy went clean
+earlier. It did not converge to a both-clean HEAD on its own, so the loop was
+**terminated by an explicit human decision** (Mahdi): fix the last round's real
+findings, consciously scope the out-of-model/latent items, and merge — a reminder
+that a dual gate on a security-sensitive execution component may need a human to
+call termination rather than wait for silence.
+
 ## Open follow-ups (tracked; NOT done, not blocking)
 1. **Legacy-store `RecordId` migration** — a graceful `migrate`/repair path so a
    `FileStore` written before ids were tightened doesn't fail strict-on-read after
@@ -148,19 +166,24 @@ state machine, each fixed test-first; agy was clean the last four rounds.
 - **NTFY** to `ntfy.sh/Mahdi-Dev` on every hard stop (urgent) and every merge.
 
 ## What needs a decision next
-The numbered roadmap is complete and Tier 1 of the benchmark is merged, so there is
+The numbered roadmap is complete and **both benchmark tiers are merged**, so there is
 nothing left to build autonomously. Options: (a) the two follow-ups above, (b) a new
-numbered feature (needs a spec), (c) **Tier 2 of the benchmark** (cJSON memory-safety
-rediscovery) — which crosses the execution hard stop and needs a wired sandbox +
-sign-off, or (d) a real **authorized** engagement — which immediately hits the
-target-code-execution / disclosure-transmission hard stops that need a human
-sign-off.
+numbered feature (needs a spec), (c) a **Tier 3** benchmark (a harder rediscovery, or
+the documented Tier 2 follow-ups — local podman pinning, binary-seed byte-exact store,
+in-image symlink resolution, multi-input/flag-harness staging), or (d) a real
+**authorized** engagement — which immediately hits the target-code-execution /
+disclosure-transmission hard stops that need a human sign-off.
 
 ## Run it
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv -e ".[dev]"
-.venv/bin/pytest                          # 582 tests (tests/ + benchmarks/)
+.venv/bin/pytest                          # 642 tests (tests/ + benchmarks/)
 for s in scripts/smoke*.sh; do bash "$s"; done   # 6 smokes
+
+# Tier 2 executes the target; its sandbox tests SKIP unless you opt in AND the
+# image is built (they never fail the build):
+docker build -t deepthought/cjson-asan:tier2 benchmarks/tier2/
+DEEPTHOUGHT_TIER2_EXECUTE=1 .venv/bin/pytest benchmarks/test_cjson_issue_800.py
 .venv/bin/deepthought --help
 ```
