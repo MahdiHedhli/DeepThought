@@ -21,6 +21,17 @@ _ACCESS = re.compile(r"\b(READ|WRITE) of size (\d+)\b")
 _FRAME = re.compile(r"#\d+\s+0x[0-9a-fA-F]+\s+in\s+(\S+)\s+([^\s(]+:\d+(?::\d+)?)")
 
 
+def _safe_int(digits: str) -> int | None:
+    """``int(digits)`` or ``None``. Python 3.11+ raises ``ValueError`` on a string
+    of more than 4300 digits (an integer-conversion DoS guard). The access size is
+    read from target-controlled output, so a hostile ``of size <5000 digits>`` must
+    yield ``None`` — never crash the parser."""
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
 def parse_asan(text: str) -> CrashReport | None:
     """Return a :class:`CrashReport` for an ASan report, or ``None`` if the text
     carries no ASan error (a clean run)."""
@@ -43,7 +54,7 @@ def parse_asan(text: str) -> CrashReport | None:
         sanitizer="AddressSanitizer",
         error_type=err.group(2)[:128],
         access=(access.group(1) if access else "")[:128],
-        access_size=int(access.group(2)) if access else None,
+        access_size=_safe_int(access.group(2)) if access else None,
         faulting_function=faulting_fn[:128],
         faulting_location=faulting_loc[:512],
         top_frames=top,

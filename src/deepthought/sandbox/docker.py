@@ -29,9 +29,10 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import select
 import shutil
 import subprocess
-import tempfile
+from datetime import timedelta
 from typing import Callable, Optional
 
 from ..schema.common import utcnow
@@ -70,6 +71,20 @@ _NUMERIC_RE = re.compile(r"[0-9]+")
 # bounded evidence the orchestrator reads; this is the raw pointer content.
 _OUTPUT_MAX = 65536
 
+# Hard cap on bytes READ from the container's stdout+stderr, enforced DURING
+# capture (not just on read-back): a target that floods stdio is killed the moment
+# it crosses this, so it can exhaust neither controller memory (buffers never grow
+# past it) nor host disk (nothing is spooled to a file). Generous over _OUTPUT_MAX
+# so a real, multi-frame sanitizer report is captured whole before we page a
+# bounded slice of it. A memory-safety repro never emits this much.
+_CAPTURE_MAX = 1024 * 1024
+
+# docker/podman reserve these exit codes for "could not run the container" — a bad
+# flag or missing image under --pull=never (125), an un-executable entrypoint
+# (126), or an entrypoint not found (127). The target never ran, so these are
+# ISOLATION failures, never a negative verification result.
+_RUNTIME_ERROR_EXITS = frozenset({125, 126, 127})
+
 
 class DockerSandbox(Sandbox):
     """Builds a fully-hardened ``docker run`` argv, and — only behind a valid
@@ -104,6 +119,11 @@ class DockerSandbox(Sandbox):
         self.store = store          # paged raw output goes here (optional)
         self.runtime = runtime
         self._clock = clock
+        # The name of a container currently believed to be running. Set while a run
+        # is in flight and cleared once the container is gone; teardown() force-
+        # removes it, so an interrupt (KeyboardInterrupt/SystemExit) between launch
+        # and normal cleanup cannot leak a running container past the `with` block.
+        self._active_container: Optional[str] = None
 
     # --- pure config builder (inspection only) -----------------------------
 
@@ -117,7 +137,12 @@ class DockerSandbox(Sandbox):
 
     def build_argv(self, spec: SandboxSpec, policy: SandboxPolicy) -> list[str]:
         """The argv mapping (contract name). ``build_command`` delegates here."""
-        argv: list[str] = ["docker", "run"]
+        # argv[0] is the CONFIGURED runtime, not a hardcoded "docker": the same
+        # value drives the preflight which-check AND the timeout cleanup, so a
+        # non-docker runtime (e.g. "podman") cannot launch under one binary while
+        # being checked/cleaned under another (which would defeat fail-closed and
+        # leak the container). self.runtime is trusted operator config.
+        argv: list[str] = [self.runtime, "run"]
 
         if policy.ephemeral:
             argv.append("--rm")  # ephemeral: built fresh, torn down after
@@ -262,59 +287,132 @@ class DockerSandbox(Sandbox):
         # run() — not build_argv — so the isolation-tested argv stays pure, and so
         # run_id (a digest of that argv) is stable.
         argv = [*base_argv[:2], "--name", run_id, *base_argv[2:]]
+        # Mark the container in-flight BEFORE launch. If an interrupt or error
+        # unwinds run() before the container is cleaned, teardown() (via the `with`
+        # in VerifySession) force-removes it. Cleared once the container is gone.
+        self._active_container = run_id
         started = self._clock()
-        # Capture to on-disk files, NEVER an in-RAM PIPE: an adversarial target
-        # that floods stdout cannot exhaust controller memory, because we read back
-        # only a bounded prefix (_read_capped reads at most _OUTPUT_MAX bytes). The
-        # files also hold the PARTIAL output on a timeout, so we don't depend on
-        # TimeoutExpired.stdout (which is bytes even under text=True — a decode
-        # hazard). stdin is closed so the target cannot read the host's stdin.
-        with tempfile.TemporaryDirectory(prefix="dt-sandbox-") as td:
-            out_path = os.path.join(td, "stdout")
-            err_path = os.path.join(td, "stderr")
-            try:
-                with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
-                    proc = subprocess.run(
-                        argv,
-                        stdin=subprocess.DEVNULL,
-                        stdout=fo,
-                        stderr=fe,
-                        timeout=spec.policy.wall_timeout_seconds,
-                        check=False,
-                    )
-            except subprocess.TimeoutExpired:
-                # Stop the daemon-side container before returning; leaving it
-                # running would keep executing untrusted code past the wall limit.
-                self._force_remove(run_id)
-                wall = (self._clock() - started).total_seconds()
-                return SandboxResult(
-                    exit_code=-1,
-                    timed_out=True,
-                    wall_seconds=wall,
-                    stdout_ref=self._page(run_id, "stdout.txt", _read_capped(out_path)),
-                    stderr_ref=self._page(run_id, "stderr.txt", _read_capped(err_path)),
-                    reproduced=False,
-                )
-            wall = (self._clock() - started).total_seconds()
-            stdout = _read_capped(out_path)
-            stderr = _read_capped(err_path)
+        returncode, stdout, stderr, timed_out, overflowed = self._stream_capture(
+            argv, run_id, spec.policy.wall_timeout_seconds
+        )
+        # The container has been reaped (and, on any abnormal exit, force-removed by
+        # name inside _stream_capture); nothing is left to tear down.
+        self._active_container = None
+        wall = (self._clock() - started).total_seconds()
+
+        if timed_out:
+            return SandboxResult(
+                exit_code=returncode if returncode is not None else -1,
+                timed_out=True,
+                wall_seconds=wall,
+                stdout_ref=self._page(run_id, "stdout.txt", stdout),
+                stderr_ref=self._page(run_id, "stderr.txt", stderr),
+                reproduced=False,
+            )
+        if overflowed:
+            # A memory-safety repro does not emit a megabyte of output. A target
+            # that floods stdio past the cap was killed; refuse to mine its
+            # truncated output for evidence — an anomalous run is not a result.
+            raise SandboxError(
+                f"target exceeded the {_CAPTURE_MAX}-byte output cap; run aborted"
+            )
+        if returncode in _RUNTIME_ERROR_EXITS:
+            # The container could not be started/exec'd — an isolation failure, not
+            # a target run. Never let it read as "did not reproduce".
+            raise IsolationUnavailable(
+                f"{self.runtime} could not run the container (exit {returncode}); "
+                f"the target did not execute"
+            )
 
         combined = f"{stdout}\n{stderr}"
-        crash = parse_asan(combined)
+        # A REAL sanitizer failure aborts the process (ASAN_OPTIONS=abort_on_error=1)
+        # -> a NON-ZERO exit. ASan-shaped text on a CLEAN (exit 0) run is target-
+        # controlled and must NEVER become verification evidence: gate the crash on
+        # an abnormal exit so a spoofed report cannot promote a finding.
+        crash = parse_asan(combined) if returncode != 0 else None
         if crash is not None:
             # Page the full raw sanitizer report; the typed CrashReport carries
             # only bounded fields into orchestrator state.
             crash.raw_ref = self._page(run_id, "asan-report.txt", combined)
         return SandboxResult(
-            exit_code=proc.returncode,
+            exit_code=returncode,
             timed_out=False,
             wall_seconds=wall,
             stdout_ref=self._page(run_id, "stdout.txt", stdout),
             stderr_ref=self._page(run_id, "stderr.txt", stderr),
-            # A sanitizer crash IS the reproduction of a memory-safety bug.
+            # A sanitizer crash on an abnormal exit IS the reproduction.
             reproduced=crash is not None,
             crash=crash,
         )
+
+    def _stream_capture(
+        self, argv: list[str], run_id: str, wall_timeout: float
+    ) -> tuple[Optional[int], str, str, bool, bool]:
+        """Launch the container and read stdout/stderr under a hard byte cap and a
+        wall deadline, killing the container if either is exceeded.
+
+        Returns ``(returncode, stdout, stderr, timed_out, overflowed)``. Bounds BOTH
+        memory (buffers never exceed ``_CAPTURE_MAX``) and disk (nothing is spooled
+        to a file): a flooding target is stopped AT the cap, not at the timeout, and
+        a hung one is stopped at the deadline. ``stdin`` is closed to the target.
+        Undecodable bytes are replaced, never raised.
+        """
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        fd_out, fd_err = proc.stdout.fileno(), proc.stderr.fileno()
+        bufs: dict[int, bytearray] = {fd_out: bytearray(), fd_err: bytearray()}
+        open_fds = {fd_out, fd_err}
+        total = 0
+        timed_out = False
+        overflowed = False
+        deadline = self._clock() + timedelta(seconds=wall_timeout)
+        try:
+            while open_fds and not overflowed:
+                remaining = (deadline - self._clock()).total_seconds()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                ready, _, _ = select.select(list(open_fds), [], [], remaining)
+                if not ready:
+                    timed_out = True
+                    break
+                for fd in ready:
+                    chunk = os.read(fd, 65536)
+                    if not chunk:  # EOF on this stream
+                        open_fds.discard(fd)
+                        continue
+                    room = _CAPTURE_MAX - total
+                    if room > 0:
+                        take = chunk[:room]
+                        bufs[fd].extend(take)
+                        total += len(take)
+                    if total >= _CAPTURE_MAX:
+                        overflowed = True
+                        break
+        finally:
+            proc.stdout.close()
+            proc.stderr.close()
+
+        if timed_out or overflowed:
+            # subprocess-level kill reaches only the local client; stop the
+            # daemon-side container by name so it cannot keep running.
+            self._force_remove(run_id)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._force_remove(run_id)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        stdout = bytes(bufs[fd_out]).decode("utf-8", "replace")
+        stderr = bytes(bufs[fd_err]).decode("utf-8", "replace")
+        return proc.returncode, stdout, stderr, timed_out, overflowed
 
     # --- output paging (Store pointers, bounded) ---------------------------
 
@@ -341,25 +439,23 @@ class DockerSandbox(Sandbox):
         except (OSError, subprocess.SubprocessError):
             pass
 
+    def teardown(self) -> None:
+        """Context-manager cleanup (the ``with`` in VerifySession always runs it).
+
+        A normal or timed-out run clears ``_active_container`` once the container is
+        gone, so this is a no-op then. Its job is the ABNORMAL exit — an interrupt
+        or error between launch and cleanup — where it force-removes a container
+        that would otherwise keep running untrusted code past the ``with`` block.
+        """
+        if self._active_container is not None:
+            self._force_remove(self._active_container)
+            self._active_container = None
+
     def _page(self, run_id: str, name: str, content: Optional[str]) -> Optional[str]:
         """Page bounded raw output to the Store and return its ref, or None."""
         if self.store is None or not content:
             return None
         return self.store.write_detail(run_id, name, content[:_OUTPUT_MAX])
-
-
-def _read_capped(path: str) -> str:
-    """Read at most ``_OUTPUT_MAX`` bytes from a file and decode leniently.
-
-    ``f.read(_OUTPUT_MAX)`` bounds the READ itself — a flooded output file is never
-    loaded wholesale into memory, only its bounded prefix. Undecodable bytes from
-    untrusted target output are replaced, never raised.
-    """
-    try:
-        with open(path, "rb") as f:
-            return f.read(_OUTPUT_MAX).decode("utf-8", "replace")
-    except OSError:
-        return ""
 
 
 def _format_cpus(cpus: float) -> str:

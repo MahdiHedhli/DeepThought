@@ -9,6 +9,7 @@ subprocess is ever spawned here (a monkeypatch asserts it).
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 import pytest
@@ -18,6 +19,7 @@ from deepthought.sandbox import (
     CrashReport,
     DockerSandbox,
     IsolationUnavailable,
+    SandboxError,
     SandboxExecutionDisabled,
     SandboxPolicy,
     SandboxSpec,
@@ -132,37 +134,156 @@ def test_missing_runtime_fails_closed(monkeypatch):
         box.run(_spec())
 
 
-def test_timeout_force_removes_the_container_and_returns_a_typed_result(monkeypatch):
-    # A hung repro: subprocess's timeout only kills the local docker CLIENT, so the
-    # backend must force-remove the daemon-side container by name. It must also
-    # return a typed timed-out SandboxResult (never raise) even when the partial
-    # captured output is non-UTF-8 bytes. Fully hermetic — no real docker.
+def _enabled_box(monkeypatch, **kw) -> DockerSandbox:
+    """A signed-off, enabled sandbox with the runtime present — the decision logic
+    in run() can then be exercised by stubbing _stream_capture. Hermetic."""
     import deepthought.sandbox.docker as docker_mod
 
     monkeypatch.setattr(docker_mod.shutil, "which", lambda _name: "/usr/bin/docker")
-    calls: list[list[str]] = []
+    return DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                         runtime="docker", **kw)
 
-    def fake_run(argv, **kwargs):
-        calls.append(list(argv))
-        if argv[:2] == ["docker", "run"]:
-            out = kwargs.get("stdout")
-            if out is not None:  # partial, non-UTF-8 output on the way to a hang
-                out.write(b"partial \xff output")
-            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
-        return subprocess.CompletedProcess(argv, 0, b"", b"")  # the rm -f cleanup
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+def test_build_argv_uses_the_configured_runtime():
+    # argv[0] must be the CONFIGURED runtime, not a hardcoded "docker": otherwise a
+    # podman sandbox would launch under docker while being checked/cleaned under
+    # podman (a fail-closed + cleanup escape).
+    assert DockerSandbox(runtime="podman").build_argv(_spec(), _spec().policy)[:2] \
+        == ["podman", "run"]
+    assert DockerSandbox().build_argv(_spec(), _spec().policy)[0] == "docker"  # default
+
+
+def test_run_returns_a_typed_timeout_result(monkeypatch):
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "partial", "", True, False))
+    result = box.run(_spec())
+    assert result.timed_out is True and result.reproduced is False and result.exit_code == -1
+
+
+def test_run_aborts_when_output_overflows(monkeypatch):
+    # A flooding target is killed at the cap; its truncated output is not evidence.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (137, "flood", "", False, True))
+    with pytest.raises(SandboxError):
+        box.run(_spec())
+
+
+def test_run_raises_on_a_container_launch_failure(monkeypatch):
+    # docker exit 125/126/127 = the container never ran -> isolation failure, NOT a
+    # negative verification result.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture",
+                        lambda *_a: (125, "", "docker: No such image (pull=never)", False, False))
+    with pytest.raises(IsolationUnavailable):
+        box.run(_spec())
+
+
+def test_run_rejects_spoofed_asan_on_a_clean_exit(monkeypatch):
+    # ASan-shaped text but a CLEAN (exit 0) run is target-controlled spoofing, never
+    # a crash — a finding must not be promoted on it.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (0, CJSON_ASAN, "", False, False))
+    result = box.run(_spec())
+    assert result.reproduced is False and result.crash is None
+
+
+def test_run_reproduces_on_a_sanitizer_crash_with_an_abnormal_exit(monkeypatch):
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False))
+    result = box.run(_spec())
+    assert result.reproduced is True
+    assert result.crash is not None and result.crash.faulting_function == "parse_string"
+
+
+def test_teardown_force_removes_an_active_container(monkeypatch):
+    # The context-manager teardown (VerifySession's `with`) force-removes a
+    # container left in flight by an interrupt/error between launch and cleanup.
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+    removed: list[str] = []
+    monkeypatch.setattr(box, "_force_remove", removed.append)
+    box._active_container = "sandbox-abc"
+    box.teardown()
+    assert removed == ["sandbox-abc"] and box._active_container is None
+    box.teardown()  # idempotent: nothing in flight, no-op
+    assert removed == ["sandbox-abc"]
+
+
+def _fake_popen(monkeypatch, stdout_bytes: bytes, wait_code: int):
+    """Install a fake Popen whose stdout emits ``stdout_bytes`` (then EOF) and whose
+    stderr is empty. Returns the list that records _force_remove calls."""
+    import deepthought.sandbox.docker as docker_mod
+
+    r_out, w_out = os.pipe()
+    r_err, w_err = os.pipe()
+    if stdout_bytes:
+        os.write(w_out, stdout_bytes)
+    os.close(w_out)   # EOF on stdout after the (optional) bytes
+    os.close(w_err)   # stderr immediately EOF
+
+    class _Proc:
+        returncode = None
+
+        def __init__(self, *_a, **_k):
+            self.stdout = os.fdopen(r_out, "rb", buffering=0)
+            self.stderr = os.fdopen(r_err, "rb", buffering=0)
+
+        def wait(self, timeout=None):
+            self.returncode = wait_code
+            return wait_code
+
+    monkeypatch.setattr(docker_mod.subprocess, "Popen", _Proc)
+
+
+def test_stream_capture_caps_flooded_output_and_kills(monkeypatch):
+    # An over-cap flood is truncated at the byte cap AND the container is killed —
+    # bounded in memory (no unbounded buffer) and on disk (no temp file). Non-UTF-8
+    # bytes decode with replacement, never raise.
+    import deepthought.sandbox.docker as docker_mod
+
+    monkeypatch.setattr(docker_mod, "_CAPTURE_MAX", 16)
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+    removed: list[str] = []
+    monkeypatch.setattr(box, "_force_remove", removed.append)
+    _fake_popen(monkeypatch, b"\xff" * 100, wait_code=0)
+
+    rc, out, err, timed_out, overflowed = box._stream_capture(["docker", "run"], "sandbox-flood", 5.0)
+    assert overflowed is True and timed_out is False
+    assert removed == ["sandbox-flood"]
+    assert len(out) == 16  # capped read; replacement chars, no decode error
+
+
+def test_stream_capture_stops_a_hung_container_at_the_deadline(monkeypatch):
+    import deepthought.sandbox.docker as docker_mod
 
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker")
-    result = box.run(_spec())
+    removed: list[str] = []
+    monkeypatch.setattr(box, "_force_remove", removed.append)
+    # stdout/stderr that never produce data or EOF -> select hits the wall deadline.
+    r_out, w_out = os.pipe()
+    r_err, w_err = os.pipe()
 
-    assert result.timed_out is True and result.reproduced is False
-    run_call = next(c for c in calls if c[:2] == ["docker", "run"])
-    name = run_call[run_call.index("--name") + 1]
-    rm_calls = [c for c in calls if c[:3] == ["docker", "rm", "-f"]]
-    assert rm_calls == [["docker", "rm", "-f", name]]   # stopped by its own name
-    assert name.startswith("sandbox-")
+    class _Hang:
+        returncode = None
+
+        def __init__(self, *_a, **_k):
+            self.stdout = os.fdopen(r_out, "rb", buffering=0)
+            self.stderr = os.fdopen(r_err, "rb", buffering=0)
+
+        def wait(self, timeout=None):
+            self.returncode = -9
+            return -9
+
+    monkeypatch.setattr(docker_mod.subprocess, "Popen", _Hang)
+    try:
+        _rc, _o, _e, timed_out, overflowed = box._stream_capture(["docker", "run"], "sandbox-hang", 0.2)
+        assert timed_out is True and overflowed is False
+        assert removed == ["sandbox-hang"]
+    finally:
+        os.close(w_out)
+        os.close(w_err)
 
 
 # --- ASan report -> typed CrashReport ---------------------------------------
@@ -182,6 +303,17 @@ def test_parse_asan_extracts_the_cjson_crash():
 def test_parse_asan_is_stable_and_clean_output_is_none():
     assert parse_asan(CJSON_ASAN).dedup_key == parse_asan(CJSON_ASAN).dedup_key
     assert parse_asan("harness: 100000 runs, 0 crashes, all good\n") is None
+
+
+def test_parse_asan_survives_an_adversarial_access_size():
+    # A hostile "of size <5000 digits>" must not crash int() (Python 3.11+ rejects
+    # conversion of >4300-digit strings). The size is dropped; the crash still parses.
+    report = CJSON_ASAN.replace("READ of size 1", "READ of size " + "9" * 5000)
+    crash = parse_asan(report)
+    assert crash is not None
+    assert crash.access == "READ"
+    assert crash.access_size is None       # oversized -> dropped, never a crash
+    assert crash.faulting_function == "parse_string"
 
 
 def test_crash_report_fields_are_bounded():
