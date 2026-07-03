@@ -134,13 +134,25 @@ def test_missing_runtime_fails_closed(monkeypatch):
         box.run(_spec())
 
 
+class _FakeStore:
+    """Minimal store for hermetic run() decision tests: the repro_ref resolves
+    (provenance passes) and paged output is discarded."""
+
+    def detail_exists(self, ref: str) -> bool:
+        return True
+
+    def write_detail(self, session_id: str, name: str, content: str) -> str:
+        return f"detail/{session_id}/{name}"
+
+
 def _enabled_box(monkeypatch, **kw) -> DockerSandbox:
-    """A signed-off, enabled sandbox with the runtime present and the daemon
-    assumed up — the decision logic in run() can then be exercised by stubbing
-    _stream_capture, without a real docker. Hermetic."""
+    """A signed-off, enabled sandbox with the runtime present, the daemon assumed
+    up, and a store whose repro_ref resolves — the decision logic in run() can then
+    be exercised by stubbing _stream_capture, without a real docker. Hermetic."""
     import deepthought.sandbox.docker as docker_mod
 
     monkeypatch.setattr(docker_mod.shutil, "which", lambda _name: "/usr/bin/docker")
+    kw.setdefault("store", _FakeStore())
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker", **kw)
     monkeypatch.setattr(box, "_preflight_runtime", lambda: None)  # daemon reachable
@@ -230,6 +242,42 @@ def test_preflight_fails_closed_when_the_daemon_is_unreachable(monkeypatch):
                         runtime="docker")
     with pytest.raises(IsolationUnavailable):
         box.run(_spec())
+
+
+def test_run_fails_closed_without_store_backed_provenance(monkeypatch):
+    # An executing run must be tied to a resolving, stored repro. No store, or a
+    # ref that does not resolve, refuses BEFORE the container runs — even though the
+    # (stubbed) capture would otherwise report a crash.
+    import deepthought.sandbox.docker as docker_mod
+
+    monkeypatch.setattr(docker_mod.shutil, "which", lambda _name: "/usr/bin/docker")
+
+    no_store = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                             runtime="docker")  # store defaults None
+    monkeypatch.setattr(no_store, "_preflight_runtime", lambda: None)
+    monkeypatch.setattr(no_store, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False))
+    with pytest.raises(SandboxError):
+        no_store.run(_spec())
+
+    class _NoResolve(_FakeStore):
+        def detail_exists(self, ref):  # ref present but dangling
+            return False
+
+    dangling = _enabled_box(monkeypatch, store=_NoResolve())
+    monkeypatch.setattr(dangling, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False))
+    with pytest.raises(SandboxError):
+        dangling.run(_spec())
+
+
+def test_run_ids_are_unique_per_invocation():
+    # A per-invocation nonce prevents same-second, same-spec runs from colliding on
+    # the container --name (docker exit 125) or overwriting each other's output.
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+    argv = box.build_argv(_spec(), _spec().policy)
+    ids = {box._run_id(argv) for _ in range(200)}
+    assert len(ids) == 200
+    assert all(i.startswith("sandbox-") for i in ids)
 
 
 def test_teardown_force_removes_an_active_container(monkeypatch):

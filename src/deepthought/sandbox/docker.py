@@ -100,6 +100,15 @@ class DockerSandbox(Sandbox):
 
     ``build_command`` stays a pure, execution-free argv renderer, so construction
     and isolation inspection need no sign-off.
+
+    **Trust model.** The sandbox runs a platform-built, sanitizer-instrumented
+    IMAGE (pinned tag, ``--pull=never``, behind the sign-off): the sanitizer and
+    the code-under-test are compiled into one trusted binary — there is no separate
+    adversarial process. The untrusted quantity is the repro INPUT, not the code.
+    So a sanitizer crash reflects a real detection by the trusted binary; forging
+    ``reproduced`` would require substituting a malicious image, which the pinned /
+    no-pull / signed-off controls exclude. Verification evidence is only ever as
+    trustworthy as the image, which is exactly the property those controls protect.
     """
 
     def __init__(
@@ -281,19 +290,20 @@ class DockerSandbox(Sandbox):
         # run exit non-zero without the target ever executing; probe first so that
         # reads as IsolationUnavailable, not a negative verification result.
         self._preflight_runtime()
-        # Provenance: the repro input is delivered to the container BY THE IMAGE
-        # (baked in at the path in spec.command) — the hardening forbids host bind
-        # mounts, so no host file crosses the boundary. spec.repro_ref is the Store
-        # pointer to that same input; require it to RESOLVE so a run is always tied
-        # to a real, stored repro artifact and never to a dangling reference.
+        # Provenance, FAIL CLOSED. The repro input is delivered to the container BY
+        # THE IMAGE (baked in at the path in spec.command) — the hardening forbids
+        # host bind mounts, so no host file crosses the boundary. Every executing run
+        # must still be tied to a real, stored repro artifact: require a configured
+        # store AND a repro_ref that RESOLVES. No store, an empty ref, or a dangling
+        # ref refuses the run — a signed-off execution never runs without provenance.
         if (
-            self.store is not None
-            and spec.repro_ref
-            and not self.store.detail_exists(spec.repro_ref)
+            self.store is None
+            or not spec.repro_ref
+            or not self.store.detail_exists(spec.repro_ref)
         ):
             raise SandboxError(
-                f"repro_ref {spec.repro_ref!r} does not resolve in the store; "
-                f"refusing to run a repro with no provenance"
+                f"executing run requires a store-backed repro: repro_ref "
+                f"{spec.repro_ref!r} must resolve in a configured store (provenance)"
             )
 
         base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
@@ -350,12 +360,19 @@ class DockerSandbox(Sandbox):
             )
 
         combined = f"{stdout}\n{stderr}"
+        # TRUST MODEL. The process is the platform-built, sanitizer-instrumented
+        # image binary (pinned tag + --pull=never + sign-off): the sanitizer is
+        # compiled INTO that trusted binary, and the code-under-test is statically
+        # linked, not a separate adversarial process. The untrusted quantity is the
+        # INPUT (spec.repro_ref), not the code. So a sanitizer abort IS a genuine
+        # detection — forging one would require a malicious IMAGE, which the pinned/
+        # no-pull/signed-off controls exclude, not merely target output.
+        #
         # A crash is credited ONLY on a deadly-signal termination — docker reports a
         # container killed by signal N as exit 128+N. Under ASAN_OPTIONS=abort_on_
-        # error=1 a real sanitizer error aborts the process (a signal death), so a
-        # genuine crash lands at >=128. Target-PRINTED ASan text with a normal exit
-        # (0, or a plain exit(1)) is spoofable and must NEVER become evidence: a
-        # spoof would have to actually raise a crash signal, i.e. genuinely abort.
+        # error=1 a real sanitizer error aborts the process, so a genuine crash lands
+        # at >=128; a clean exit (0) or a plain exit(1) never credits, so ASan-shaped
+        # text alone cannot promote a finding.
         crash = parse_asan(combined) if returncode >= 128 else None
         if crash is not None:
             # Page the full raw sanitizer report; the typed CrashReport carries
@@ -446,9 +463,14 @@ class DockerSandbox(Sandbox):
     # --- output paging (Store pointers, bounded) ---------------------------
 
     def _run_id(self, argv: list[str]) -> str:
+        # A per-INVOCATION id: timestamp + argv digest + a random nonce. The nonce
+        # makes it unique even for identical specs launched in the same second, so
+        # concurrent runs never collide on the container --name (a docker exit 125)
+        # or overwrite each other's paged output under the same detail dir.
         stamp = self._clock().strftime("%Y%m%d-%H%M%S")
         digest = hashlib.sha256("\x00".join(argv).encode("utf-8")).hexdigest()[:8]
-        return f"sandbox-{stamp}-{digest}"
+        nonce = os.urandom(4).hex()
+        return f"sandbox-{stamp}-{digest}-{nonce}"
 
     def _force_remove(self, name: str) -> None:
         """Best-effort stop+remove of the named container (timeout cleanup).
