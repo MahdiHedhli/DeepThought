@@ -34,25 +34,37 @@ def _safe_int(digits: str) -> int | None:
         return None
 
 
+def _last_err(text: str):
+    """The LAST ASan error header match, or ``None``. A real sanitizer report is the
+    process's dying output, so it is the FINAL header; any earlier "ERROR:
+    AddressSanitizer" is target/input-echoed text before the crash, which must not be
+    mistaken for the report."""
+    last = None
+    for last in _ERR.finditer(text):
+        pass
+    return last
+
+
 def report_from_header(text: str) -> str:
-    """The text from the ASan error header onward — the report ``parse_asan`` reads —
-    or the whole text if there is no header. Uses the SAME matcher (``_ERR``) as
-    ``parse_asan``, so paged evidence is byte-for-byte the report that was parsed (no
-    spacing/whitespace mismatch, and the same header occurrence)."""
-    match = _ERR.search(text)
+    """The text from the LAST ASan error header onward — the report ``parse_asan``
+    reads — or the whole text if there is no header. Uses the SAME matcher (``_ERR``)
+    and the SAME (last) occurrence as ``parse_asan``, so paged evidence is
+    byte-for-byte the report that was parsed."""
+    match = _last_err(text)
     return text[match.start():] if match else text
 
 
 def parse_asan(text: str) -> CrashReport | None:
     """Return a :class:`CrashReport` for an ASan report, or ``None`` if the text
     carries no ASan error (a clean run)."""
-    err = _ERR.search(text)
+    err = _last_err(text)
     if not err:
         return None
 
-    # Anchor the access/frame search at the report (from the header), so noise BEFORE
-    # the header (a stray "READ of size ..." or frame-shaped line) cannot leak into
-    # the distilled crash — and so the parsed fields match report_from_header's slice.
+    # Anchor the access/frame search at the LAST report (from its header): noise or
+    # input-echoed text BEFORE it (a fake header, a stray "READ of size ..." or a
+    # frame-shaped line) cannot leak into the distilled crash, and the parsed fields
+    # match report_from_header's slice.
     report = text[err.start():]
     access = _ACCESS.search(report)
     frames = _FRAME.findall(report)  # list of (function, file:line)

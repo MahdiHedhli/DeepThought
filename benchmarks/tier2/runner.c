@@ -96,6 +96,12 @@ int main(int argc, char **argv) {
         return CRASH_EXIT;   /* OS-observed signal death */
     }
     int code = WIFEXITED(status) ? WEXITSTATUS(status) : 98;
-    /* A harness must never forge the crash code or a wrapper-infra code. */
-    return (code >= RESERVED_LO && code <= RESERVED_HI) ? 98 : code;
+    /* A harness must never forge the crash code, a wrapper-infra code, or a
+     * docker/OCI "could not run the container" code (125-127) — remap all of those to
+     * 98 so 99-104 and 125-127 come ONLY from the wrapper or the runtime, never a
+     * target's self-chosen exit. */
+    if ((code >= RESERVED_LO && code <= RESERVED_HI) || (code >= 125 && code <= 127)) {
+        return 98;
+    }
+    return code;
 }

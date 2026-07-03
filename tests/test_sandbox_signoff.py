@@ -215,35 +215,16 @@ def test_run_aborts_when_output_overflows(monkeypatch):
 
 
 def test_run_raises_on_a_container_launch_failure(monkeypatch):
-    # docker exit 125 WITH a runtime-error signature = the container never ran ->
-    # isolation failure, NOT a negative verification result.
-    box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (
-        125, "", "docker: Error response from daemon: No such image (pull=never)",
-        False, False, True))
-    with pytest.raises(IsolationUnavailable):
-        box.run(_spec())
-
-
-def test_run_treats_a_bare_125_exit_as_a_negative_result(monkeypatch):
-    # A target that merely EXITS 125 (no runtime-error signature) is a normal,
-    # non-reproducing result — not a false IsolationUnavailable that loses evidence.
-    box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture",
-                        lambda *_a: (125, "just a program that exited 125", "", False, False, True))
-    result = box.run(_spec())
-    assert result.reproduced is False and result.exit_code == 125
-
-
-def test_run_detects_a_podman_launch_failure(monkeypatch):
-    # A non-docker runtime's launch failure is also recognized (its error signature
-    # is covered), so it fails closed rather than reading as a negative result.
-    box = _enabled_box(monkeypatch, runtime="podman")
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (
-        126, "", "Error: unable to start container: crun: executable file not found",
-        False, False, True))
-    with pytest.raises(IsolationUnavailable):
-        box.run(_spec())
+    # 125/126/127 come ONLY from the runtime now (the wrapper remaps a harness exit of
+    # these to 98), so each is unambiguously a launch failure -> IsolationUnavailable,
+    # decided by the EXIT CODE, not any target-controlled output text.
+    for code in (125, 126, 127):
+        box = _enabled_box(monkeypatch)
+        monkeypatch.setattr(box, "_stream_capture",
+                            # even target-echoed text does not change the classification
+                            lambda *_a, rc=code: (rc, "target said: crun: whatever", "", False, False, True))
+        with pytest.raises(IsolationUnavailable):
+            box.run(_spec())
 
 
 def test_run_requires_input_path_to_bind_the_repro(monkeypatch):
@@ -801,6 +782,18 @@ def test_parse_asan_extracts_the_cjson_crash():
 def test_parse_asan_is_stable_and_clean_output_is_none():
     assert parse_asan(CJSON_ASAN).dedup_key == parse_asan(CJSON_ASAN).dedup_key
     assert parse_asan("harness: 100000 runs, 0 crashes, all good\n") is None
+
+
+def test_parse_asan_uses_the_last_report_not_an_echoed_fake():
+    # An input-echoed FAKE "ERROR: AddressSanitizer" block before the real crash must
+    # not populate the evidence — the real report is the LAST (dying) output.
+    fake = ("==0==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x0\n"
+            "WRITE of size 9 at 0x0 thread T0\n"
+            "    #0 0x0 in fake_func /evil/fake.c:1:1\n\n")
+    crash = parse_asan(fake + CJSON_ASAN)
+    assert crash is not None
+    assert crash.faulting_function == "parse_string"   # from the REAL (last) report
+    assert crash.access == "READ" and crash.access_size == 1
 
 
 def test_parse_asan_accepts_an_uppercase_error_class():

@@ -79,36 +79,12 @@ _OUTPUT_MAX = 65536
 # bounded slice of it. A memory-safety repro never emits this much.
 _CAPTURE_MAX = 1024 * 1024
 
-# docker/podman reserve these exit codes for "could not run the container" — a bad
-# flag or missing image under --pull=never (125), an un-executable entrypoint
-# (126), or an entrypoint not found (127). But docker also PROPAGATES a target's own
-# exit of those codes, so a code alone is ambiguous: we treat it as an isolation
-# failure only when the captured output also carries a runtime-error signature.
+# docker/podman "could not run the container" codes — a bad flag or missing image
+# under --pull=never (125), an un-executable entrypoint (126), or an entrypoint not
+# found (127). The trusted wrapper remaps a HARNESS exit of these to 98, so when the
+# sandbox sees one it is unambiguously the runtime's (the target never ran) — decided
+# by the exit code alone, with no target-text heuristic.
 _RUNTIME_ERROR_EXITS = frozenset({125, 126, 127})
-
-# Signatures a container CLIENT (docker OR podman/other OCI runtimes) writes when it
-# cannot run the container, used to tell a genuine launch failure from a target that
-# merely exited 125/126/127. These are RUNTIME-ATTRIBUTABLE phrases the engine emits,
-# NOT generic ones a target could print to itself (e.g. "no such file or directory",
-# "exec: ") — so a target cannot forge an IsolationUnavailable classification and
-# drop its own negative result. A 125/126/127 without one of these is treated as an
-# ordinary (non-reproducing) target exit.
-_RUNTIME_ERROR_MARKERS = (
-    # docker
-    "error response from daemon",
-    "cannot connect to the docker daemon",
-    # podman
-    "cannot connect to podman",
-    "error preparing container",
-    "unable to start container process",
-    "image not known",
-    "unable to find image",
-    "short-name resolution",
-    # OCI runtimes name themselves in their error diagnostics
-    "oci runtime",
-    "runc create failed",
-    "crun: ",
-)
 
 # The trusted authenticity code: the in-image wrapper (benchmarks/tier2/runner.c)
 # forks the harness and returns this ONLY when the OS reports the child died by a
@@ -381,31 +357,36 @@ class DockerSandbox(Sandbox):
         # sandbox to STAGE the verified input itself — a documented follow-up beyond
         # this benchmark's single-input harness.
         #
-        # Compare paths RESOLVED against the run's workdir, which must be ABSOLUTE so
-        # the host resolution matches the container's (a relative workdir like "seeds"
-        # would resolve to "/seeds" in the container but "seeds" here, defeating the
-        # alias check). This both catches a relative harness that aliases the input and
-        # accepts a semantically-equal input token (e.g. "/seeds/./trigger").
-        if not spec.workdir.startswith("/"):
+        # workdir and input_path must be ABSOLUTE so host resolution matches the
+        # container's (a relative workdir "seeds" would resolve to "/seeds" in the
+        # container but "seeds" here, defeating the alias check).
+        if not spec.workdir.startswith("/") or not spec.input_path.startswith("/"):
             raise SandboxError(
-                f"executing run requires an ABSOLUTE workdir; got {spec.workdir!r}"
+                f"executing run requires an absolute workdir and input_path; got "
+                f"workdir={spec.workdir!r}, input_path={spec.input_path!r}"
             )
 
         def _abs(path: str) -> str:
             return os.path.normpath(os.path.join(spec.workdir, path))
 
-        input_abs = _abs(spec.input_path)
+        # The input token is compared by EXACT string: the harness opens exactly
+        # spec.input_path, which is exactly what _verify_baked_input read — so a
+        # normalized alias (e.g. "/seeds/link/../trigger", which Linux resolves through
+        # a symlink to a DIFFERENT file) can never be the verified input. The harness
+        # is compared RESOLVED against the workdir, so a relative/lexical alias of the
+        # input as the harness is refused (in-image SYMLINK aliasing of the harness is
+        # a trusted-image concern, a documented follow-up).
         if (
             len(spec.command) != 3
             or spec.command[0] != _TRUSTED_RUNNER
-            or _abs(spec.command[2]) != input_abs   # the 3rd token IS the bound input
-            or _abs(spec.command[1]) == input_abs   # the harness is NOT the input
+            or spec.command[2] != spec.input_path        # the 3rd token IS the input, EXACTLY
+            or _abs(spec.command[1]) == _abs(spec.input_path)  # the harness is NOT the input
         ):
             raise SandboxError(
                 f"spec.command {spec.command!r} must be exactly "
                 f"[{_TRUSTED_RUNNER!r}, harness, {spec.input_path!r}] — the trusted "
-                f"wrapper, a distinct harness, and the bound input as the sole "
-                f"positional argument"
+                f"wrapper, a distinct harness, and the bound input (verbatim) as the "
+                f"sole positional argument"
             )
         base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         self._verify_baked_input(spec)
@@ -470,12 +451,12 @@ class DockerSandbox(Sandbox):
             )
 
         combined = f"{stdout}\n{stderr}"
-        if returncode in _RUNTIME_ERROR_EXITS and _looks_like_runtime_error(combined):
-            # The container could not be started/exec'd (the runtime, not the
-            # target, wrote the error) — an isolation failure, not a target run.
-            # Never let it read as "did not reproduce". A target that merely EXITED
-            # 125/126/127 (no runtime-error signature) falls through to a normal,
-            # non-reproducing result rather than a false IsolationUnavailable.
+        if returncode in _RUNTIME_ERROR_EXITS:
+            # 125/126/127 now come ONLY from the runtime "could not run the container"
+            # — the wrapper remaps a harness exit of these to 98, so a target can no
+            # longer forge them. So this is unambiguously an isolation failure (the
+            # target did not execute), decided by the EXIT CODE, not target-controlled
+            # output text.
             raise IsolationUnavailable(
                 f"{self.runtime} could not run the container (exit {returncode}); "
                 f"the target did not execute"
@@ -713,6 +694,16 @@ class DockerSandbox(Sandbox):
                 f"could not read baked input {spec.input_path!r} from the image "
                 f"(exit {rc})"
             )
+        # TEXT-repro binding: the store holds text, and the read decodes utf-8 with
+        # replacement — so a NON-UTF-8 (binary) baked input would be compared lossily
+        # and could false-match a stored value. Refuse it (U+FFFD present) rather than
+        # bind a binary repro imprecisely. Byte-exact binary seeds need a bytes-level
+        # store — a documented follow-up beyond this benchmark's text trigger.
+        if "�" in stdout or "�" in stored:
+            raise SandboxError(
+                f"baked input {spec.input_path!r} (or the stored repro) is not valid "
+                f"UTF-8; the text repro store cannot bind a binary seed byte-exactly"
+            )
         if stdout != stored:
             raise SandboxError(
                 f"baked input {spec.input_path!r} does not match the stored repro "
@@ -796,14 +787,6 @@ def _safe_image(image: str) -> str:
             f"with '-' (argument-injection guard)"
         )
     return ref
-
-
-def _looks_like_runtime_error(text: str) -> bool:
-    """Whether captured output carries a docker/OCI runtime-error signature — used
-    to tell a genuine container-launch failure from a target that merely exited a
-    125/126/127 status the daemon happens to reserve."""
-    low = text.lower()
-    return any(marker in low for marker in _RUNTIME_ERROR_MARKERS)
 
 
 def _format_cpus(cpus: float) -> str:
