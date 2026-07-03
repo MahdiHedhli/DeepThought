@@ -32,7 +32,7 @@ import re
 import select
 import shutil
 import subprocess
-from datetime import timedelta
+import time
 from typing import Callable, Optional
 
 from ..schema.common import utcnow
@@ -346,14 +346,23 @@ class DockerSandbox(Sandbox):
                 "executing run requires spec.input_path (the in-image repro path) so "
                 "the executed input can be bound to the stored repro"
             )
-        # The executed command must actually RUN the bound input: refuse a spec that
-        # verifies input_path but whose command reads a different baked file (that
-        # would promote a crash under the wrong repro_ref). input_path must appear as
-        # a command token.
-        if spec.input_path not in spec.command:
+        # The executed command must RUN the bound input as its SOLE input. We require
+        # input_path to be the FINAL command token and to appear EXACTLY ONCE — the
+        # single-input-file convention a repro harness follows ("harness FILE"). This
+        # rejects a command that reads a different baked file, so a crash cannot be
+        # promoted under a repro_ref that names a different input.
+        #
+        # HARNESS CONTRACT: the caller's harness must read exactly this final argument
+        # as its input and no other baked file. The sandbox verifies input_path's
+        # bytes (see _verify_baked_input) and pins its argv position; it cannot parse
+        # arbitrary harness argument semantics, so airtight binding for a harness that
+        # takes multiple inputs would require the sandbox to STAGE the input itself
+        # (a documented follow-up beyond this benchmark's single-input harness).
+        if spec.command[-1] != spec.input_path or spec.command.count(spec.input_path) != 1:
             raise SandboxError(
-                f"spec.command {spec.command!r} does not reference the bound input "
-                f"{spec.input_path!r}; the executed argv must run the verified input"
+                f"spec.command {spec.command!r} must run the bound input "
+                f"{spec.input_path!r} as its sole, final argument; the executed argv "
+                f"must run exactly the verified input"
             )
         base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         self._verify_baked_input(spec)
@@ -474,11 +483,15 @@ class DockerSandbox(Sandbox):
         total = 0
         timed_out = False
         overflowed = False
-        deadline = self._clock() + timedelta(seconds=wall_timeout)
+        # MONOTONIC deadline: this is the wall-limit ENFORCEMENT point, so it must
+        # not move with the system clock. A backward NTP/manual adjustment on a
+        # utcnow() deadline would grow ``remaining`` and let the untrusted container
+        # run past wall_timeout; a forward jump would fire a false timeout.
+        deadline = time.monotonic() + wall_timeout
         try:
             try:
                 while open_fds and not overflowed:
-                    remaining = (deadline - self._clock()).total_seconds()
+                    remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         timed_out = True
                         break
@@ -517,7 +530,7 @@ class DockerSandbox(Sandbox):
         # does not, the container is still alive past the deadline: treat it as a
         # timeout so it is force-removed rather than leaked past wall_timeout.
         if not (timed_out or overflowed):
-            remaining = (deadline - self._clock()).total_seconds()
+            remaining = deadline - time.monotonic()
             if not self._wait_client(proc, remaining):
                 timed_out = True
 
@@ -645,6 +658,16 @@ class DockerSandbox(Sandbox):
             raise SandboxError(
                 f"baked input {spec.input_path!r} does not match the stored repro "
                 f"{spec.repro_ref!r}; refusing to verify an unbound input"
+            )
+        if not gone:
+            # The read matched, but the read container's removal is UNCONFIRMED. Fail
+            # closed rather than return and let run() overwrite _active_container with
+            # the real run id — that would lose the only teardown handle for the
+            # leaked read container. Leaving it set here queues it for the teardown
+            # retry (which raises if it still cannot confirm removal).
+            raise SandboxError(
+                f"could not confirm removal of the input-read container {run_id!r}; "
+                f"refusing to continue (teardown will retry the cleanup)"
             )
 
     def _preflight_runtime(self) -> None:

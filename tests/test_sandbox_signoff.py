@@ -248,8 +248,8 @@ def test_verify_baked_input_binds_bytes_and_refuses_a_mismatch(monkeypatch):
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker", store=_FakeStore())  # read_detail -> '{"1":1,'
 
-    def _cap(out, rc=0, timed_out=False, overflowed=False):
-        return lambda *_a: (rc, out, "", timed_out, overflowed, True)
+    def _cap(out, rc=0, timed_out=False, overflowed=False, gone=True):
+        return lambda *_a: (rc, out, "", timed_out, overflowed, gone)
 
     monkeypatch.setattr(box, "_stream_capture", _cap("DIFFERENT BYTES"))
     with pytest.raises(SandboxError):                 # baked != stored -> refuse
@@ -262,6 +262,12 @@ def test_verify_baked_input_binds_bytes_and_refuses_a_mismatch(monkeypatch):
     monkeypatch.setattr(box, "_stream_capture", _cap("", rc=None, timed_out=True))
     with pytest.raises(SandboxError):                 # read exceeded limits -> refuse
         box._verify_baked_input(_spec())
+    # match, but the read container's removal is UNCONFIRMED -> fail closed AND leave
+    # the container queued for teardown (never overwritten by the real run).
+    monkeypatch.setattr(box, "_stream_capture", _cap('{"1":1,', gone=False))
+    with pytest.raises(SandboxError):
+        box._verify_baked_input(_spec())
+    assert box._active_container is not None
 
 
 def test_run_validates_image_before_verifying_input(monkeypatch):
@@ -292,6 +298,14 @@ def test_run_refuses_when_command_does_not_run_the_bound_input(monkeypatch):
                            policy=SandboxPolicy())
     with pytest.raises(SandboxError):
         box.run(diverged)
+    # input_path present but NOT the final arg (another input follows) -> refused:
+    # it must be the SOLE, final input the harness runs.
+    not_last = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                           command=["/runner", "/harness", "/seeds/trigger", "/seeds/other"],
+                           repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                           policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(not_last)
 
 
 def test_verify_baked_input_uses_a_named_container_double_dash_and_stripped_image(monkeypatch):
