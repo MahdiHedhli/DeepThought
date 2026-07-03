@@ -375,6 +375,23 @@ def _evidence_body(finding: Finding, spec: SandboxSpec, result: SandboxResult) -
         f"- stdout_ref: {result.stdout_ref or '(none)'}",
         f"- stderr_ref: {result.stderr_ref or '(none)'}",
         "",
+    ]
+    if result.crash is not None:
+        crash = result.crash
+        lines += [
+            "## Sanitizer crash (distilled — bounded, structured)",
+            f"- sanitizer: {crash.sanitizer}",
+            f"- error_type: {crash.error_type}",
+            f"- access: {crash.access} (size {crash.access_size})",
+            f"- faulting_function: {crash.faulting_function}",
+            f"- faulting_location: {crash.faulting_location}",
+            f"- dedup_key: {crash.dedup_key}",
+            f"- raw_report_ref: {crash.raw_ref or '(none)'}",
+            "- top_frames:",
+            *[f"    {frame}" for frame in crash.top_frames],
+            "",
+        ]
+    lines += [
         "## Enforced isolation (the policy the run ran under)",
         f"- image: {spec.image}",
         f"- network: {spec.policy.network}",

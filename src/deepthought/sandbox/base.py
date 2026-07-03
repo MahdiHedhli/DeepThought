@@ -29,9 +29,11 @@ This module defines four things and executes nothing:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+from ..schema.common import RecordId, iso_z, utcnow
 
 # Length caps, mirroring the envelope discipline: a bounded string field cannot
 # smuggle a large free-text payload past the typed boundary.
@@ -40,8 +42,25 @@ Short = Annotated[str, StringConstraints(max_length=128)]
 PathStr = Annotated[str, StringConstraints(max_length=512)]
 
 
+def _now_z() -> str:
+    """Current time in the RFC3339 ``…Z`` form used across records."""
+    return iso_z(utcnow())
+
+
 class SandboxError(RuntimeError):
     """Base error for the sandbox module."""
+
+
+class SignoffRequired(SandboxError):
+    """Execution was attempted without a valid, in-window human sign-off scoped to
+    the project (Constitution Article III). Also raised when a signed-off backend
+    is not explicitly ``execution_enabled``."""
+
+
+class IsolationUnavailable(SandboxError):
+    """The backend cannot guarantee isolation on this host (e.g. the container
+    runtime is absent). A run fails CLOSED — it never falls back to a weaker,
+    unisolated execution."""
 
 
 class SandboxExecutionDisabled(SandboxError):
@@ -52,6 +71,28 @@ class SandboxExecutionDisabled(SandboxError):
     execution requires Mahdi's explicit sandbox sign-off (Constitution III;
     phase-0-decisions.md §0.3).
     """
+
+
+class Signoff(BaseModel):
+    """A human sign-off authorizing target-code execution for ONE project — the
+    Article III hard stop, enforced in code. An executing backend refuses to run
+    without a sign-off whose ``project`` matches and whose window contains now.
+
+    Timestamps are the RFC3339 ``…Z`` form, so a lexical string compare is a
+    correct time compare.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    approver: Short
+    project: RecordId  # scoped to exactly one project id
+    granted_at: str = Field(default_factory=_now_z)
+    expires_at: str
+    reason: Short = ""
+
+    def valid_for(self, project: str, now: Optional[str] = None) -> bool:
+        now = now or _now_z()
+        return self.project == project and self.granted_at <= now < self.expires_at
 
 
 class SandboxPolicy(BaseModel):
@@ -127,6 +168,29 @@ class SandboxSpec(BaseModel):
     policy: SandboxPolicy
 
 
+class CrashReport(BaseModel):
+    """A sanitizer crash, distilled to typed, BOUNDED fields — the firewall for
+    untrusted sanitizer output. Raw ASan/UBSan text is target-controlled, so only
+    these length-capped, structured fields cross into orchestrator state; the full
+    report is paged to the Store and pointed at by ``raw_ref``.
+
+    ``dedup_key`` is a stable hash of the top frames, so the same crash is
+    recognized across runs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sanitizer: Short = "AddressSanitizer"
+    error_type: Short = ""              # heap-buffer-overflow, use-after-free, …
+    access: Short = ""                  # READ or WRITE
+    access_size: int | None = None
+    faulting_function: Short = ""
+    faulting_location: PathStr = ""     # file:line[:col]
+    top_frames: list[Short] = Field(default_factory=list, max_length=16)
+    dedup_key: Short = ""
+    raw_ref: Ref | None = None          # pointer to the full report in the Store
+
+
 class SandboxResult(BaseModel):
     """The typed outcome — and the ONLY thing the orchestrator reads back.
 
@@ -148,6 +212,10 @@ class SandboxResult(BaseModel):
     # behavior? The lifecycle guard promotes a candidate only on resolving
     # evidence; this is what a VERIFY session keys promotion off.
     reproduced: bool = False
+    # The distilled sanitizer crash, when the run crashed. Structured + bounded —
+    # a memory-safety reproduction IS a crash, so an executing backend sets
+    # ``reproduced`` from its presence.
+    crash: CrashReport | None = None
 
 
 class Sandbox(ABC):

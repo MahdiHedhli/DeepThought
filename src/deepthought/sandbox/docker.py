@@ -1,4 +1,4 @@
-"""``DockerSandbox`` — the hardened container backend, **config only** in 003.
+"""``DockerSandbox`` — the hardened container backend.
 
 Two surfaces:
 
@@ -7,29 +7,43 @@ Two surfaces:
   **inspection**. It executes nothing. The isolation tests assert every hardening
   clause over this argv, with no Docker daemon and no network.
 
-- ``run(spec)`` is the **HARD STOP**. It is the one method that would shell out to
-  execute untrusted code. It is guarded by a default-OFF ``execution_enabled``
-  flag; with the flag off — the only state that ships — it raises ``SandboxError``
-  and executes nothing. No test, smoke, or CLI path enables the flag or calls
-  ``run()``. Enabling it, and adding a real backend run (an ephemeral microVM per
-  Phase 0 §0.3, or this container fallback), is a distinct, later change behind
-  **Mahdi's sign-off** (Constitution Article III).
+- ``run(spec)`` is the **Article III door**. It is the one method that shells out
+  to execute untrusted code, and it is behind a **double gate**: a default-OFF
+  ``execution_enabled`` flag AND a valid ``Signoff`` scoped to the project. With
+  the flag off — the state that ships by default and the one every non-benchmark
+  test/smoke/CLI path exercises — it raises ``SandboxExecutionDisabled`` and
+  executes nothing. Enabled but unsigned raises ``SignoffRequired``; a missing
+  runtime raises ``IsolationUnavailable`` (fail closed, never a weaker fallback).
+  Only the Tier-2 rediscovery benchmark constructs it enabled, and only with the
+  human sign-off Mahdi granted (Constitution Article III).
 
-``subprocess`` is never called with untrusted input anywhere in this slice: the
-``build_command`` output is data for inspection, not a command that is run.
+When it does run, it shells out with **exactly** the isolation ``build_argv``
+renders (no shell string is ever built), captures the output, distils any
+sanitizer crash into a bounded typed ``CrashReport``, and pages the raw report to
+the Store behind a pointer — the orchestrator reads the typed result, never the
+raw target output.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
+import shutil
+import subprocess
+from typing import Callable, Optional
 
+from ..schema.common import utcnow
+from .asan import parse_asan
 from .base import (
+    IsolationUnavailable,
     Sandbox,
     SandboxError,
     SandboxExecutionDisabled,
     SandboxPolicy,
     SandboxResult,
     SandboxSpec,
+    Signoff,
+    SignoffRequired,
 )
 
 # A short, FIXED grace period (seconds) for --stop-timeout: the window docker
@@ -49,13 +63,45 @@ _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # (e.g. "toor"), which we cannot inspect at argv-build time.
 _NUMERIC_RE = re.compile(r"[0-9]+")
 
+# Bound the raw target output paged to the Store, so an adversarial target cannot
+# smuggle an unbounded blob into state. The distilled CrashReport is the typed,
+# bounded evidence the orchestrator reads; this is the raw pointer content.
+_OUTPUT_MAX = 65536
+
 
 class DockerSandbox(Sandbox):
-    """Builds a fully-hardened ``docker run`` argv. Execution is guarded OFF."""
+    """Builds a fully-hardened ``docker run`` argv, and — only behind a valid
+    sign-off AND an explicit ``execution_enabled`` — actually runs it.
 
-    def __init__(self, *, execution_enabled: bool = False) -> None:
-        # Default OFF. This is the hard stop. Do NOT enable it in this slice.
+    The double gate is the Article III hard stop in code:
+    - ``execution_enabled`` defaults **False**; with it off, ``run`` raises
+      ``SandboxExecutionDisabled`` and never spawns a process (the shipped state).
+    - Even enabled, ``run`` requires a ``Signoff`` whose ``project`` matches and
+      whose window contains now, else ``SignoffRequired``.
+    - The runtime must exist, else ``IsolationUnavailable`` — a run fails CLOSED,
+      never falling back to a weaker, unisolated execution.
+
+    ``build_command`` stays a pure, execution-free argv renderer, so construction
+    and isolation inspection need no sign-off.
+    """
+
+    def __init__(
+        self,
+        *,
+        project: Optional[str] = None,
+        signoff: Optional[Signoff] = None,
+        execution_enabled: bool = False,
+        store=None,
+        runtime: str = "docker",
+        clock: Callable[[], object] = utcnow,
+    ) -> None:
+        # Default OFF. This is the hard stop.
         self.execution_enabled = execution_enabled
+        self.project = project
+        self.signoff = signoff
+        self.store = store          # paged raw output goes here (optional)
+        self.runtime = runtime
+        self._clock = clock
 
     # --- pure config builder (inspection only) -----------------------------
 
@@ -175,26 +221,88 @@ class DockerSandbox(Sandbox):
         argv += list(spec.command[1:])
         return argv
 
-    # --- the HARD STOP -----------------------------------------------------
+    # --- the double-gated real execution -----------------------------------
 
     def run(self, spec: SandboxSpec) -> SandboxResult:
-        """HARD STOP. Guarded by ``execution_enabled`` (default False).
+        """Run the hardened container — behind the Article III double gate.
 
-        With the flag off — the only shipped state — this raises
-        ``SandboxExecutionDisabled`` and executes nothing. It never reaches a
-        ``subprocess`` call. Enabling it and adding a real backend run requires
-        Mahdi's sign-off.
+        Off by default: ``execution_enabled`` False raises
+        ``SandboxExecutionDisabled`` (the sign-off hard stop) and never spawns a
+        process. Enabled but unsigned raises ``SignoffRequired``. Only with both,
+        and a present runtime, does it shell out — with EXACTLY the isolation
+        ``build_argv`` renders — capture the output, distil any sanitizer crash,
+        and page the raw output to the Store.
         """
         if not self.execution_enabled:
             raise SandboxExecutionDisabled(
-                "execution requires sign-off — 003 hard stop"
+                "execution requires Mahdi's sign-off — the 003 hard stop "
+                "(Article III); provide a valid Signoff and set execution_enabled"
             )
-        # Unreachable in this slice: execution_enabled is never turned on. A real
-        # backend run lands in a distinct, later, Mahdi-signed-off change.
-        raise SandboxExecutionDisabled(  # pragma: no cover
-            "no execution backend is wired in 003; enabling execution is a"
-            " separate, signed-off change"
+        if (
+            self.signoff is None
+            or self.project is None
+            or not self.signoff.valid_for(self.project)
+        ):
+            raise SignoffRequired(
+                f"execution is enabled but there is no valid sign-off for project "
+                f"{self.project!r} (Article III)"
+            )
+        if shutil.which(self.runtime) is None:
+            # Fail CLOSED: never fall back to a weaker, unisolated execution.
+            raise IsolationUnavailable(f"container runtime not found: {self.runtime}")
+
+        argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
+        run_id = self._run_id(argv)
+        started = self._clock()
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=spec.policy.wall_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            wall = (self._clock() - started).total_seconds()
+            return SandboxResult(
+                exit_code=-1,
+                timed_out=True,
+                wall_seconds=wall,
+                stdout_ref=self._page(run_id, "stdout.txt", exc.stdout),
+                stderr_ref=self._page(run_id, "stderr.txt", exc.stderr),
+                reproduced=False,
+            )
+
+        wall = (self._clock() - started).total_seconds()
+        combined = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        crash = parse_asan(combined)
+        if crash is not None:
+            # Page the full raw sanitizer report; the typed CrashReport carries
+            # only bounded fields into orchestrator state.
+            crash.raw_ref = self._page(run_id, "asan-report.txt", combined)
+        return SandboxResult(
+            exit_code=proc.returncode,
+            timed_out=False,
+            wall_seconds=wall,
+            stdout_ref=self._page(run_id, "stdout.txt", proc.stdout),
+            stderr_ref=self._page(run_id, "stderr.txt", proc.stderr),
+            # A sanitizer crash IS the reproduction of a memory-safety bug.
+            reproduced=crash is not None,
+            crash=crash,
         )
+
+    # --- output paging (Store pointers, bounded) ---------------------------
+
+    def _run_id(self, argv: list[str]) -> str:
+        stamp = self._clock().strftime("%Y%m%d-%H%M%S")
+        digest = hashlib.sha256("\x00".join(argv).encode("utf-8")).hexdigest()[:8]
+        return f"sandbox-{stamp}-{digest}"
+
+    def _page(self, run_id: str, name: str, content: Optional[str]) -> Optional[str]:
+        """Page bounded raw output to the Store and return its ref, or None."""
+        if self.store is None or not content:
+            return None
+        return self.store.write_detail(run_id, name, content[:_OUTPUT_MAX])
 
 
 def _format_cpus(cpus: float) -> str:
