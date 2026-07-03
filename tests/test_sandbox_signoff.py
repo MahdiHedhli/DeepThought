@@ -243,23 +243,82 @@ def test_run_requires_input_path_to_bind_the_repro(monkeypatch):
 
 
 def test_verify_baked_input_binds_bytes_and_refuses_a_mismatch(monkeypatch):
-    import deepthought.sandbox.docker as docker_mod
-
+    # The read now goes through the bounded, named _stream_capture (same cleanup as
+    # the real run); stub it to return the cat output as the 6-tuple.
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker", store=_FakeStore())  # read_detail -> '{"1":1,'
 
-    def _cat(out: bytes):
-        return lambda *_a, **_k: subprocess.CompletedProcess([], 0, out, b"")
+    def _cap(out, rc=0, timed_out=False, overflowed=False):
+        return lambda *_a: (rc, out, "", timed_out, overflowed, True)
 
-    monkeypatch.setattr(docker_mod.subprocess, "run", _cat(b'DIFFERENT BYTES'))
+    monkeypatch.setattr(box, "_stream_capture", _cap("DIFFERENT BYTES"))
     with pytest.raises(SandboxError):                 # baked != stored -> refuse
         box._verify_baked_input(_spec())
-    monkeypatch.setattr(docker_mod.subprocess, "run", _cat(b'{"1":1,'))
+    monkeypatch.setattr(box, "_stream_capture", _cap('{"1":1,'))
     box._verify_baked_input(_spec())                  # byte-identical -> OK, no raise
-    monkeypatch.setattr(docker_mod.subprocess, "run",
-                        lambda *_a, **_k: subprocess.CompletedProcess([], 1, b"", b"cat: no such file"))
+    monkeypatch.setattr(box, "_stream_capture", _cap("", rc=1))
     with pytest.raises(SandboxError):                 # could not read baked input -> refuse
         box._verify_baked_input(_spec())
+    monkeypatch.setattr(box, "_stream_capture", _cap("", rc=None, timed_out=True))
+    with pytest.raises(SandboxError):                 # read exceeded limits -> refuse
+        box._verify_baked_input(_spec())
+
+
+def test_run_validates_image_before_verifying_input(monkeypatch):
+    # An executing run with a malformed image name must fail validation in run()
+    # BEFORE running the verify container.
+    box = _enabled_box(monkeypatch)
+    def _boom(*_a, **_k):
+        raise AssertionError("_verify_baked_input should not be called for invalid image")
+    monkeypatch.setattr(box, "_verify_baked_input", _boom)
+
+    unbound = SandboxSpec(image=" --privileged",
+                          command=["/runner", "/harness", "/seeds/trigger"],
+                          repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                          policy=SandboxPolicy())
+    with pytest.raises(SandboxError) as exc:
+        box.run(unbound)
+    assert "image ref" in str(exc.value)
+
+
+def test_run_refuses_when_command_does_not_run_the_bound_input(monkeypatch):
+    # input_path is verified, but the command reads a DIFFERENT baked file -> the
+    # executed input is not bound to the provenance; refuse before running.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (99, CJSON_ASAN, "", False, False, True))
+    diverged = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                           command=["/runner", "/harness", "/seeds/OTHER"],
+                           repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                           policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(diverged)
+
+
+def test_verify_baked_input_uses_a_named_container_double_dash_and_stripped_image(monkeypatch):
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker", store=_FakeStore())
+
+    captured = {}
+    def _cap(argv, run_id, timeout):
+        captured["argv"] = argv
+        return (0, '{"1":1,', "", False, False, True)
+
+    monkeypatch.setattr(box, "_stream_capture", _cap)
+    spec = SandboxSpec(
+        image="  my-image:latest  ",
+        command=["/runner", "/harness", "/seeds/trigger"],
+        repro_ref="detail/seed/trigger",
+        input_path="/seeds/trigger",
+        policy=SandboxPolicy(),
+    )
+    box._verify_baked_input(spec)
+    argv = captured["argv"]
+    assert "my-image:latest" in argv          # stripped image
+    assert "--name" in argv                    # named -> cleanup path
+    assert "--" in argv
+    idx = argv.index("--")
+    assert argv[idx + 1] == "/seeds/trigger"   # input_path is a filename, not a flag
+    assert argv[idx - 1] == "my-image:latest"
 
 
 def test_run_raises_when_the_exit_code_is_unavailable(monkeypatch):

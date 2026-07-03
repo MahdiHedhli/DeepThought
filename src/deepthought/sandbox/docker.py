@@ -118,6 +118,9 @@ _RUNTIME_ERROR_MARKERS = (
 # reproduction (the child cannot make the wrapper observe a signal it did not raise).
 _SANITIZER_CRASH_EXIT = 99
 
+# Wall budget for the baked-input read preflight — small; it only cats one file.
+_PREFLIGHT_READ_TIMEOUT = 30.0
+
 
 class DockerSandbox(Sandbox):
     """Builds a fully-hardened ``docker run`` argv, and — only behind a valid
@@ -285,18 +288,11 @@ class DockerSandbox(Sandbox):
                 )
             argv += ["--env", f"{key}={spec.env[key]}"]
 
-        # The image, then the untrusted argv as separate tokens (never joined
-        # into a shell string). Validate the image token first: docker parses
-        # options until the IMAGE positional, so a ref beginning with '-' (e.g.
-        # "--privileged") would be consumed as another OPTION — argument injection
-        # that could enable a privileged run. Strip and refuse it; never render it.
-        image = spec.image.strip()
-        if not image or image.startswith("-"):
-            raise SandboxError(
-                f"invalid image ref {spec.image!r}: must be non-empty and must not"
-                " start with '-' (argument-injection guard)"
-            )
-        argv.append(image)
+        # The image, then the untrusted argv as separate tokens (never joined into a
+        # shell string). Validate the image token first (see _safe_image): a ref
+        # beginning with '-' would be consumed as a docker OPTION — argument
+        # injection that could enable a privileged run.
+        argv.append(_safe_image(spec.image))
         # Only the ARGS (command[1:]) follow the image; command[0] is the
         # --entrypoint rendered above, so exactly spec.command executes.
         argv += list(spec.command[1:])
@@ -359,9 +355,18 @@ class DockerSandbox(Sandbox):
                 "executing run requires spec.input_path (the in-image repro path) so "
                 "the executed input can be bound to the stored repro"
             )
+        # The executed command must actually RUN the bound input: refuse a spec that
+        # verifies input_path but whose command reads a different baked file (that
+        # would promote a crash under the wrong repro_ref). input_path must appear as
+        # a command token.
+        if spec.input_path not in spec.command:
+            raise SandboxError(
+                f"spec.command {spec.command!r} does not reference the bound input "
+                f"{spec.input_path!r}; the executed argv must run the verified input"
+            )
+        base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         self._verify_baked_input(spec)
 
-        base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         run_id = self._run_id(base_argv)
         # Name the container deterministically so a timed-out / hung container can
         # be force-removed. subprocess's timeout only SIGKILLs the local docker
@@ -612,27 +617,38 @@ class DockerSandbox(Sandbox):
             raise SandboxError(
                 f"repro_ref {spec.repro_ref!r} does not resolve; refusing to run"
             )
-        argv = [
+        # Validate the image here too (not only in build_argv), so a direct call is
+        # safe regardless of ordering; "--" ends option parsing so an input_path
+        # beginning with '-' is a filename to cat, never a flag. The read goes
+        # through the SAME bounded, NAMED, cleanup-guaranteed path as the real run
+        # (_stream_capture): output is capped (_CAPTURE_MAX) and a hung/oversized
+        # read is killed and force-removed by name — a large or streaming input_path
+        # cannot exhaust memory or leak a container.
+        base = [
             self.runtime, "run", "--rm", "--network=none", "--pull=never",
             "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
             "--user", "65534:65534", "--entrypoint", "/bin/cat",
-            spec.image, spec.input_path,
+            _safe_image(spec.image), "--", spec.input_path,
         ]
-        try:
-            proc = subprocess.run(
-                argv, stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=30, check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
+        run_id = self._run_id(base)
+        argv = [*base[:2], "--name", run_id, *base[2:]]
+        self._active_container = run_id  # teardown backstop while the read is in flight
+        rc, stdout, _stderr, timed_out, overflowed, gone = self._stream_capture(
+            argv, run_id, _PREFLIGHT_READ_TIMEOUT
+        )
+        if gone:
+            self._active_container = None
+        if timed_out or overflowed:
             raise SandboxError(
-                f"could not read baked input {spec.input_path!r}: {exc}"
-            ) from exc
-        if proc.returncode != 0:
+                f"reading baked input {spec.input_path!r} exceeded the read limits; "
+                f"refusing to verify"
+            )
+        if rc != 0:
             raise SandboxError(
                 f"could not read baked input {spec.input_path!r} from the image "
-                f"(exit {proc.returncode})"
+                f"(exit {rc})"
             )
-        if proc.stdout != stored.encode("utf-8"):
+        if stdout != stored:
             raise SandboxError(
                 f"baked input {spec.input_path!r} does not match the stored repro "
                 f"{spec.repro_ref!r}; refusing to verify an unbound input"
@@ -690,6 +706,21 @@ class DockerSandbox(Sandbox):
         if self.store is None or not content:
             return None
         return self.store.write_detail(run_id, name, content[:_OUTPUT_MAX])
+
+
+def _safe_image(image: str) -> str:
+    """Return the stripped image ref, or raise on an injection-prone one. docker/
+    podman parse options until the IMAGE positional, so a ref beginning with '-'
+    (e.g. ``--privileged``) is consumed as another OPTION — argument injection that
+    could enable a privileged run. Refuse it wherever an image is rendered into an
+    argv, not only in build_argv."""
+    ref = image.strip()
+    if not ref or ref.startswith("-"):
+        raise SandboxError(
+            f"invalid image ref {image!r}: must be non-empty and must not start "
+            f"with '-' (argument-injection guard)"
+        )
+    return ref
 
 
 def _looks_like_runtime_error(text: str) -> bool:
