@@ -66,6 +66,22 @@ def test_signoff_valid_window_and_project():
                    expires_at="2000-01-01T00:00:00Z").valid_for("cjson") is False  # expired
 
 
+def test_signoff_orders_a_fractional_now_correctly():
+    # A whole-second expiry vs a fractional `now` in the SAME second: a lexical
+    # string compare (the former bug) kept the EXPIRED sign-off valid because "."
+    # sorts before "Z"; parsing the timestamps orders them correctly.
+    s = Signoff(approver="m", project="cjson",
+                granted_at="2026-07-02T11:00:00Z", expires_at="2026-07-02T12:00:00Z")
+    assert s.valid_for("cjson", now="2026-07-02T11:59:59.999999Z") is True
+    assert s.valid_for("cjson", now="2026-07-02T12:00:00.500000Z") is False  # expired
+
+
+def test_signoff_unparseable_timestamp_fails_closed():
+    s = Signoff(approver="m", project="cjson", granted_at="2026-07-02T11:00:00Z",
+                expires_at="not-a-timestamp")
+    assert s.valid_for("cjson", now="2026-07-02T11:30:00Z") is False
+
+
 # --- the double gate (Article III), executing NOTHING -----------------------
 
 
@@ -114,6 +130,39 @@ def test_missing_runtime_fails_closed(monkeypatch):
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True)
     with pytest.raises(IsolationUnavailable):
         box.run(_spec())
+
+
+def test_timeout_force_removes_the_container_and_returns_a_typed_result(monkeypatch):
+    # A hung repro: subprocess's timeout only kills the local docker CLIENT, so the
+    # backend must force-remove the daemon-side container by name. It must also
+    # return a typed timed-out SandboxResult (never raise) even when the partial
+    # captured output is non-UTF-8 bytes. Fully hermetic — no real docker.
+    import deepthought.sandbox.docker as docker_mod
+
+    monkeypatch.setattr(docker_mod.shutil, "which", lambda _name: "/usr/bin/docker")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[:2] == ["docker", "run"]:
+            out = kwargs.get("stdout")
+            if out is not None:  # partial, non-UTF-8 output on the way to a hang
+                out.write(b"partial \xff output")
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout"))
+        return subprocess.CompletedProcess(argv, 0, b"", b"")  # the rm -f cleanup
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+    result = box.run(_spec())
+
+    assert result.timed_out is True and result.reproduced is False
+    run_call = next(c for c in calls if c[:2] == ["docker", "run"])
+    name = run_call[run_call.index("--name") + 1]
+    rm_calls = [c for c in calls if c[:3] == ["docker", "rm", "-f"]]
+    assert rm_calls == [["docker", "rm", "-f", name]]   # stopped by its own name
+    assert name.startswith("sandbox-")
 
 
 # --- ASan report -> typed CrashReport ---------------------------------------

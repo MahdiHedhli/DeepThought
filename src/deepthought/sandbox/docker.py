@@ -27,9 +27,11 @@ raw target output.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from typing import Callable, Optional
 
 from ..schema.common import utcnow
@@ -251,30 +253,53 @@ class DockerSandbox(Sandbox):
             # Fail CLOSED: never fall back to a weaker, unisolated execution.
             raise IsolationUnavailable(f"container runtime not found: {self.runtime}")
 
-        argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
-        run_id = self._run_id(argv)
+        base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
+        run_id = self._run_id(base_argv)
+        # Name the container deterministically so a timed-out / hung container can
+        # be force-removed. subprocess's timeout only SIGKILLs the local docker
+        # CLIENT; the daemon-side container keeps running unless we stop it by name
+        # (--stop-timeout is a teardown grace, not a wall-clock kill). Inserted in
+        # run() — not build_argv — so the isolation-tested argv stays pure, and so
+        # run_id (a digest of that argv) is stable.
+        argv = [*base_argv[:2], "--name", run_id, *base_argv[2:]]
         started = self._clock()
-        try:
-            proc = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=spec.policy.wall_timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
+        # Capture to on-disk files, NEVER an in-RAM PIPE: an adversarial target
+        # that floods stdout cannot exhaust controller memory, because we read back
+        # only a bounded prefix (_read_capped reads at most _OUTPUT_MAX bytes). The
+        # files also hold the PARTIAL output on a timeout, so we don't depend on
+        # TimeoutExpired.stdout (which is bytes even under text=True — a decode
+        # hazard). stdin is closed so the target cannot read the host's stdin.
+        with tempfile.TemporaryDirectory(prefix="dt-sandbox-") as td:
+            out_path = os.path.join(td, "stdout")
+            err_path = os.path.join(td, "stderr")
+            try:
+                with open(out_path, "wb") as fo, open(err_path, "wb") as fe:
+                    proc = subprocess.run(
+                        argv,
+                        stdin=subprocess.DEVNULL,
+                        stdout=fo,
+                        stderr=fe,
+                        timeout=spec.policy.wall_timeout_seconds,
+                        check=False,
+                    )
+            except subprocess.TimeoutExpired:
+                # Stop the daemon-side container before returning; leaving it
+                # running would keep executing untrusted code past the wall limit.
+                self._force_remove(run_id)
+                wall = (self._clock() - started).total_seconds()
+                return SandboxResult(
+                    exit_code=-1,
+                    timed_out=True,
+                    wall_seconds=wall,
+                    stdout_ref=self._page(run_id, "stdout.txt", _read_capped(out_path)),
+                    stderr_ref=self._page(run_id, "stderr.txt", _read_capped(err_path)),
+                    reproduced=False,
+                )
             wall = (self._clock() - started).total_seconds()
-            return SandboxResult(
-                exit_code=-1,
-                timed_out=True,
-                wall_seconds=wall,
-                stdout_ref=self._page(run_id, "stdout.txt", exc.stdout),
-                stderr_ref=self._page(run_id, "stderr.txt", exc.stderr),
-                reproduced=False,
-            )
+            stdout = _read_capped(out_path)
+            stderr = _read_capped(err_path)
 
-        wall = (self._clock() - started).total_seconds()
-        combined = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        combined = f"{stdout}\n{stderr}"
         crash = parse_asan(combined)
         if crash is not None:
             # Page the full raw sanitizer report; the typed CrashReport carries
@@ -284,8 +309,8 @@ class DockerSandbox(Sandbox):
             exit_code=proc.returncode,
             timed_out=False,
             wall_seconds=wall,
-            stdout_ref=self._page(run_id, "stdout.txt", proc.stdout),
-            stderr_ref=self._page(run_id, "stderr.txt", proc.stderr),
+            stdout_ref=self._page(run_id, "stdout.txt", stdout),
+            stderr_ref=self._page(run_id, "stderr.txt", stderr),
             # A sanitizer crash IS the reproduction of a memory-safety bug.
             reproduced=crash is not None,
             crash=crash,
@@ -298,11 +323,43 @@ class DockerSandbox(Sandbox):
         digest = hashlib.sha256("\x00".join(argv).encode("utf-8")).hexdigest()[:8]
         return f"sandbox-{stamp}-{digest}"
 
+    def _force_remove(self, name: str) -> None:
+        """Best-effort stop+remove of the named container (timeout cleanup).
+
+        Never masks the original timeout: a runtime that is gone or a name that no
+        longer exists is swallowed — the caller has already decided the run timed
+        out.
+        """
+        try:
+            subprocess.run(
+                [self.runtime, "rm", "-f", name],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     def _page(self, run_id: str, name: str, content: Optional[str]) -> Optional[str]:
         """Page bounded raw output to the Store and return its ref, or None."""
         if self.store is None or not content:
             return None
         return self.store.write_detail(run_id, name, content[:_OUTPUT_MAX])
+
+
+def _read_capped(path: str) -> str:
+    """Read at most ``_OUTPUT_MAX`` bytes from a file and decode leniently.
+
+    ``f.read(_OUTPUT_MAX)`` bounds the READ itself — a flooded output file is never
+    loaded wholesale into memory, only its bounded prefix. Undecodable bytes from
+    untrusted target output are replaced, never raised.
+    """
+    try:
+        with open(path, "rb") as f:
+            return f.read(_OUTPUT_MAX).decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 def _format_cpus(cpus: float) -> str:

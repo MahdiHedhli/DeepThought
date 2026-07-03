@@ -29,11 +29,29 @@ This module defines four things and executes nothing:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from ..schema.common import RecordId, iso_z, utcnow
+
+
+def _parse_z(value: str) -> Optional[datetime]:
+    """Parse an RFC3339 ``…Z`` timestamp to an aware UTC datetime, or ``None``.
+
+    ``iso_z`` renders whole seconds as ``…SSZ`` but sub-second times as
+    ``…SS.ffffffZ``, so a caller's whole-second ``expires_at`` and a fractional
+    ``now`` differ in string length — a lexical compare would misorder them within
+    a second (an expired sign-off could read as valid). Comparing parsed datetimes
+    is format-independent. An unparseable value returns ``None`` so the gate fails
+    CLOSED.
+    """
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 # Length caps, mirroring the envelope discipline: a bounded string field cannot
 # smuggle a large free-text payload past the typed boundary.
@@ -78,8 +96,8 @@ class Signoff(BaseModel):
     Article III hard stop, enforced in code. An executing backend refuses to run
     without a sign-off whose ``project`` matches and whose window contains now.
 
-    Timestamps are the RFC3339 ``…Z`` form, so a lexical string compare is a
-    correct time compare.
+    Timestamps are the RFC3339 ``…Z`` form; ``valid_for`` PARSES them before
+    comparing, so a whole-second bound and a fractional ``now`` order correctly.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -91,8 +109,20 @@ class Signoff(BaseModel):
     reason: Short = ""
 
     def valid_for(self, project: str, now: Optional[str] = None) -> bool:
-        now = now or _now_z()
-        return self.project == project and self.granted_at <= now < self.expires_at
+        """Whether this sign-off authorizes ``project`` at ``now``.
+
+        Fails CLOSED: a project mismatch, or any timestamp that does not parse,
+        returns ``False`` — an executing backend never runs on a malformed or
+        ambiguously-ordered sign-off.
+        """
+        if self.project != project:
+            return False
+        now_dt = _parse_z(now) if now is not None else utcnow()
+        granted = _parse_z(self.granted_at)
+        expires = _parse_z(self.expires_at)
+        if now_dt is None or granted is None or expires is None:
+            return False
+        return granted <= now_dt < expires
 
 
 class SandboxPolicy(BaseModel):
