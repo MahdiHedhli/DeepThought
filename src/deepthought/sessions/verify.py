@@ -334,8 +334,10 @@ class VerifySession(BaseSession):
             f"wall_seconds={result.wall_seconds}, timed_out={result.timed_out}). "
             f"Paged the negative result as durable state ({evidence_ref}) and "
             f"recorded the blocked attempt on the finding; left it a candidate — no "
-            f"evidence_ref set, so the lifecycle guard promotes nothing. No "
-            f"untrusted code executed in this slice."
+            f"evidence_ref set, so the lifecycle guard promotes nothing. Ran via the "
+            f"injected {type(self.sandbox).__name__} seam — a NoopSandbox executes "
+            f"nothing; a signed-off executing backend DID run the repro in the hardened "
+            f"sandbox and it did not reproduce (a non-crash exit is not 'no code ran')."
         )
         next_steps = (
             f"{finding.id!r} stays a candidate: the minimized repro did not "

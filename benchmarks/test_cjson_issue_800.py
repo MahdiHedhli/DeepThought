@@ -71,7 +71,19 @@ def _local_docker_env() -> dict:
 
 def _image_id() -> str:
     """The LOCAL content ID of the Tier 2 image, to ATTEST it: the sandbox refuses to
-    run unless the image's actual digest matches this. Empty if the image is absent."""
+    run unless the image's actual digest matches this. Empty if the image is absent.
+
+    LIMITATION (benchmark-inherent, documented not fixed): this reads the digest from
+    the same local tag the run then targets, so the benchmark attests the image
+    against itself. It proves the tag did not move BETWEEN this read and the run (the
+    sandbox pins the launch to the resolved content ID), but it does not prove the tag
+    points at OUR controlled build rather than a preloaded fake. A benchmark cannot do
+    better: it rebuilds the image every run, so the .Id changes each build and a
+    locally built image has no registry RepoDigest to pin to. A production caller
+    passes a digest produced out-of-band by the controlled build instead of
+    self-reading it here. Preloading a fake under this tag requires write access to the
+    local image store (daemon control), which is outside the untrusted-INPUT trust
+    model this benchmark exercises."""
     try:
         out = subprocess.run(
             ["docker", "--context", "default", "image", "inspect", "--format", "{{.Id}}", IMAGE],

@@ -260,6 +260,27 @@ def test_run_refuses_an_unattested_image(monkeypatch):
         box.run(_spec())
 
 
+def test_run_launches_the_attested_content_id_not_the_mutable_tag(monkeypatch):
+    # TOCTOU guard: after attesting the tag's digest, the launch AND the baked-input
+    # read must target the RESOLVED content ID (immutable), so a tag repointed between
+    # the inspect and the run cannot swap the executed image. _image_id resolves the tag
+    # to _IMAGE_DIGEST; both the launched argv and the spec handed to _verify_baked_input
+    # must carry THAT, never the "deepthought/..." tag.
+    box = _enabled_box(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(box, "_verify_baked_input",
+                        lambda spec: seen.__setitem__("verify_image", spec.image))
+    captured = {}
+    monkeypatch.setattr(box, "_stream_capture",
+                        lambda argv, *_a: (captured.__setitem__("argv", argv)
+                                           or (99, CJSON_ASAN, "", False, False, True)))
+    box.run(_spec())
+    argv = captured["argv"]
+    assert _IMAGE_DIGEST in argv                             # ran the ATTESTED bytes
+    assert "deepthought/cjson-asan:tier2" not in argv        # NOT the mutable tag
+    assert seen["verify_image"] == _IMAGE_DIGEST             # baked-input read pinned too
+
+
 def test_run_returns_a_typed_timeout_result(monkeypatch):
     box = _enabled_box(monkeypatch)
     monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "partial", "", True, False, True))
@@ -331,8 +352,16 @@ def test_verify_baked_input_binds_bytes_and_refuses_a_mismatch(monkeypatch):
 
 def test_run_validates_image_before_verifying_input(monkeypatch):
     # An executing run with a malformed image name must fail validation in run()
-    # BEFORE running the verify container.
+    # BEFORE running the verify container. The guard now fires at ATTESTATION: run()
+    # pins the launch to the resolved content ID, and _image_id renders the image
+    # through _safe_image (which rejects an injection-prone ref like a leading '-')
+    # while building its inspect argv — before any container or input read.
+    import deepthought.sandbox.docker as docker_mod
     box = _enabled_box(monkeypatch)
+    # Un-stub _image_id so the REAL _safe_image guard inside it runs (it raises during
+    # argv construction, before any subprocess) instead of the hermetic digest stub.
+    monkeypatch.setattr(box, "_image_id",
+                        lambda img: docker_mod._safe_image(img) and _IMAGE_DIGEST)
     def _boom(*_a, **_k):
         raise AssertionError("_verify_baked_input should not be called for invalid image")
     monkeypatch.setattr(box, "_verify_baked_input", _boom)

@@ -352,6 +352,16 @@ class DockerSandbox(Sandbox):
                 f"image {spec.image!r} has content digest {actual_digest!r}, not the "
                 f"attested {spec.image_digest!r}; refusing to run an unattested image"
             )
+        # RUN THE BYTES WE ATTESTED, not the tag we attested THROUGH. A tag is a
+        # mutable pointer: between this inspect and the launch (and the baked-input
+        # read) it could be repointed to a different image, so attesting the tag then
+        # running the tag is a TOCTOU — docker would execute the new image though the
+        # digest matched the old one. Pin spec.image to the resolved content ID
+        # (immutable) for the rest of run(): _verify_baked_input and build_argv both
+        # render _safe_image(spec.image), so both now target the attested bytes. A
+        # locally built image has no RepoDigests, so the .Id (sha256:...) IS the only
+        # stable local handle; `docker run sha256:<id>` runs it by content.
+        spec = spec.model_copy(update={"image": actual_digest})
         # Provenance, FAIL CLOSED. The repro input is delivered to the container BY
         # THE IMAGE (baked in at the path in spec.command) — the hardening forbids
         # host bind mounts, so no host file crosses the boundary. Every executing run
