@@ -135,13 +135,16 @@ def test_missing_runtime_fails_closed(monkeypatch):
 
 
 def _enabled_box(monkeypatch, **kw) -> DockerSandbox:
-    """A signed-off, enabled sandbox with the runtime present — the decision logic
-    in run() can then be exercised by stubbing _stream_capture. Hermetic."""
+    """A signed-off, enabled sandbox with the runtime present and the daemon
+    assumed up — the decision logic in run() can then be exercised by stubbing
+    _stream_capture, without a real docker. Hermetic."""
     import deepthought.sandbox.docker as docker_mod
 
     monkeypatch.setattr(docker_mod.shutil, "which", lambda _name: "/usr/bin/docker")
-    return DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
-                         runtime="docker", **kw)
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker", **kw)
+    monkeypatch.setattr(box, "_preflight_runtime", lambda: None)  # daemon reachable
+    return box
 
 
 def test_build_argv_uses_the_configured_runtime():
@@ -178,6 +181,15 @@ def test_run_raises_on_a_container_launch_failure(monkeypatch):
         box.run(_spec())
 
 
+def test_run_raises_when_the_exit_code_is_unavailable(monkeypatch):
+    # The client could not be reaped (returncode None) -> an anomaly, not a result:
+    # never construct a SandboxResult with a None exit_code (a ValidationError).
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "", "", False, False))
+    with pytest.raises(SandboxError):
+        box.run(_spec())
+
+
 def test_run_rejects_spoofed_asan_on_a_clean_exit(monkeypatch):
     # ASan-shaped text but a CLEAN (exit 0) run is target-controlled spoofing, never
     # a crash — a finding must not be promoted on it.
@@ -187,12 +199,37 @@ def test_run_rejects_spoofed_asan_on_a_clean_exit(monkeypatch):
     assert result.reproduced is False and result.crash is None
 
 
-def test_run_reproduces_on_a_sanitizer_crash_with_an_abnormal_exit(monkeypatch):
+def test_run_rejects_spoofed_asan_on_a_plain_nonzero_exit(monkeypatch):
+    # A non-zero exit is NOT enough: a target can print fake ASan and exit(1). Only a
+    # DEADLY-SIGNAL termination (docker exit >=128, a real abort_on_error crash) is
+    # credited — exit 1 with ASan-shaped text must NOT reproduce.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (1, CJSON_ASAN, "", False, False))
+    result = box.run(_spec())
+    assert result.reproduced is False and result.crash is None
+
+
+def test_run_reproduces_only_on_a_deadly_signal_exit(monkeypatch):
+    # 134 = 128 + SIGABRT: a real sanitizer abort. Crash credited.
     box = _enabled_box(monkeypatch)
     monkeypatch.setattr(box, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False))
     result = box.run(_spec())
     assert result.reproduced is True
     assert result.crash is not None and result.crash.faulting_function == "parse_string"
+
+
+def test_preflight_fails_closed_when_the_daemon_is_unreachable(monkeypatch):
+    # The binary exists but `docker version` fails (daemon down) -> IsolationUnavailable
+    # BEFORE any container is launched, never a false-negative verification.
+    import deepthought.sandbox.docker as docker_mod
+
+    monkeypatch.setattr(docker_mod.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(docker_mod.subprocess, "run",
+                        lambda *_a, **_k: subprocess.CompletedProcess([], 1, b"", b"cannot connect"))
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+    with pytest.raises(IsolationUnavailable):
+        box.run(_spec())
 
 
 def test_teardown_force_removes_an_active_container(monkeypatch):
@@ -281,6 +318,44 @@ def test_stream_capture_stops_a_hung_container_at_the_deadline(monkeypatch):
         _rc, _o, _e, timed_out, overflowed = box._stream_capture(["docker", "run"], "sandbox-hang", 0.2)
         assert timed_out is True and overflowed is False
         assert removed == ["sandbox-hang"]
+    finally:
+        os.close(w_out)
+        os.close(w_err)
+
+
+def test_stream_capture_reaps_the_client_and_stops_the_container_on_interrupt(monkeypatch):
+    # An interrupt mid-capture must stop the daemon-side container AND reap the local
+    # client (no orphan), then propagate — not leak either.
+    import deepthought.sandbox.docker as docker_mod
+
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+    removed: list[str] = []
+    waited: list[bool] = []
+    monkeypatch.setattr(box, "_force_remove", removed.append)
+    r_out, w_out = os.pipe()
+    r_err, w_err = os.pipe()
+
+    class _Proc:
+        returncode = None
+
+        def __init__(self, *_a, **_k):
+            self.stdout = os.fdopen(r_out, "rb", buffering=0)
+            self.stderr = os.fdopen(r_err, "rb", buffering=0)
+
+        def wait(self, timeout=None):
+            waited.append(True)
+            self.returncode = -9
+            return -9
+
+    monkeypatch.setattr(docker_mod.subprocess, "Popen", _Proc)
+    monkeypatch.setattr(docker_mod.select, "select",
+                        lambda *_a, **_k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            box._stream_capture(["docker", "run"], "sandbox-int", 5.0)
+        assert removed == ["sandbox-int"]   # container stopped
+        assert waited                        # client reaped, not orphaned
     finally:
         os.close(w_out)
         os.close(w_err)

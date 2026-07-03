@@ -277,6 +277,24 @@ class DockerSandbox(Sandbox):
         if shutil.which(self.runtime) is None:
             # Fail CLOSED: never fall back to a weaker, unisolated execution.
             raise IsolationUnavailable(f"container runtime not found: {self.runtime}")
+        # The binary exists, but is its DAEMON reachable? A down daemon makes the
+        # run exit non-zero without the target ever executing; probe first so that
+        # reads as IsolationUnavailable, not a negative verification result.
+        self._preflight_runtime()
+        # Provenance: the repro input is delivered to the container BY THE IMAGE
+        # (baked in at the path in spec.command) — the hardening forbids host bind
+        # mounts, so no host file crosses the boundary. spec.repro_ref is the Store
+        # pointer to that same input; require it to RESOLVE so a run is always tied
+        # to a real, stored repro artifact and never to a dangling reference.
+        if (
+            self.store is not None
+            and spec.repro_ref
+            and not self.store.detail_exists(spec.repro_ref)
+        ):
+            raise SandboxError(
+                f"repro_ref {spec.repro_ref!r} does not resolve in the store; "
+                f"refusing to run a repro with no provenance"
+            )
 
         base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         run_id = self._run_id(base_argv)
@@ -316,6 +334,13 @@ class DockerSandbox(Sandbox):
             raise SandboxError(
                 f"target exceeded the {_CAPTURE_MAX}-byte output cap; run aborted"
             )
+        if returncode is None:
+            # The client could not be reaped (both waits timed out). We cannot
+            # attribute an exit, so this is an anomalous run, not a result — never
+            # let it construct a SandboxResult with a None exit_code.
+            raise SandboxError(
+                "container exit code could not be determined; run aborted"
+            )
         if returncode in _RUNTIME_ERROR_EXITS:
             # The container could not be started/exec'd — an isolation failure, not
             # a target run. Never let it read as "did not reproduce".
@@ -325,11 +350,13 @@ class DockerSandbox(Sandbox):
             )
 
         combined = f"{stdout}\n{stderr}"
-        # A REAL sanitizer failure aborts the process (ASAN_OPTIONS=abort_on_error=1)
-        # -> a NON-ZERO exit. ASan-shaped text on a CLEAN (exit 0) run is target-
-        # controlled and must NEVER become verification evidence: gate the crash on
-        # an abnormal exit so a spoofed report cannot promote a finding.
-        crash = parse_asan(combined) if returncode != 0 else None
+        # A crash is credited ONLY on a deadly-signal termination — docker reports a
+        # container killed by signal N as exit 128+N. Under ASAN_OPTIONS=abort_on_
+        # error=1 a real sanitizer error aborts the process (a signal death), so a
+        # genuine crash lands at >=128. Target-PRINTED ASan text with a normal exit
+        # (0, or a plain exit(1)) is spoofable and must NEVER become evidence: a
+        # spoof would have to actually raise a crash signal, i.e. genuinely abort.
+        crash = parse_asan(combined) if returncode >= 128 else None
         if crash is not None:
             # Page the full raw sanitizer report; the typed CrashReport carries
             # only bounded fields into orchestrator state.
@@ -372,44 +399,46 @@ class DockerSandbox(Sandbox):
         overflowed = False
         deadline = self._clock() + timedelta(seconds=wall_timeout)
         try:
-            while open_fds and not overflowed:
-                remaining = (deadline - self._clock()).total_seconds()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                ready, _, _ = select.select(list(open_fds), [], [], remaining)
-                if not ready:
-                    timed_out = True
-                    break
-                for fd in ready:
-                    chunk = os.read(fd, 65536)
-                    if not chunk:  # EOF on this stream
-                        open_fds.discard(fd)
-                        continue
-                    room = _CAPTURE_MAX - total
-                    if room > 0:
-                        take = chunk[:room]
-                        bufs[fd].extend(take)
-                        total += len(take)
-                    if total >= _CAPTURE_MAX:
-                        overflowed = True
+            try:
+                while open_fds and not overflowed:
+                    remaining = (deadline - self._clock()).total_seconds()
+                    if remaining <= 0:
+                        timed_out = True
                         break
-        finally:
-            proc.stdout.close()
-            proc.stderr.close()
+                    ready, _, _ = select.select(list(open_fds), [], [], remaining)
+                    if not ready:
+                        timed_out = True
+                        break
+                    for fd in ready:
+                        chunk = os.read(fd, 65536)
+                        if not chunk:  # EOF on this stream
+                            open_fds.discard(fd)
+                            continue
+                        room = _CAPTURE_MAX - total
+                        if room > 0:
+                            take = chunk[:room]
+                            bufs[fd].extend(take)
+                            total += len(take)
+                        if total >= _CAPTURE_MAX:
+                            overflowed = True
+                            break
+            finally:
+                proc.stdout.close()
+                proc.stderr.close()
+        except BaseException:
+            # An interrupt (KeyboardInterrupt) or error mid-capture: stop the
+            # daemon-side container AND reap the local client so NEITHER is left
+            # orphaned, then propagate. teardown() is a backstop; this handles it at
+            # the point of failure.
+            self._force_remove(run_id)
+            self._reap(proc)
+            raise
 
         if timed_out or overflowed:
             # subprocess-level kill reaches only the local client; stop the
             # daemon-side container by name so it cannot keep running.
             self._force_remove(run_id)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self._force_remove(run_id)
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
+        self._reap(proc)  # always reap the local client, killing it if it will not exit
         stdout = bytes(bufs[fd_out]).decode("utf-8", "replace")
         stderr = bytes(bufs[fd_err]).decode("utf-8", "replace")
         return proc.returncode, stdout, stderr, timed_out, overflowed
@@ -438,6 +467,45 @@ class DockerSandbox(Sandbox):
             )
         except (OSError, subprocess.SubprocessError):
             pass
+
+    def _reap(self, proc: "subprocess.Popen") -> None:
+        """Reap the local client process, KILLING it if it will not exit.
+
+        The daemon-side container is stopped separately by name; this guarantees the
+        ``docker run`` CLIENT is never left as an orphaned/zombie process — on the
+        normal path, on timeout/overflow, and on an interrupt mid-capture.
+        """
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def _preflight_runtime(self) -> None:
+        """Confirm the runtime DAEMON is reachable, not merely that the client binary
+        exists. A down daemon makes ``run`` exit non-zero without the target ever
+        executing; detecting it here raises ``IsolationUnavailable`` (fail closed) so
+        an infrastructure failure never reads as a negative verification result."""
+        try:
+            probe = subprocess.run(
+                [self.runtime, "version"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise IsolationUnavailable(
+                f"{self.runtime} runtime probe failed: {exc}"
+            ) from exc
+        if probe.returncode != 0:
+            raise IsolationUnavailable(
+                f"{self.runtime} daemon is not reachable (probe exit "
+                f"{probe.returncode}); refusing to run"
+            )
 
     def teardown(self) -> None:
         """Context-manager cleanup (the ``with`` in VerifySession always runs it).

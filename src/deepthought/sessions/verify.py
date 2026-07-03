@@ -162,6 +162,31 @@ class VerifySession(BaseSession):
                 )
             )
 
+        # Refuse a sandbox whose sign-off is scoped to a DIFFERENT project. An
+        # executing backend validates its sign-off against its OWN configured
+        # project; if that project is not this session's project, running here would
+        # verify one project's finding under another project's authorization —
+        # widening scope past what the human signed off. A NoopSandbox declares no
+        # project (it executes nothing) and is exempt. Refuse BEFORE the run.
+        sandbox_project = getattr(self.sandbox, "project", None)
+        if sandbox_project is not None and sandbox_project != self.project_id:
+            return self._record(
+                SessionOutcome(
+                    summary=(
+                        f"VERIFY on {self.project_id!r}: the injected sandbox is "
+                        f"scoped to project {sandbox_project!r}, not "
+                        f"{self.project_id!r} — refusing. Its sign-off authorizes "
+                        f"{sandbox_project!r} only; running here would widen scope. "
+                        f"No repro was run."
+                    ),
+                    next_steps=(
+                        f"Provide a sandbox scoped (and signed off) for "
+                        f"{self.project_id!r}, or run VERIFY under "
+                        f"{sandbox_project!r} — the project its sign-off covers."
+                    ),
+                )
+            )
+
         # --- the ONLY door to execution: the injected Sandbox seam ---
         # Enter the sandbox's context so a real backend's setup()/teardown()
         # lifecycle runs: the ephemeral environment is built before the run and

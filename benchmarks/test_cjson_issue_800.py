@@ -51,6 +51,8 @@ PROJECT = "cjson"
 IMAGE = "deepthought/cjson-asan:tier2"
 SINK_URI = "cJSON.c"
 ISSUE_URL = "https://github.com/DaveGamble/cJSON/issues/800"
+TRIGGER = '{"1":1,'      # the 7-byte ground-truth input, baked into the image
+REPRO_REF = "detail/seed/trigger"
 
 
 def _image_present() -> bool:
@@ -156,10 +158,20 @@ def _verify_spec() -> SandboxSpec:
     return SandboxSpec(
         image=IMAGE,
         command=["/harness", "/seeds/trigger"],  # the baked libFuzzer replay input
-        repro_ref="detail/seed/trigger",
+        repro_ref=REPRO_REF,
         workdir="/",
         policy=SandboxPolicy(),  # default-deny hardening
     )
+
+
+def _seeded_store(state_dir) -> FileStore:
+    """A store whose ``REPRO_REF`` resolves to the SAME 7 bytes the image bakes at
+    ``/seeds/trigger`` — the executing sandbox requires the repro to have provenance
+    (a real stored artifact), and the run replays the identical input."""
+    store = FileStore(state_dir)
+    ref = store.write_detail("seed", "trigger", TRIGGER)
+    assert ref == REPRO_REF and store.detail_exists(REPRO_REF)
+    return store
 
 
 # --------------------------------------------------------------------------- #
@@ -192,7 +204,7 @@ def test_discover_files_an_informational_candidate(state_dir, tmp_path):
 def test_verify_reproduces_in_the_sandbox_and_promotes_on_evidence(state_dir, tmp_path):
     from deepthought.sessions import VerifySession
 
-    store = FileStore(state_dir)
+    store = _seeded_store(state_dir)
     finding = _register_and_discover(store, tmp_path)
 
     # The ONLY door to execution: a signed-off, explicitly-enabled hardened backend.
@@ -228,6 +240,25 @@ def test_verified_is_refused_without_resolving_evidence(state_dir, tmp_path):
     assert store.get_finding(finding.id).status is FindingStatus.candidate
 
 
+def test_verify_refuses_a_sandbox_scoped_to_another_project(state_dir, tmp_path):
+    """The sign-off is project-scoped in code: VERIFY refuses a sandbox whose
+    sign-off covers a DIFFERENT project than the session, even though that sign-off
+    is itself valid — otherwise one project's authorization could verify another's
+    finding. No execution; the guard refuses before the sandbox runs."""
+    from deepthought.sessions import VerifySession
+
+    store = _seeded_store(state_dir)
+    finding = _register_and_discover(store, tmp_path)
+    other = DockerSandbox(
+        project="other-project",
+        signoff=Signoff(approver="x", project="other-project",
+                        expires_at="2099-01-01T00:00:00Z"),
+        execution_enabled=True, store=store, runtime="docker",
+    )
+    run_session(store, GATE, VerifySession(PROJECT, finding.id, _verify_spec(), other))
+    assert store.get_finding(finding.id).status is FindingStatus.candidate  # unpromoted, no run
+
+
 # --------------------------------------------------------------------------- #
 # Megadodo: draft-only disclosure; authority stays human; nothing transmitted
 # --------------------------------------------------------------------------- #
@@ -237,7 +268,7 @@ def test_verified_is_refused_without_resolving_evidence(state_dir, tmp_path):
 def test_megadodo_drafts_validate_and_assert_the_human_gate(state_dir, tmp_path):
     from deepthought.sessions import VerifySession
 
-    store = FileStore(state_dir)
+    store = _seeded_store(state_dir)
     finding = _register_and_discover(store, tmp_path)
     box = DockerSandbox(project=PROJECT, signoff=_signoff(), execution_enabled=True,
                         store=store, runtime="docker")
