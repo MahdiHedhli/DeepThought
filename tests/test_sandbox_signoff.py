@@ -330,6 +330,30 @@ def test_run_requires_the_trusted_wrapper_as_entrypoint(monkeypatch):
         box.run(forged)
 
 
+def test_run_refuses_to_execute_the_input_as_the_harness(monkeypatch):
+    # ["/runner", input_path] passes the sole-final-input + runner-entrypoint checks,
+    # but the wrapper would execv the INPUT FILE as code. A distinct harness token is
+    # required before the input.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (99, CJSON_ASAN, "", False, False, True))
+    input_as_child = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                                 command=["/runner", "/seeds/trigger"],
+                                 repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                                 policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(input_as_child)
+
+
+def test_run_fails_closed_on_a_wrapper_infrastructure_exit(monkeypatch):
+    # runner.c's own failures (usage/fork/execv/waitpid = 64/70/71/72) mean the target
+    # never ran -> an error, NOT a recorded negative verification result.
+    box = _enabled_box(monkeypatch)
+    for code in (64, 70, 71, 72):
+        monkeypatch.setattr(box, "_stream_capture", lambda *_a, rc=code: (rc, "", "", False, False, True))
+        with pytest.raises(SandboxError):
+            box.run(_spec())
+
+
 def test_verify_baked_input_uses_a_named_container_double_dash_and_stripped_image(monkeypatch):
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker", store=_FakeStore())

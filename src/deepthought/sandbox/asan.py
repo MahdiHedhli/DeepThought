@@ -34,6 +34,15 @@ def _safe_int(digits: str) -> int | None:
         return None
 
 
+def report_from_header(text: str) -> str:
+    """The text from the ASan error header onward — the report ``parse_asan`` reads —
+    or the whole text if there is no header. Uses the SAME matcher (``_ERR``) as
+    ``parse_asan``, so paged evidence is byte-for-byte the report that was parsed (no
+    spacing/whitespace mismatch, and the same header occurrence)."""
+    match = _ERR.search(text)
+    return text[match.start():] if match else text
+
+
 def parse_asan(text: str) -> CrashReport | None:
     """Return a :class:`CrashReport` for an ASan report, or ``None`` if the text
     carries no ASan error (a clean run)."""

@@ -36,7 +36,7 @@ import time
 from typing import Callable, Optional
 
 from ..schema.common import utcnow
-from .asan import parse_asan
+from .asan import parse_asan, report_from_header
 from .base import (
     IsolationUnavailable,
     Sandbox,
@@ -122,6 +122,11 @@ _SANITIZER_CRASH_EXIT = 99
 # target could simply exit(99) after printing a forged report. An executing run
 # requires this entrypoint.
 _TRUSTED_RUNNER = "/runner"
+
+# runner.c's OWN failure codes — bad usage (64), fork (70), execv/missing harness
+# (71), waitpid (72). They mean the wrapper failed BEFORE the target ran, so they are
+# infrastructure errors, never a negative verification result.
+_RUNNER_INFRA_EXITS = frozenset({64, 70, 71, 72})
 
 # Wall budget for the baked-input read preflight — small; it only cats one file.
 _PREFLIGHT_READ_TIMEOUT = 30.0
@@ -386,6 +391,16 @@ class DockerSandbox(Sandbox):
                 f"(command[0] must be {_TRUSTED_RUNNER!r}); exit "
                 f"{_SANITIZER_CRASH_EXIT} is only authentic when the wrapper reports it"
             )
+        # The wrapper execv's command[1] (the token after /runner) as the HARNESS and
+        # feeds it the input. That harness must be a real program, NOT the repro input
+        # — otherwise ["/runner", input_path] would make the wrapper execute the
+        # untrusted input FILE as code. Require a distinct harness token before it.
+        if len(spec.command) < 3 or spec.command[1] == spec.input_path:
+            raise SandboxError(
+                f"spec.command {spec.command!r} must run a harness (a token after "
+                f"{_TRUSTED_RUNNER!r} that is not the input) on the repro input; "
+                f"refusing to execute the untrusted input itself"
+            )
         base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         self._verify_baked_input(spec)
 
@@ -439,6 +454,15 @@ class DockerSandbox(Sandbox):
                 "container exit code could not be determined; run aborted"
             )
 
+        if returncode in _RUNNER_INFRA_EXITS:
+            # The trusted wrapper failed before the target ran (bad harness path,
+            # fork/exec/wait failure) — an infrastructure error, not a repro that
+            # "did not reproduce". Never record it as a negative verification.
+            raise SandboxError(
+                f"the trusted wrapper failed before the target ran (exit "
+                f"{returncode}); no repro executed"
+            )
+
         combined = f"{stdout}\n{stderr}"
         if returncode in _RUNTIME_ERROR_EXITS and _looks_like_runtime_error(combined):
             # The container could not be started/exec'd (the runtime, not the
@@ -463,13 +487,14 @@ class DockerSandbox(Sandbox):
         # exactly what those controls protect.
         crash = parse_asan(combined) if returncode == _SANITIZER_CRASH_EXIT else None
         if crash is not None:
-            # Page the report FROM its ASan header so the stored evidence contains the
-            # report that justified promotion. _page bounds it to _OUTPUT_MAX; slicing
-            # the head of `combined` instead could omit a report that appears after
-            # more than _OUTPUT_MAX of earlier output, leaving raw_ref unauditable.
-            header = combined.find("ERROR: AddressSanitizer")
-            report = combined[header:] if header >= 0 else combined
-            crash.raw_ref = self._page(run_id, "asan-report.txt", report)
+            # Page the report FROM its ASan header (via the SAME matcher parse_asan
+            # used, so no spacing/occurrence mismatch) so the stored evidence contains
+            # exactly the report that justified promotion. _page bounds it to
+            # _OUTPUT_MAX; slicing the head of `combined` instead could omit a report
+            # that appears after more than _OUTPUT_MAX of earlier output.
+            crash.raw_ref = self._page(
+                run_id, "asan-report.txt", report_from_header(combined)
+            )
         return SandboxResult(
             exit_code=returncode,
             timed_out=False,
