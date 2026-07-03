@@ -272,21 +272,25 @@ def playbook_verify(
     — and reports a dry-run that plainly says no execution happened while the
     sandbox sign-off is pending (Constitution Article III; Phase 0 §0.3).
 
-    A real executing backend (``DockerSandbox``) is never enabled here. Passing
-    ``--i-have-sandbox-signoff`` is the hard stop: because no executing backend is
-    wired in this slice, it exits with a clear message and runs nothing.
+    A real executing backend (``DockerSandbox``) now exists, but it is deliberately
+    NOT wired into this CLI: executing target code is confined to the explicit,
+    signed-off Tier-2 rediscovery harness, never exposed as a CLI flag against an
+    arbitrary project. Passing ``--i-have-sandbox-signoff`` is the hard stop: this
+    command exits with a clear message and runs nothing.
     """
     # --- the 003 HARD STOP -------------------------------------------------
     # The sign-off flag is the only path that would ever reach a real executing
-    # backend. In this slice no such backend is wired, so we refuse outright and
-    # execute nothing. We NEVER construct a DockerSandbox with execution enabled,
-    # never call DockerSandbox.run(), and never spawn a subprocess.
+    # backend. This CLI deliberately does not wire one (execution lives only in the
+    # signed-off Tier-2 benchmark), so we refuse outright and execute nothing. This
+    # command NEVER constructs a DockerSandbox with execution enabled, never calls
+    # DockerSandbox.run(), and never spawns a subprocess.
     if i_have_sandbox_signoff:
         typer.echo(
-            "verify refused: no real executing sandbox backend is wired in this "
-            "slice (003). Executing untrusted target code is the hard stop and "
-            "requires Mahdi's sign-off plus a signed-off backend (Constitution "
-            "Article III; Phase 0 §0.3). Nothing was executed.",
+            "verify refused: this CLI deliberately does not wire an executing "
+            "sandbox backend. Executing untrusted target code is the hard stop; it "
+            "runs only in the signed-off benchmark harness, and requires Mahdi's "
+            "sign-off plus a valid project-scoped Signoff (Constitution Article III; "
+            "Phase 0 §0.3). Nothing was executed.",
             err=True,
         )
         raise typer.Exit(code=2)

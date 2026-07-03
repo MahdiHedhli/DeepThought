@@ -29,9 +29,34 @@ This module defines four things and executes nothing:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Annotated, Literal
+from datetime import datetime, timezone
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
+
+from ..schema.common import RecordId, iso_z, utcnow
+
+
+def _parse_z(value: str) -> Optional[datetime]:
+    """Parse an RFC3339 ``…Z`` timestamp to an aware UTC datetime, or ``None``.
+
+    ``iso_z`` renders whole seconds as ``…SSZ`` but sub-second times as
+    ``…SS.ffffffZ``, so a caller's whole-second ``expires_at`` and a fractional
+    ``now`` differ in string length — a lexical compare would misorder them within
+    a second (an expired sign-off could read as valid). Comparing parsed datetimes
+    is format-independent. An unparseable value returns ``None`` so the gate fails
+    CLOSED.
+    """
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        # Timezone-LESS (e.g. "2099-01-01T00:00:00", no Z/offset) is ambiguous: refuse
+        # rather than silently assume UTC. This gate controls target-code execution, so
+        # an ambiguous sign-off window must fail CLOSED.
+        return None
+    return dt.astimezone(timezone.utc)
 
 # Length caps, mirroring the envelope discipline: a bounded string field cannot
 # smuggle a large free-text payload past the typed boundary.
@@ -40,8 +65,25 @@ Short = Annotated[str, StringConstraints(max_length=128)]
 PathStr = Annotated[str, StringConstraints(max_length=512)]
 
 
+def _now_z() -> str:
+    """Current time in the RFC3339 ``…Z`` form used across records."""
+    return iso_z(utcnow())
+
+
 class SandboxError(RuntimeError):
     """Base error for the sandbox module."""
+
+
+class SignoffRequired(SandboxError):
+    """Execution was attempted without a valid, in-window human sign-off scoped to
+    the project (Constitution Article III). Also raised when a signed-off backend
+    is not explicitly ``execution_enabled``."""
+
+
+class IsolationUnavailable(SandboxError):
+    """The backend cannot guarantee isolation on this host (e.g. the container
+    runtime is absent). A run fails CLOSED — it never falls back to a weaker,
+    unisolated execution."""
 
 
 class SandboxExecutionDisabled(SandboxError):
@@ -52,6 +94,40 @@ class SandboxExecutionDisabled(SandboxError):
     execution requires Mahdi's explicit sandbox sign-off (Constitution III;
     phase-0-decisions.md §0.3).
     """
+
+
+class Signoff(BaseModel):
+    """A human sign-off authorizing target-code execution for ONE project — the
+    Article III hard stop, enforced in code. An executing backend refuses to run
+    without a sign-off whose ``project`` matches and whose window contains now.
+
+    Timestamps are the RFC3339 ``…Z`` form; ``valid_for`` PARSES them before
+    comparing, so a whole-second bound and a fractional ``now`` order correctly.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    approver: Short
+    project: RecordId  # scoped to exactly one project id
+    granted_at: str = Field(default_factory=_now_z)
+    expires_at: str
+    reason: Short = ""
+
+    def valid_for(self, project: str, now: Optional[str] = None) -> bool:
+        """Whether this sign-off authorizes ``project`` at ``now``.
+
+        Fails CLOSED: a project mismatch, or any timestamp that does not parse,
+        returns ``False`` — an executing backend never runs on a malformed or
+        ambiguously-ordered sign-off.
+        """
+        if self.project != project:
+            return False
+        now_dt = _parse_z(now) if now is not None else utcnow()
+        granted = _parse_z(self.granted_at)
+        expires = _parse_z(self.expires_at)
+        if now_dt is None or granted is None or expires is None:
+            return False
+        return granted <= now_dt < expires
 
 
 class SandboxPolicy(BaseModel):
@@ -107,10 +183,24 @@ class SandboxSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     image: Ref
+    # The EXPECTED content digest (``sha256:...`` image ID) of ``image``. A tag is
+    # locally mutable — a re-tagged or fake preloaded image could carry a fake
+    # /runner that just exits 99 — so an executing backend inspects the image's actual
+    # ID and refuses unless it equals this attested digest. Required for a real run.
+    image_digest: Short = ""
     # At least one argv token: an empty command would run the image's default
     # entrypoint/cmd — not the minimized repro. A repro must be explicit.
     command: list[Short] = Field(min_length=1)
+    # The Store pointer to the repro input, for PROVENANCE. The input itself is
+    # delivered to the container BY THE IMAGE (baked in): the sandbox never
+    # bind-mounts or copies a host file across the isolation boundary. An executing
+    # backend requires this ref to resolve.
     repro_ref: Ref
+    # The in-image path of the baked repro input (e.g. ``/seeds/trigger``). When set,
+    # an executing backend reads it back and refuses unless it is byte-identical to
+    # ``repro_ref`` — BINDING the executed input to the provenance that authorized
+    # the run, so a stale or unrelated ref cannot verify a different input.
+    input_path: PathStr = ""
 
     @field_validator("command")
     @classmethod
@@ -125,6 +215,29 @@ class SandboxSpec(BaseModel):
     workdir: PathStr = "/work"
     env: dict[Short, Short] = Field(default_factory=dict)
     policy: SandboxPolicy
+
+
+class CrashReport(BaseModel):
+    """A sanitizer crash, distilled to typed, BOUNDED fields — the firewall for
+    untrusted sanitizer output. Raw ASan/UBSan text is target-controlled, so only
+    these length-capped, structured fields cross into orchestrator state; the full
+    report is paged to the Store and pointed at by ``raw_ref``.
+
+    ``dedup_key`` is a stable hash of the top frames, so the same crash is
+    recognized across runs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sanitizer: Short = "AddressSanitizer"
+    error_type: Short = ""              # heap-buffer-overflow, use-after-free, …
+    access: Short = ""                  # READ or WRITE
+    access_size: int | None = None
+    faulting_function: Short = ""
+    faulting_location: PathStr = ""     # file:line[:col]
+    top_frames: list[Short] = Field(default_factory=list, max_length=16)
+    dedup_key: Short = ""
+    raw_ref: Ref | None = None          # pointer to the full report in the Store
 
 
 class SandboxResult(BaseModel):
@@ -148,6 +261,10 @@ class SandboxResult(BaseModel):
     # behavior? The lifecycle guard promotes a candidate only on resolving
     # evidence; this is what a VERIFY session keys promotion off.
     reproduced: bool = False
+    # The distilled sanitizer crash, when the run crashed. Structured + bounded —
+    # a memory-safety reproduction IS a crash, so an executing backend sets
+    # ``reproduced`` from its presence.
+    crash: CrashReport | None = None
 
 
 class Sandbox(ABC):

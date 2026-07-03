@@ -162,6 +162,31 @@ class VerifySession(BaseSession):
                 )
             )
 
+        # Refuse a sandbox whose sign-off is scoped to a DIFFERENT project. An
+        # executing backend validates its sign-off against its OWN configured
+        # project; if that project is not this session's project, running here would
+        # verify one project's finding under another project's authorization —
+        # widening scope past what the human signed off. A NoopSandbox declares no
+        # project (it executes nothing) and is exempt. Refuse BEFORE the run.
+        sandbox_project = getattr(self.sandbox, "project", None)
+        if sandbox_project is not None and sandbox_project != self.project_id:
+            return self._record(
+                SessionOutcome(
+                    summary=(
+                        f"VERIFY on {self.project_id!r}: the injected sandbox is "
+                        f"scoped to project {sandbox_project!r}, not "
+                        f"{self.project_id!r} — refusing. Its sign-off authorizes "
+                        f"{sandbox_project!r} only; running here would widen scope. "
+                        f"No repro was run."
+                    ),
+                    next_steps=(
+                        f"Provide a sandbox scoped (and signed off) for "
+                        f"{self.project_id!r}, or run VERIFY under "
+                        f"{sandbox_project!r} — the project its sign-off covers."
+                    ),
+                )
+            )
+
         # --- the ONLY door to execution: the injected Sandbox seam ---
         # Enter the sandbox's context so a real backend's setup()/teardown()
         # lifecycle runs: the ephemeral environment is built before the run and
@@ -231,8 +256,9 @@ class VerifySession(BaseSession):
                 f"REPRODUCED (exit_code={result.exit_code}, "
                 f"wall_seconds={result.wall_seconds}). Paged the typed result as "
                 f"evidence ({evidence_ref}) and promoted candidate -> verified "
-                f"through the Store lifecycle guard. No untrusted code executed in "
-                f"this slice; the sandbox seam was a NoopSandbox in tests."
+                f"through the Store lifecycle guard. Executed via the injected "
+                f"{type(self.sandbox).__name__} seam — a NoopSandbox runs nothing; a "
+                f"signed-off executing backend runs the repro in the hardened sandbox."
             )
             next_steps = (
                 f"{finding.id!r} is now verified on resolving evidence. Run `check` "
@@ -308,8 +334,10 @@ class VerifySession(BaseSession):
             f"wall_seconds={result.wall_seconds}, timed_out={result.timed_out}). "
             f"Paged the negative result as durable state ({evidence_ref}) and "
             f"recorded the blocked attempt on the finding; left it a candidate — no "
-            f"evidence_ref set, so the lifecycle guard promotes nothing. No "
-            f"untrusted code executed in this slice."
+            f"evidence_ref set, so the lifecycle guard promotes nothing. Ran via the "
+            f"injected {type(self.sandbox).__name__} seam — a NoopSandbox executes "
+            f"nothing; a signed-off executing backend DID run the repro in the hardened "
+            f"sandbox and it did not reproduce (a non-crash exit is not 'no code ran')."
         )
         next_steps = (
             f"{finding.id!r} stays a candidate: the minimized repro did not "
@@ -375,6 +403,23 @@ def _evidence_body(finding: Finding, spec: SandboxSpec, result: SandboxResult) -
         f"- stdout_ref: {result.stdout_ref or '(none)'}",
         f"- stderr_ref: {result.stderr_ref or '(none)'}",
         "",
+    ]
+    if result.crash is not None:
+        crash = result.crash
+        lines += [
+            "## Sanitizer crash (distilled — bounded, structured)",
+            f"- sanitizer: {crash.sanitizer}",
+            f"- error_type: {crash.error_type}",
+            f"- access: {crash.access} (size {crash.access_size})",
+            f"- faulting_function: {crash.faulting_function}",
+            f"- faulting_location: {crash.faulting_location}",
+            f"- dedup_key: {crash.dedup_key}",
+            f"- raw_report_ref: {crash.raw_ref or '(none)'}",
+            "- top_frames:",
+            *[f"    {frame}" for frame in crash.top_frames],
+            "",
+        ]
+    lines += [
         "## Enforced isolation (the policy the run ran under)",
         f"- image: {spec.image}",
         f"- network: {spec.policy.network}",

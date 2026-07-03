@@ -223,6 +223,28 @@ def test_non_resolving_surfaces_the_negative_verdict_in_the_summary(state_dir):
     assert "not reproduce" in summary or "did not reproduce" in summary
 
 
+def test_non_resolving_summary_is_execution_aware_not_a_false_no_code_ran(state_dir):
+    # A real signed-off executing backend can return reproduced=False AFTER it launched
+    # the container (a clean/non-crash exit is not "no code ran"). The negative-path
+    # summary must NOT hard-code "no untrusted code executed" — it must name the injected
+    # backend, exactly like the promote path, so the audit trail never lies about
+    # whether the target ran. A distinctly-named Noop stand-in models an executing
+    # backend without a real container: the fix is about the SUMMARY reflecting the seam.
+    class ExecutingLikeSandbox(NoopSandbox):
+        pass
+
+    store = _seeded_store(state_dir)
+    session = _verify(ExecutingLikeSandbox(make_result(reproduced=False)))
+
+    run_session(store, GATE, session)
+
+    summary = session.outcome.summary
+    assert "no untrusted code executed" not in summary.lower()  # the old false claim is gone
+    assert "ExecutingLikeSandbox" in summary                    # names the actual backend
+    # The finding still stays candidate (no resolving evidence).
+    assert store.get_finding("F-0007").status is FindingStatus.candidate
+
+
 def test_non_resolving_still_pages_the_negative_artifact(state_dir):
     store = _seeded_store(state_dir)
     session = _verify(NoopSandbox(make_result(reproduced=False)))
