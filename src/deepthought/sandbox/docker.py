@@ -123,10 +123,13 @@ _SANITIZER_CRASH_EXIT = 99
 # requires this entrypoint.
 _TRUSTED_RUNNER = "/runner"
 
-# runner.c's OWN failure codes — bad usage (64), fork (70), execv/missing harness
-# (71), waitpid (72). They mean the wrapper failed BEFORE the target ran, so they are
-# infrastructure errors, never a negative verification result.
-_RUNNER_INFRA_EXITS = frozenset({64, 70, 71, 72})
+# runner.c's OWN failure codes (RESERVED, distinct from sysexits so a harness exiting
+# e.g. 70/71/72 does not collide): usage (100), pipe (101), fork (102), execv/missing
+# harness (103), waitpid (104). They mean the wrapper failed BEFORE the target ran (or
+# the harness could not start), so they are infrastructure errors, never a negative
+# verification result. The wrapper remaps any HARNESS exit in the reserved range to
+# 98, so only the wrapper itself can produce these.
+_RUNNER_INFRA_EXITS = frozenset({100, 101, 102, 103, 104})
 
 # Wall budget for the baked-input read preflight — small; it only cats one file.
 _PREFLIGHT_READ_TIMEOUT = 30.0
@@ -362,44 +365,32 @@ class DockerSandbox(Sandbox):
                 "executing run requires spec.input_path (the in-image repro path) so "
                 "the executed input can be bound to the stored repro"
             )
-        # The executed command must RUN the bound input as its SOLE input. We require
-        # input_path to be the FINAL command token and to appear EXACTLY ONCE — the
-        # single-input-file convention a repro harness follows ("harness FILE"). This
-        # rejects a command that reads a different baked file, so a crash cannot be
-        # promoted under a repro_ref that names a different input.
-        #
-        # HARNESS CONTRACT: the caller's harness must read exactly this final argument
-        # as its input and no other baked file. The sandbox verifies input_path's
-        # bytes (see _verify_baked_input) and pins its argv position; it cannot parse
-        # arbitrary harness argument semantics, so airtight binding for a harness that
-        # takes multiple inputs would require the sandbox to STAGE the input itself
-        # (a documented follow-up beyond this benchmark's single-input harness).
-        if spec.command[-1] != spec.input_path or spec.command.count(spec.input_path) != 1:
+        # SINGLE-INPUT CONTRACT: the command must be EXACTLY three tokens —
+        # [trusted runner, harness, the bound input] — with nothing else. This one
+        # check enforces the whole shape the exit-99 authenticity and the provenance
+        # binding depend on:
+        #   - command[0] == the trusted wrapper, so exit 99 is the wrapper's
+        #     OS-observed WIFSIGNALED verdict, not a target's self-chosen exit;
+        #   - command[1] is a REAL harness, not the input (normalized so a lexical
+        #     alias of the input cannot slip past), so the wrapper never execv's the
+        #     untrusted input FILE as code;
+        #   - command[2] IS the verified input and there are NO other positional
+        #     inputs, so the harness cannot read/crash on a different baked file and
+        #     promote a finding under the wrong repro_ref.
+        # A harness needing extra arguments (flags, multiple inputs) would require the
+        # sandbox to STAGE the verified input itself — a documented follow-up beyond
+        # this benchmark's single-input harness.
+        if (
+            len(spec.command) != 3
+            or spec.command[0] != _TRUSTED_RUNNER
+            or spec.command[2] != spec.input_path
+            or os.path.normpath(spec.command[1]) == os.path.normpath(spec.input_path)
+        ):
             raise SandboxError(
-                f"spec.command {spec.command!r} must run the bound input "
-                f"{spec.input_path!r} as its sole, final argument; the executed argv "
-                f"must run exactly the verified input"
-            )
-        # Exit 99 is only authentic when the TRUSTED WRAPPER is the entrypoint — it is
-        # what turns the OS-observed WIFSIGNALED into 99. With any other entrypoint
-        # (e.g. /bin/sh) the target could print a forged report and exit(99) itself,
-        # so refuse to run — and thus to ever credit _SANITIZER_CRASH_EXIT — unless
-        # command[0] is the bundled runner.
-        if spec.command[0] != _TRUSTED_RUNNER:
-            raise SandboxError(
-                f"executing run requires the trusted wrapper as entrypoint "
-                f"(command[0] must be {_TRUSTED_RUNNER!r}); exit "
-                f"{_SANITIZER_CRASH_EXIT} is only authentic when the wrapper reports it"
-            )
-        # The wrapper execv's command[1] (the token after /runner) as the HARNESS and
-        # feeds it the input. That harness must be a real program, NOT the repro input
-        # — otherwise ["/runner", input_path] would make the wrapper execute the
-        # untrusted input FILE as code. Require a distinct harness token before it.
-        if len(spec.command) < 3 or spec.command[1] == spec.input_path:
-            raise SandboxError(
-                f"spec.command {spec.command!r} must run a harness (a token after "
-                f"{_TRUSTED_RUNNER!r} that is not the input) on the repro input; "
-                f"refusing to execute the untrusted input itself"
+                f"spec.command {spec.command!r} must be exactly "
+                f"[{_TRUSTED_RUNNER!r}, harness, {spec.input_path!r}] — the trusted "
+                f"wrapper, a distinct harness, and the bound input as the sole "
+                f"positional argument"
             )
         base_argv = self.build_argv(spec, spec.policy)  # the hardened, isolation-tested argv
         self._verify_baked_input(spec)

@@ -51,7 +51,12 @@ def _parse_z(value: str) -> Optional[datetime]:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError):
         return None
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    if dt.tzinfo is None:
+        # Timezone-LESS (e.g. "2099-01-01T00:00:00", no Z/offset) is ambiguous: refuse
+        # rather than silently assume UTC. This gate controls target-code execution, so
+        # an ambiguous sign-off window must fail CLOSED.
+        return None
+    return dt.astimezone(timezone.utc)
 
 # Length caps, mirroring the envelope discipline: a bounded string field cannot
 # smuggle a large free-text payload past the typed boundary.

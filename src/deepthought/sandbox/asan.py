@@ -50,8 +50,12 @@ def parse_asan(text: str) -> CrashReport | None:
     if not err:
         return None
 
-    access = _ACCESS.search(text)
-    frames = _FRAME.findall(text)  # list of (function, file:line)
+    # Anchor the access/frame search at the report (from the header), so noise BEFORE
+    # the header (a stray "READ of size ..." or frame-shaped line) cannot leak into
+    # the distilled crash — and so the parsed fields match report_from_header's slice.
+    report = text[err.start():]
+    access = _ACCESS.search(report)
+    frames = _FRAME.findall(report)  # list of (function, file:line)
     # Slice to the CrashReport field caps: sanitizer output is target-controlled,
     # and a long C++ symbol (templates) could exceed the bound — truncate rather
     # than raise a ValidationError on an otherwise-valid crash.

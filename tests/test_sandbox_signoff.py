@@ -85,6 +85,15 @@ def test_signoff_unparseable_timestamp_fails_closed():
     assert s.valid_for("cjson", now="2026-07-02T11:30:00Z") is False
 
 
+def test_signoff_timezone_less_timestamp_fails_closed():
+    # A timestamp with no Z/offset is ambiguous — the execution gate must refuse it
+    # rather than silently assume UTC.
+    s = Signoff(approver="m", project="cjson", granted_at="2026-07-02T11:00:00Z",
+                expires_at="2099-01-01T00:00:00")  # no Z
+    assert s.valid_for("cjson", now="2026-07-02T11:30:00Z") is False
+    assert s.valid_for("cjson", now="2026-07-02T11:30:00") is False  # naive now too
+
+
 # --- the double gate (Article III), executing NOTHING -----------------------
 
 
@@ -314,6 +323,14 @@ def test_run_refuses_when_command_does_not_run_the_bound_input(monkeypatch):
                            policy=SandboxPolicy())
     with pytest.raises(SandboxError):
         box.run(not_last)
+    # input_path IS the final arg, but an EXTRA positional input precedes it -> the
+    # harness could read/crash on /seeds/other; the exactly-3-token contract refuses it.
+    extra_input = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                              command=["/runner", "/harness", "/seeds/other", "/seeds/trigger"],
+                              repro_ref="detail/seed/trigger", input_path="/seeds/trigger",
+                              policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(extra_input)
 
 
 def test_run_requires_the_trusted_wrapper_as_entrypoint(monkeypatch):
@@ -345,13 +362,25 @@ def test_run_refuses_to_execute_the_input_as_the_harness(monkeypatch):
 
 
 def test_run_fails_closed_on_a_wrapper_infrastructure_exit(monkeypatch):
-    # runner.c's own failures (usage/fork/execv/waitpid = 64/70/71/72) mean the target
-    # never ran -> an error, NOT a recorded negative verification result.
+    # runner.c's own RESERVED failures (usage/pipe/fork/execv/waitpid = 100..104) mean
+    # the target never ran -> an error, NOT a recorded negative verification result.
     box = _enabled_box(monkeypatch)
-    for code in (64, 70, 71, 72):
+    for code in (100, 101, 102, 103, 104):
         monkeypatch.setattr(box, "_stream_capture", lambda *_a, rc=code: (rc, "", "", False, False, True))
         with pytest.raises(SandboxError):
             box.run(_spec())
+
+
+def test_run_treats_a_sysexits_harness_exit_as_a_negative_result(monkeypatch):
+    # A harness exiting a sysexits value (70/71/72) is NO LONGER misclassified as a
+    # wrapper infra failure — the wrapper's own codes are the reserved 100..104, so a
+    # real harness exit is an ordinary non-reproducing result.
+    box = _enabled_box(monkeypatch)
+    for code in (70, 71, 72):
+        monkeypatch.setattr(box, "_stream_capture",
+                            lambda *_a, rc=code: (rc, CJSON_ASAN, "", False, False, True))
+        result = box.run(_spec())
+        assert result.reproduced is False and result.exit_code == code
 
 
 def test_verify_baked_input_uses_a_named_container_double_dash_and_stripped_image(monkeypatch):
