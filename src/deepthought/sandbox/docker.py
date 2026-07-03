@@ -380,17 +380,26 @@ class DockerSandbox(Sandbox):
         # A harness needing extra arguments (flags, multiple inputs) would require the
         # sandbox to STAGE the verified input itself — a documented follow-up beyond
         # this benchmark's single-input harness.
-        # Resolve the harness and input against the run's workdir before comparing:
-        # a RELATIVE harness ("trigger" with workdir "/seeds") can name the same file
-        # as the absolute input, and execv resolves it against that same workdir — so
-        # a lexical normpath compare would let the input be exec'd as the harness.
-        harness_abs = os.path.normpath(os.path.join(spec.workdir, spec.command[1]))
-        input_abs = os.path.normpath(os.path.join(spec.workdir, spec.input_path))
+        #
+        # Compare paths RESOLVED against the run's workdir, which must be ABSOLUTE so
+        # the host resolution matches the container's (a relative workdir like "seeds"
+        # would resolve to "/seeds" in the container but "seeds" here, defeating the
+        # alias check). This both catches a relative harness that aliases the input and
+        # accepts a semantically-equal input token (e.g. "/seeds/./trigger").
+        if not spec.workdir.startswith("/"):
+            raise SandboxError(
+                f"executing run requires an ABSOLUTE workdir; got {spec.workdir!r}"
+            )
+
+        def _abs(path: str) -> str:
+            return os.path.normpath(os.path.join(spec.workdir, path))
+
+        input_abs = _abs(spec.input_path)
         if (
             len(spec.command) != 3
             or spec.command[0] != _TRUSTED_RUNNER
-            or spec.command[2] != spec.input_path
-            or harness_abs == input_abs
+            or _abs(spec.command[2]) != input_abs   # the 3rd token IS the bound input
+            or _abs(spec.command[1]) == input_abs   # the harness is NOT the input
         ):
             raise SandboxError(
                 f"spec.command {spec.command!r} must be exactly "

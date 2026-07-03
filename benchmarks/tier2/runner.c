@@ -73,6 +73,12 @@ int main(int argc, char **argv) {
         /* interrupted — read again */
     }
     close(pfd[0]);
+    if (n < 0) {
+        /* A non-EINTR read failure: we cannot tell whether execv ran, so fail closed
+         * as infrastructure rather than risk dropping an execv failure to a negative. */
+        perror("runner: read");
+        return ERR_PIPE;
+    }
 
     int status = 0, rc;
     while ((rc = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {

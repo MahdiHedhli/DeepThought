@@ -367,6 +367,14 @@ def test_run_refuses_to_execute_the_input_as_the_harness(monkeypatch):
                           workdir="/seeds", policy=SandboxPolicy())
     with pytest.raises(SandboxError):
         box.run(aliased)
+    # A RELATIVE workdir resolves differently on the host vs the container, defeating
+    # the alias check -> require an absolute workdir.
+    rel_workdir = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                              command=["/runner", "/harness", "trigger"],
+                              repro_ref="detail/seed/trigger", input_path="trigger",
+                              workdir="seeds", policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(rel_workdir)
 
 
 def test_run_fails_closed_on_a_wrapper_infrastructure_exit(monkeypatch):
