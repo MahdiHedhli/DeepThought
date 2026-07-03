@@ -110,6 +110,24 @@ _RUNNER_INFRA_EXITS = frozenset({100, 101, 102, 103, 104})
 # Wall budget for the baked-input read preflight — small; it only cats one file.
 _PREFLIGHT_READ_TIMEOUT = 30.0
 
+# The immutable in-image seed directory. A repro input MUST live here: a dynamic
+# pseudo-file (e.g. /proc/version, /proc/self/cmdline) would read DIFFERENTLY in the
+# preflight `cat` container than in the harness, so the binding could pass while the
+# harness consumes different bytes. Constraining to a baked, immutable seed dir keeps
+# the read and the run byte-identical.
+_SEED_DIR = "/seeds/"
+
+# Container-runtime environment variables that select a REMOTE daemon/endpoint. A
+# signed-off run must execute on the LOCAL daemon, or the repro (and its inputs/
+# output) would stream over a control-plane connection to another host — defeating
+# the no-network / no-transmission guarantee (--network=none only isolates the
+# CONTAINER's network, after a remote daemon already accepted it). Stripped from the
+# env of every runtime invocation.
+_REMOTE_ENDPOINT_ENV = (
+    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
+    "CONTAINER_HOST", "CONTAINER_CONNECTION",
+)
+
 
 class DockerSandbox(Sandbox):
     """Builds a fully-hardened ``docker run`` argv, and — only behind a valid
@@ -357,13 +375,18 @@ class DockerSandbox(Sandbox):
         # sandbox to STAGE the verified input itself — a documented follow-up beyond
         # this benchmark's single-input harness.
         #
-        # workdir and input_path must be ABSOLUTE so host resolution matches the
-        # container's (a relative workdir "seeds" would resolve to "/seeds" in the
-        # container but "seeds" here, defeating the alias check).
-        if not spec.workdir.startswith("/") or not spec.input_path.startswith("/"):
+        # workdir must be ABSOLUTE so host resolution matches the container's; the
+        # input must live in the immutable baked seed dir (not a dynamic pseudo-file
+        # like /proc/version, which would read differently in the preflight than in
+        # the harness). normpath first so ".." cannot escape _SEED_DIR.
+        if not spec.workdir.startswith("/"):
             raise SandboxError(
-                f"executing run requires an absolute workdir and input_path; got "
-                f"workdir={spec.workdir!r}, input_path={spec.input_path!r}"
+                f"executing run requires an absolute workdir; got {spec.workdir!r}"
+            )
+        if not os.path.normpath(spec.input_path).startswith(_SEED_DIR):
+            raise SandboxError(
+                f"executing run requires input_path under the immutable seed dir "
+                f"{_SEED_DIR!r}; got {spec.input_path!r} (no pseudo/dynamic files)"
             )
 
         def _abs(path: str) -> str:
@@ -397,8 +420,9 @@ class DockerSandbox(Sandbox):
         # CLIENT; the daemon-side container keeps running unless we stop it by name
         # (--stop-timeout is a teardown grace, not a wall-clock kill). Inserted in
         # run() — not build_argv — so the isolation-tested argv stays pure, and so
-        # run_id (a digest of that argv) is stable.
-        argv = [*base_argv[:2], "--name", run_id, *base_argv[2:]]
+        # run_id (a digest of that argv) is stable. The local-daemon prefix
+        # (_runtime, e.g. docker --context default) is also applied here.
+        argv = [*self._runtime(), "run", "--name", run_id, *base_argv[2:]]
         # Mark the container in-flight BEFORE launch. If an interrupt or error
         # unwinds run() before the container is cleaned, teardown() (via the `with`
         # in VerifySession) force-removes it. Cleared once the container is gone.
@@ -516,6 +540,7 @@ class DockerSandbox(Sandbox):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            env=self._runtime_env(),   # local daemon only — never a remote endpoint
         )
         fd_out, fd_err = proc.stdout.fileno(), proc.stderr.fileno()
         bufs: dict[int, bytearray] = {fd_out: bytearray(), fd_err: bytearray()}
@@ -598,6 +623,26 @@ class DockerSandbox(Sandbox):
         nonce = os.urandom(4).hex()
         return f"sandbox-{stamp}-{digest}-{nonce}"
 
+    # --- local-daemon pinning (no remote execution / no transmission) ------
+
+    def _runtime_env(self) -> dict:
+        """The process env with every REMOTE-endpoint selector stripped, so a runtime
+        call cannot be redirected to a remote daemon by inherited configuration."""
+        env = dict(os.environ)
+        for key in _REMOTE_ENDPOINT_ENV:
+            env.pop(key, None)
+        return env
+
+    def _runtime(self) -> list[str]:
+        """The runtime command prefix, PINNED to the local daemon. For docker,
+        ``--context default`` forces the local socket so a remote DEFAULT context in
+        the operator's config cannot redirect the run off-host; env sanitization
+        (_runtime_env) removes the env-based override. Together they guarantee the
+        signed-off repro runs locally, never streaming inputs/output to another host."""
+        if self.runtime == "docker":
+            return [self.runtime, "--context", "default"]
+        return [self.runtime]
+
     def _force_remove(self, name: str) -> bool:
         """Force-remove the named container. Returns True only when the container is
         CONFIRMED gone (removed, or already absent), False when removal could not be
@@ -606,11 +651,12 @@ class DockerSandbox(Sandbox):
         """
         try:
             proc = subprocess.run(
-                [self.runtime, "rm", "-f", name],
+                [*self._runtime(), "rm", "-f", name],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=10,
                 check=False,
+                env=self._runtime_env(),
             )
         except (OSError, subprocess.SubprocessError):
             return False
@@ -671,13 +717,14 @@ class DockerSandbox(Sandbox):
         # run (_stream_capture): output is capped (_CAPTURE_MAX) and a hung/oversized
         # read is killed and force-removed by name.
         base = [
-            self.runtime, "run",
+            *self._runtime(), "run",
             *self._hardening_flags(spec.policy, spec.workdir),
             "--entrypoint", "/bin/cat",
             _safe_image(spec.image), "--", spec.input_path,
         ]
         run_id = self._run_id(base)
-        argv = [*base[:2], "--name", run_id, *base[2:]]
+        run_prefix = len(self._runtime())  # tokens before "run" (== 1, or 3 for docker)
+        argv = [*base[:run_prefix + 1], "--name", run_id, *base[run_prefix + 1:]]
         self._active_container = run_id  # teardown backstop while the read is in flight
         rc, stdout, _stderr, timed_out, overflowed, gone = self._stream_capture(
             argv, run_id, _PREFLIGHT_READ_TIMEOUT
@@ -727,11 +774,12 @@ class DockerSandbox(Sandbox):
         an infrastructure failure never reads as a negative verification result."""
         try:
             probe = subprocess.run(
-                [self.runtime, "version"],
+                [*self._runtime(), "version"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=15,
                 check=False,
+                env=self._runtime_env(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise IsolationUnavailable(

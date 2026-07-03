@@ -191,6 +191,37 @@ def test_build_argv_uses_the_configured_runtime():
     assert DockerSandbox().build_argv(_spec(), _spec().policy)[0] == "docker"  # default
 
 
+def test_runtime_pins_the_local_daemon():
+    # docker runs are forced onto the LOCAL socket (--context default) so a remote
+    # default context cannot redirect a signed-off repro off-host.
+    assert DockerSandbox(runtime="docker")._runtime() == ["docker", "--context", "default"]
+    assert DockerSandbox(runtime="podman")._runtime() == ["podman"]
+
+
+def test_runtime_env_strips_remote_endpoint_vars(monkeypatch):
+    monkeypatch.setenv("DOCKER_HOST", "tcp://evil.example:2375")
+    monkeypatch.setenv("DOCKER_CONTEXT", "remote")
+    monkeypatch.setenv("DOCKER_TLS_VERIFY", "1")
+    monkeypatch.setenv("PATH", "/usr/bin")  # a benign var survives
+    env = DockerSandbox(runtime="docker")._runtime_env()
+    assert "DOCKER_HOST" not in env and "DOCKER_CONTEXT" not in env
+    assert "DOCKER_TLS_VERIFY" not in env
+    assert env.get("PATH") == "/usr/bin"
+
+
+def test_run_refuses_a_dynamic_pseudo_file_input(monkeypatch):
+    # A dynamic pseudo-file (/proc/version) reads differently in the preflight than in
+    # the harness — require the input under the immutable seed dir.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (99, CJSON_ASAN, "", False, False, True))
+    pseudo = SandboxSpec(image="deepthought/cjson-asan:tier2",
+                         command=["/runner", "/harness", "/proc/version"],
+                         repro_ref="detail/seed/trigger", input_path="/proc/version",
+                         policy=SandboxPolicy())
+    with pytest.raises(SandboxError):
+        box.run(pseudo)
+
+
 def test_hardening_disables_swap():
     # --memory-swap == --memory disables swap, so total memory (RAM + swap) is capped
     # at the memory limit, not RAM + docker's default extra swap.
