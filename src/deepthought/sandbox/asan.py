@@ -14,7 +14,9 @@ import re
 
 from .base import CrashReport
 
-_ERR = re.compile(r"ERROR:\s+(AddressSanitizer):\s+([a-z0-9\-]+)")
+# The error CLASS may be lower (heap-buffer-overflow), upper (SEGV), or mixed —
+# accept any case so a real crash is never misread as a clean run.
+_ERR = re.compile(r"ERROR:\s+(AddressSanitizer):\s+([A-Za-z0-9\-]+)")
 _ACCESS = re.compile(r"\b(READ|WRITE) of size (\d+)\b")
 # A SYMBOLIZED frame: ``#N 0x… in <function> <file:line[:col]>``. An unsymbolized
 # frame (``#N 0x… (/lib/...)``) has no ``in <func> <file:line>`` and is skipped.

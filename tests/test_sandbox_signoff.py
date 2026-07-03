@@ -182,6 +182,14 @@ def test_build_argv_uses_the_configured_runtime():
     assert DockerSandbox().build_argv(_spec(), _spec().policy)[0] == "docker"  # default
 
 
+def test_hardening_disables_swap():
+    # --memory-swap == --memory disables swap, so total memory (RAM + swap) is capped
+    # at the memory limit, not RAM + docker's default extra swap.
+    argv = DockerSandbox().build_argv(_spec(), _spec().policy)
+    mem = argv[argv.index("--memory") + 1]
+    assert argv[argv.index("--memory-swap") + 1] == mem
+
+
 def test_run_returns_a_typed_timeout_result(monkeypatch):
     box = _enabled_box(monkeypatch)
     monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "partial", "", True, False, True))
@@ -700,6 +708,13 @@ def test_parse_asan_extracts_the_cjson_crash():
 def test_parse_asan_is_stable_and_clean_output_is_none():
     assert parse_asan(CJSON_ASAN).dedup_key == parse_asan(CJSON_ASAN).dedup_key
     assert parse_asan("harness: 100000 runs, 0 crashes, all good\n") is None
+
+
+def test_parse_asan_accepts_an_uppercase_error_class():
+    # An uppercase/mixed error class (e.g. SEGV) must still parse — a real crash must
+    # never be misread as a clean run because of case.
+    crash = parse_asan(CJSON_ASAN.replace("heap-buffer-overflow", "SEGV"))
+    assert crash is not None and crash.error_type == "SEGV"
 
 
 def test_parse_asan_survives_an_adversarial_access_size():

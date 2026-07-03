@@ -6,7 +6,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang llvm git 
 ENV ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer
 ENV ASAN_OPTIONS=symbolize=1:abort_on_error=1
 WORKDIR /src
-RUN git clone --depth 1 --branch v1.7.17 https://github.com/DaveGamble/cJSON.git
+# Pin the EXACT commit for v1.7.17 and VERIFY it: a git tag is mutable, so a moved
+# tag or a compromised upstream could otherwise change the code under the same image
+# tag / sign-off. The build fails closed if the resolved commit does not match.
+ARG CJSON_COMMIT=87d8f0961a01bf09bef98ff89bae9fdec42181ee
+RUN git clone --depth 1 --branch v1.7.17 https://github.com/DaveGamble/cJSON.git \
+    && test "$(git -C cJSON rev-parse HEAD)" = "$CJSON_COMMIT"
 COPY harness.c /src/harness.c
 COPY runner.c /src/runner.c
 COPY trigger /seeds/trigger

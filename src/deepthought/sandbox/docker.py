@@ -231,7 +231,12 @@ class DockerSandbox(Sandbox):
             flags += ["--user", f"{uid}:{gid}" if sep else uid]
         # Resource bounds. Presence is fixed and tested.
         flags += ["--pids-limit", str(policy.pids_limit)]
+        # --memory-swap == --memory DISABLES swap, so total memory (RAM + swap) is
+        # capped at memory_mib. Without it docker grants swap on top of --memory, and
+        # an aggressively-allocating repro could exceed the budget and hammer host
+        # swap/disk.
         flags += ["--memory", f"{policy.memory_mib}m"]
+        flags += ["--memory-swap", f"{policy.memory_mib}m"]
         flags += ["--cpus", _format_cpus(policy.cpus)]
         # --stop-timeout is a short, FIXED teardown grace (SIGKILL delay), NOT the
         # wall-clock execution limit (which the reader enforces via the deadline).

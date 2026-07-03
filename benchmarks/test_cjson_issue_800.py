@@ -25,6 +25,7 @@ execution.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -67,22 +68,27 @@ def _image_present() -> bool:
     return out.returncode == 0 and bool(out.stdout.strip())
 
 
+# Executing the target crosses the Article III hard stop, so it needs a CURRENT
+# human decision — not just the presence of the image. The tests that actually run
+# the container SKIP unless the operator opts in for THIS run by setting
+# DEEPTHOUGHT_TIER2_EXECUTE=1. So `pytest benchmarks/` never crosses the hard stop
+# by default, no matter what in-code sign-off window the test uses.
+_EXEC_OPTIN = os.environ.get("DEEPTHOUGHT_TIER2_EXECUTE") == "1"
+
 requires_sandbox = pytest.mark.skipif(
-    not _image_present(),
-    reason="docker + the deepthought/cjson-asan:tier2 image are required for the "
-    "signed-off Tier 2 run (build: docker build -t deepthought/cjson-asan:tier2 benchmarks/tier2/)",
+    not (_image_present() and _EXEC_OPTIN),
+    reason="Tier 2 EXECUTES target code (Article III): opt in for this run with "
+    "DEEPTHOUGHT_TIER2_EXECUTE=1, and build deepthought/cjson-asan:tier2 "
+    "(docker build -t deepthought/cjson-asan:tier2 benchmarks/tier2/)",
 )
 
 
 def _signoff() -> Signoff:
-    """The human sign-off that unlocks execution (Article III).
-
-    Mahdi's real grant for the initial run was scoped to 2026-07-04. This
-    regression test needs a sign-off that stays *valid* whenever CI runs it, so —
-    like the reference sandbox tests — it uses a far-future expiry. The mechanism
-    under test is "a VALID sign-off unlocks the sandbox"; the expiry/wrong-project
-    REFUSALS are covered separately in tests/test_sandbox_signoff.py.
-    """
+    """The in-code Article III sign-off that unlocks the sandbox. The RUN-TIME opt-in
+    (DEEPTHOUGHT_TIER2_EXECUTE, see requires_sandbox) is what represents a CURRENT
+    human decision to execute; this models the code gate, so it uses a far-future
+    expiry to keep the mechanism test runnable. The expiry/wrong-project REFUSALS are
+    covered in tests/test_sandbox_signoff.py."""
     return Signoff(approver="Mahdi Hedhli", project=PROJECT,
                    expires_at="2099-01-01T00:00:00Z", reason="tier 2 benchmark")
 
