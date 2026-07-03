@@ -320,12 +320,15 @@ class DockerSandbox(Sandbox):
         # in VerifySession) force-removes it. Cleared once the container is gone.
         self._active_container = run_id
         started = self._clock()
-        returncode, stdout, stderr, timed_out, overflowed = self._stream_capture(
+        returncode, stdout, stderr, timed_out, overflowed, container_gone = self._stream_capture(
             argv, run_id, spec.policy.wall_timeout_seconds
         )
-        # The container has been reaped (and, on any abnormal exit, force-removed by
-        # name inside _stream_capture); nothing is left to tear down.
-        self._active_container = None
+        # Clear the active-container state ONLY when removal is confirmed. If a
+        # timeout cleanup could not confirm the container is gone, LEAVE it set so
+        # the context-manager teardown retries — never assume a failed `rm -f` means
+        # the untrusted container stopped.
+        if container_gone:
+            self._active_container = None
         wall = (self._clock() - started).total_seconds()
 
         if timed_out:
@@ -451,14 +454,18 @@ class DockerSandbox(Sandbox):
             self._reap(proc)
             raise
 
+        # Normal exit: docker run returned => the container exited and --rm removed
+        # it. On a timeout/overflow the container is still alive; stop it by name
+        # (a subprocess-level kill reaches only the local client) BEFORE reaping the
+        # client, and report whether removal was CONFIRMED so run() only clears the
+        # active-container state on success.
+        container_gone = True
         if timed_out or overflowed:
-            # subprocess-level kill reaches only the local client; stop the
-            # daemon-side container by name so it cannot keep running.
-            self._force_remove(run_id)
+            container_gone = self._force_remove(run_id)
         self._reap(proc)  # always reap the local client, killing it if it will not exit
         stdout = bytes(bufs[fd_out]).decode("utf-8", "replace")
         stderr = bytes(bufs[fd_err]).decode("utf-8", "replace")
-        return proc.returncode, stdout, stderr, timed_out, overflowed
+        return proc.returncode, stdout, stderr, timed_out, overflowed, container_gone
 
     # --- output paging (Store pointers, bounded) ---------------------------
 
@@ -472,15 +479,14 @@ class DockerSandbox(Sandbox):
         nonce = os.urandom(4).hex()
         return f"sandbox-{stamp}-{digest}-{nonce}"
 
-    def _force_remove(self, name: str) -> None:
-        """Best-effort stop+remove of the named container (timeout cleanup).
-
-        Never masks the original timeout: a runtime that is gone or a name that no
-        longer exists is swallowed — the caller has already decided the run timed
-        out.
+    def _force_remove(self, name: str) -> bool:
+        """Force-remove the named container. Returns True only when the container is
+        CONFIRMED gone (removed, or already absent), False when removal could not be
+        confirmed — so the caller keeps it queued for a teardown retry instead of
+        assuming success and leaking a still-running container.
         """
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 [self.runtime, "rm", "-f", name],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -488,7 +494,15 @@ class DockerSandbox(Sandbox):
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
-            pass
+            return False
+        if proc.returncode == 0:
+            return True
+        # `rm -f` on a container that does not exist reports "No such container" — it
+        # is not running, so that is also "gone". Any other non-zero (e.g. the daemon
+        # is unreachable) is UNCONFIRMED: report failure so teardown retries.
+        err = proc.stderr or b""
+        text = err.decode("utf-8", "replace") if isinstance(err, bytes) else str(err)
+        return "no such container" in text.lower()
 
     def _reap(self, proc: "subprocess.Popen") -> None:
         """Reap the local client process, KILLING it if it will not exit.
@@ -532,13 +546,13 @@ class DockerSandbox(Sandbox):
     def teardown(self) -> None:
         """Context-manager cleanup (the ``with`` in VerifySession always runs it).
 
-        A normal or timed-out run clears ``_active_container`` once the container is
-        gone, so this is a no-op then. Its job is the ABNORMAL exit — an interrupt
-        or error between launch and cleanup — where it force-removes a container
-        that would otherwise keep running untrusted code past the ``with`` block.
+        A normal or timed-out run clears ``_active_container`` once removal is
+        CONFIRMED, so this is a no-op then. Its job is the ABNORMAL exit — an
+        interrupt/error between launch and cleanup, or a run whose ``rm -f`` could
+        not be confirmed — where it (re)removes a container that would otherwise
+        keep running past the ``with`` block. Clears only on confirmed removal.
         """
-        if self._active_container is not None:
-            self._force_remove(self._active_container)
+        if self._active_container is not None and self._force_remove(self._active_container):
             self._active_container = None
 
     def _page(self, run_id: str, name: str, content: Optional[str]) -> Optional[str]:

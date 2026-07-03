@@ -145,6 +145,14 @@ class _FakeStore:
         return f"detail/{session_id}/{name}"
 
 
+def _rm_ok(sink: list) -> "callable":
+    """A _force_remove stand-in that records the name and reports CONFIRMED removal."""
+    def _rm(name: str) -> bool:
+        sink.append(name)
+        return True
+    return _rm
+
+
 def _enabled_box(monkeypatch, **kw) -> DockerSandbox:
     """A signed-off, enabled sandbox with the runtime present, the daemon assumed
     up, and a store whose repro_ref resolves — the decision logic in run() can then
@@ -170,7 +178,7 @@ def test_build_argv_uses_the_configured_runtime():
 
 def test_run_returns_a_typed_timeout_result(monkeypatch):
     box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "partial", "", True, False))
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "partial", "", True, False, True))
     result = box.run(_spec())
     assert result.timed_out is True and result.reproduced is False and result.exit_code == -1
 
@@ -178,7 +186,7 @@ def test_run_returns_a_typed_timeout_result(monkeypatch):
 def test_run_aborts_when_output_overflows(monkeypatch):
     # A flooding target is killed at the cap; its truncated output is not evidence.
     box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (137, "flood", "", False, True))
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (137, "flood", "", False, True, True))
     with pytest.raises(SandboxError):
         box.run(_spec())
 
@@ -188,7 +196,7 @@ def test_run_raises_on_a_container_launch_failure(monkeypatch):
     # negative verification result.
     box = _enabled_box(monkeypatch)
     monkeypatch.setattr(box, "_stream_capture",
-                        lambda *_a: (125, "", "docker: No such image (pull=never)", False, False))
+                        lambda *_a: (125, "", "docker: No such image (pull=never)", False, False, True))
     with pytest.raises(IsolationUnavailable):
         box.run(_spec())
 
@@ -197,7 +205,7 @@ def test_run_raises_when_the_exit_code_is_unavailable(monkeypatch):
     # The client could not be reaped (returncode None) -> an anomaly, not a result:
     # never construct a SandboxResult with a None exit_code (a ValidationError).
     box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "", "", False, False))
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "", "", False, False, True))
     with pytest.raises(SandboxError):
         box.run(_spec())
 
@@ -206,7 +214,7 @@ def test_run_rejects_spoofed_asan_on_a_clean_exit(monkeypatch):
     # ASan-shaped text but a CLEAN (exit 0) run is target-controlled spoofing, never
     # a crash — a finding must not be promoted on it.
     box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (0, CJSON_ASAN, "", False, False))
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (0, CJSON_ASAN, "", False, False, True))
     result = box.run(_spec())
     assert result.reproduced is False and result.crash is None
 
@@ -216,7 +224,7 @@ def test_run_rejects_spoofed_asan_on_a_plain_nonzero_exit(monkeypatch):
     # DEADLY-SIGNAL termination (docker exit >=128, a real abort_on_error crash) is
     # credited — exit 1 with ASan-shaped text must NOT reproduce.
     box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (1, CJSON_ASAN, "", False, False))
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (1, CJSON_ASAN, "", False, False, True))
     result = box.run(_spec())
     assert result.reproduced is False and result.crash is None
 
@@ -224,7 +232,7 @@ def test_run_rejects_spoofed_asan_on_a_plain_nonzero_exit(monkeypatch):
 def test_run_reproduces_only_on_a_deadly_signal_exit(monkeypatch):
     # 134 = 128 + SIGABRT: a real sanitizer abort. Crash credited.
     box = _enabled_box(monkeypatch)
-    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False))
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False, True))
     result = box.run(_spec())
     assert result.reproduced is True
     assert result.crash is not None and result.crash.faulting_function == "parse_string"
@@ -255,7 +263,7 @@ def test_run_fails_closed_without_store_backed_provenance(monkeypatch):
     no_store = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                              runtime="docker")  # store defaults None
     monkeypatch.setattr(no_store, "_preflight_runtime", lambda: None)
-    monkeypatch.setattr(no_store, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False))
+    monkeypatch.setattr(no_store, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False, True))
     with pytest.raises(SandboxError):
         no_store.run(_spec())
 
@@ -264,7 +272,7 @@ def test_run_fails_closed_without_store_backed_provenance(monkeypatch):
             return False
 
     dangling = _enabled_box(monkeypatch, store=_NoResolve())
-    monkeypatch.setattr(dangling, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False))
+    monkeypatch.setattr(dangling, "_stream_capture", lambda *_a: (134, CJSON_ASAN, "", False, False, True))
     with pytest.raises(SandboxError):
         dangling.run(_spec())
 
@@ -280,13 +288,44 @@ def test_run_ids_are_unique_per_invocation():
     assert all(i.startswith("sandbox-") for i in ids)
 
 
+def test_force_remove_reports_confirmed_removal_only(monkeypatch):
+    import deepthought.sandbox.docker as docker_mod
+
+    box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
+                        runtime="docker")
+
+    def _result(rc, stderr=b""):
+        return lambda *_a, **_k: subprocess.CompletedProcess([], rc, b"", stderr)
+
+    monkeypatch.setattr(docker_mod.subprocess, "run", _result(0))
+    assert box._force_remove("x") is True                       # removed
+    monkeypatch.setattr(docker_mod.subprocess, "run", _result(1, b"Error: No such container: x"))
+    assert box._force_remove("x") is True                       # already gone
+    monkeypatch.setattr(docker_mod.subprocess, "run", _result(1, b"Cannot connect to the Docker daemon"))
+    assert box._force_remove("x") is False                      # UNCONFIRMED -> keep queued
+
+
+def test_unconfirmed_removal_keeps_the_container_queued_for_teardown(monkeypatch):
+    # A timeout whose `rm -f` could not be confirmed must NOT clear _active_container
+    # — teardown gets to retry rather than assume the untrusted container stopped.
+    box = _enabled_box(monkeypatch)
+    monkeypatch.setattr(box, "_stream_capture", lambda *_a: (None, "", "", True, False, False))
+    result = box.run(_spec())
+    assert result.timed_out is True
+    assert box._active_container is not None      # left queued
+    later: list[str] = []
+    monkeypatch.setattr(box, "_force_remove", _rm_ok(later))
+    box.teardown()                                # retry succeeds
+    assert later and box._active_container is None
+
+
 def test_teardown_force_removes_an_active_container(monkeypatch):
     # The context-manager teardown (VerifySession's `with`) force-removes a
     # container left in flight by an interrupt/error between launch and cleanup.
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker")
     removed: list[str] = []
-    monkeypatch.setattr(box, "_force_remove", removed.append)
+    monkeypatch.setattr(box, "_force_remove", _rm_ok(removed))
     box._active_container = "sandbox-abc"
     box.teardown()
     assert removed == ["sandbox-abc"] and box._active_container is None
@@ -330,10 +369,10 @@ def test_stream_capture_caps_flooded_output_and_kills(monkeypatch):
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker")
     removed: list[str] = []
-    monkeypatch.setattr(box, "_force_remove", removed.append)
+    monkeypatch.setattr(box, "_force_remove", _rm_ok(removed))
     _fake_popen(monkeypatch, b"\xff" * 100, wait_code=0)
 
-    rc, out, err, timed_out, overflowed = box._stream_capture(["docker", "run"], "sandbox-flood", 5.0)
+    rc, out, err, timed_out, overflowed, gone = box._stream_capture(["docker", "run"], "sandbox-flood", 5.0)
     assert overflowed is True and timed_out is False
     assert removed == ["sandbox-flood"]
     assert len(out) == 16  # capped read; replacement chars, no decode error
@@ -345,7 +384,7 @@ def test_stream_capture_stops_a_hung_container_at_the_deadline(monkeypatch):
     box = DockerSandbox(project="cjson", signoff=_signoff(), execution_enabled=True,
                         runtime="docker")
     removed: list[str] = []
-    monkeypatch.setattr(box, "_force_remove", removed.append)
+    monkeypatch.setattr(box, "_force_remove", _rm_ok(removed))
     # stdout/stderr that never produce data or EOF -> select hits the wall deadline.
     r_out, w_out = os.pipe()
     r_err, w_err = os.pipe()
@@ -363,7 +402,7 @@ def test_stream_capture_stops_a_hung_container_at_the_deadline(monkeypatch):
 
     monkeypatch.setattr(docker_mod.subprocess, "Popen", _Hang)
     try:
-        _rc, _o, _e, timed_out, overflowed = box._stream_capture(["docker", "run"], "sandbox-hang", 0.2)
+        _rc, _o, _e, timed_out, overflowed, _gone = box._stream_capture(["docker", "run"], "sandbox-hang", 0.2)
         assert timed_out is True and overflowed is False
         assert removed == ["sandbox-hang"]
     finally:
@@ -380,7 +419,7 @@ def test_stream_capture_reaps_the_client_and_stops_the_container_on_interrupt(mo
                         runtime="docker")
     removed: list[str] = []
     waited: list[bool] = []
-    monkeypatch.setattr(box, "_force_remove", removed.append)
+    monkeypatch.setattr(box, "_force_remove", _rm_ok(removed))
     r_out, w_out = os.pipe()
     r_err, w_err = os.pipe()
 

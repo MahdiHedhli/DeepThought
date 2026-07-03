@@ -227,6 +227,22 @@ def test_verify_reproduces_in_the_sandbox_and_promotes_on_evidence(state_dir, tm
     assert run_check(store).ok, run_check(store).errors
 
 
+@requires_sandbox
+def test_executed_input_is_the_stored_repro_artifact(state_dir):
+    """The input the container actually runs (baked at /seeds/trigger) IS the stored
+    repro artifact whose existence authorized the run — proven by reading the bytes
+    back out of the image and comparing to REPRO_REF's content. This binds the
+    provenance check to the executed input: a stale or unrelated seed would fail."""
+    store = _seeded_store(state_dir)
+    out = subprocess.run(
+        ["docker", "run", "--rm", "--network=none", "--pull=never",
+         "--entrypoint", "/bin/cat", IMAGE, "/seeds/trigger"],
+        capture_output=True, timeout=60, check=True,
+    )
+    assert out.stdout == TRIGGER.encode()             # image seed == the ground-truth trigger
+    assert store.read_detail(REPRO_REF) == TRIGGER    # == the stored provenance artifact
+
+
 def test_verified_is_refused_without_resolving_evidence(state_dir, tmp_path):
     """verified is reached ONLY because the evidence resolves — a candidate whose
     evidence_ref does not resolve is refused by the lifecycle guard (no sandbox,
