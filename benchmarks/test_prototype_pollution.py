@@ -76,6 +76,20 @@ DELETE_VULN = "function u(o,name){ delete o[name]; }"
         ("function f(o){o['name']=1;o.count=2;}", 0),                      # fixed/static keys
         # object-specific guard: create(null) on ANOTHER var must NOT bless this sink
         ("function m(d,s){var safe=Object.create(null);for(const k in s){d[k]=s[k];}return d;}", 1),
+        # --- review regressions (agy + codex adversarial PoCs) ---
+        # an UNRELATED defineProperty must not bless every write to that object
+        ("function m(obj,key,val){Object.defineProperty(obj,'x',{value:1});obj[key]=val;}", 1),
+        # a skiplist on a DIFFERENT variable must not guard this key (whole-token match)
+        ("function p(dest,src,safekey,key){var B=['__proto__'];if(B.includes(safekey))return;dest[key]=src[key];}", 1),
+        # a stray proto string + a non-proto skiplist must not fake a guard (resolve receiver)
+        ("function p(d,s,k){console.log('constructor');var a=['name'];if(a.includes(k))return;d[k]=s[k];}", 1),
+        ("function m(d,s,ok){var B=['__proto__'];for(const k in s){if(B.includes(ok)){}d[k]=s[k];}}", 1),  # codex PoC
+        # for..of loop var is externally derived (delete/static-RHS write still flagged)
+        ("function c(dest,keys){for(const key of keys){dest[key]=true;}}", 1),
+        # create(null) via ASSIGNMENT (not just declaration) is a valid guard
+        ("function p(src,key){var dest;dest=Object.create(null);dest[key]=src[key];}", 0),
+        # a top-level (non-function) sink is still a sink
+        ("var k=getQ('k');destination[k]=source[k];", 1),
     ],
 )
 def test_rule_variants(src, expected):

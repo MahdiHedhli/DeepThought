@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import urllib.request
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 from roundrecord import HeldOutResult, Metrics
 
@@ -43,44 +43,48 @@ def fetch(repo: str, sha: str, path: str, timeout: int = 30) -> str:
     return text
 
 
-def _flagged_lines(scan: ScanFn, source: str, uri: str) -> set[int]:
-    out: set[int] = set()
-    for r in scan(source, uri):
-        out.add(r["locations"][0]["physicalLocation"]["region"]["startLine"])
-    return out
-
-
-def _sink_line(source: str, sink_probe: str) -> Optional[int]:
-    """The 1-based line whose whitespace-stripped text contains the sink probe, else
-    None (the sink text is absent — e.g. refactored away in the patched file)."""
+def _sink_is_flagged(scan: ScanFn, source: str, uri: str, sink_probe: str) -> tuple[bool, int]:
+    """Whether the detector flags a sink whose OWN line text contains the probe, plus the
+    total flag count. Matching against FLAGGED lines (not a raw text search) means a
+    comment or a doc-string that happens to contain the probe text can never be mistaken
+    for the sink — the detector only flags real AST subscript sinks, never comments."""
+    lines = source.splitlines()
     needle = sink_probe.replace(" ", "")
-    for i, line in enumerate(source.splitlines(), 1):
-        if needle in line.replace(" ", ""):
-            return i
-    return None
+    hit = False
+    count = 0
+    for r in scan(source, uri):
+        count += 1
+        ln = r["locations"][0]["physicalLocation"]["region"]["startLine"]
+        if 1 <= ln <= len(lines) and needle in lines[ln - 1].replace(" ", ""):
+            hit = True
+    return hit, count
 
 
 def measure_entry(entry: dict, scan: ScanFn) -> dict:
-    """Line-precise rediscovery for one pinned entry. Returns a dict with
-    ``rediscovered`` plus diagnostics (flag counts as precision context)."""
-    path = entry["target_paths"][0]
+    """Line-precise rediscovery for one pinned entry, over ALL target paths. The sink is
+    rediscovered if a FLAGGED line's own text contains the probe in the vulnerable tree
+    and NOT in the patched tree. ``patched_flag_count`` (flags on the FIXED code) is the
+    honest false-positive context — never assumed zero."""
     probe = entry["sink_probe"]
-    vsrc = fetch(entry["repo"], entry["vuln_ref"], path)
-    psrc = fetch(entry["repo"], entry["patched_ref"], path)
-    vflags = _flagged_lines(scan, vsrc, path)
-    pflags = _flagged_lines(scan, psrc, path)
-    vsink = _sink_line(vsrc, probe)
-    psink = _sink_line(psrc, probe)
-    vuln_hit = vsink is not None and vsink in vflags
-    patched_hit = psink is not None and psink in pflags
+    vuln_hit = patched_hit = False
+    vuln_flags = patched_flags = 0
+    for path in entry["target_paths"]:
+        vsrc = fetch(entry["repo"], entry["vuln_ref"], path)
+        psrc = fetch(entry["repo"], entry["patched_ref"], path)
+        vh, vc = _sink_is_flagged(scan, vsrc, path, probe)
+        ph, pc = _sink_is_flagged(scan, psrc, path, probe)
+        vuln_hit = vuln_hit or vh
+        patched_hit = patched_hit or ph
+        vuln_flags += vc
+        patched_flags += pc
     return {
         "cve": entry["cve"],
         "package": entry["package"],
         "rediscovered": bool(vuln_hit and not patched_hit),
         "vuln_flagged": vuln_hit,
         "patched_flagged": patched_hit,
-        "vuln_flag_count": len(vflags),
-        "patched_flag_count": len(pflags),
+        "vuln_flag_count": vuln_flags,
+        "patched_flag_count": patched_flags,
     }
 
 
@@ -89,12 +93,20 @@ def measure_heldout(manifest: dict, scan: ScanFn, detector: str) -> HeldOutResul
     HeldOutResult (rediscovered / missed / missed_cves). Dropped entries are excluded."""
     pinned = [h for h in manifest["heldout"] if h.get("status") == "pinned"]
     rediscovered = 0
+    patched_flags = 0
     missed_cves: list[str] = []
     for h in pinned:
-        if measure_entry(h, scan)["rediscovered"]:
+        m = measure_entry(h, scan)
+        if m["rediscovered"]:
             rediscovered += 1
         else:
             missed_cves.append(h["cve"])
+        # Flags on the PATCHED (fixed, safe) file are the honest false positives — never
+        # assume zero. This makes the published precision real: a static heuristic that
+        # flags other dynamic-write sites on a large fixed file has low file-level
+        # precision, even at high sink-level recall. Sink-discrimination precision is
+        # reported separately on the minimized fixture (RoundRecord.fixture).
+        patched_flags += m["patched_flag_count"]
     return HeldOutResult(
         bug_class=manifest["bug_class"],
         detector=detector,
@@ -102,7 +114,7 @@ def measure_heldout(manifest: dict, scan: ScanFn, detector: str) -> HeldOutResul
         rediscovered=rediscovered,
         missed=len(missed_cves),
         missed_cves=missed_cves,
-        metrics=Metrics(tp=rediscovered, fp=0, fn=len(missed_cves)),
+        metrics=Metrics(tp=rediscovered, fp=patched_flags, fn=len(missed_cves)),
     )
 
 

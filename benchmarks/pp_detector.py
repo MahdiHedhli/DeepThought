@@ -91,40 +91,64 @@ def _subtree_has_proto_name(src: bytes, node: Node) -> bool:
     return any(lit in _PROTO_NAMES for lit in _string_literal_texts(src, node))
 
 
-def _first_arg_name(src: bytes, call: Node) -> str | None:
-    args = call.child_by_field_name("arguments")
-    if args is None:
-        return None
-    for c in args.children:
-        if c.type == "identifier":
-            return _text(src, c)
-        if c.type not in ("(", ",", ")"):
-            break
-    return None
+def _has_identifier(src: bytes, node: Node, name: str) -> bool:
+    """Whether the bare identifier ``name`` (a WHOLE token, not a substring) appears in
+    the subtree — so a key named ``key`` is not matched inside ``safekey``."""
+    return any(n.type == "identifier" and _text(src, n) == name for n in _iter(node))
+
+
+def _is_create_null(src: bytes, value: Node | None) -> bool:
+    return (
+        value is not None
+        and value.type == "call_expression"
+        and "Object.create" in _text(src, value)
+        and "null" in _text(src, value)
+    )
 
 
 def _object_guards(src: bytes, fn: Node) -> set[str]:
-    """Object variables in the function that are SAFE targets for a dynamic-key write:
-    those assigned ``Object.create(null)`` (null prototype) or written via
-    ``Object.defineProperty(obj, ...)`` (the safe-write pattern). Tied to the specific
-    object — a ``create(null)`` for one variable does not bless a write to another."""
+    """Object variables that are SAFE targets for a dynamic-key write because they are
+    null-prototype (``Object.create(null)``), whether initialized in a declaration
+    (``var o = Object.create(null)``) or an assignment (``o = Object.create(null)``).
+    Tied to the specific object — a null-proto object for one variable does not bless a
+    write to another. ``Object.defineProperty`` is deliberately NOT an object-wide guard:
+    a ``defineProperty(obj, 'x', ...)`` for one property does not make a later plain
+    ``obj[key] = v`` safe."""
     safe: set[str] = set()
     for n in _iter(fn):
-        if n.type == "variable_declarator":
-            value = n.child_by_field_name("value")
+        if n.type == "variable_declarator" and _is_create_null(src, n.child_by_field_name("value")):
             name = n.child_by_field_name("name")
-            if value is not None and name is not None and value.type == "call_expression":
-                if "Object.create" in _text(src, value) and "null" in _text(src, value):
-                    safe.add(_text(src, name))
-        if n.type == "call_expression":
-            callee = n.child_by_field_name("function")
-            if callee is not None and callee.type == "member_expression":
-                prop = callee.child_by_field_name("property")
-                if prop is not None and _text(src, prop) == "defineProperty":
-                    tgt = _first_arg_name(src, n)
-                    if tgt is not None:
-                        safe.add(tgt)
+            if name is not None and name.type == "identifier":
+                safe.add(_text(src, name))
+        elif n.type == "assignment_expression" and _is_create_null(src, n.child_by_field_name("right")):
+            left = n.child_by_field_name("left")
+            if left is not None and left.type == "identifier":
+                safe.add(_text(src, left))
     return safe
+
+
+def _receiver_has_proto(src: bytes, fn: Node, recv: Node) -> bool:
+    """Whether a skiplist RECEIVER carries a proto name — inline
+    (``['__proto__'].includes(k)``) or a named list declared/assigned in the function
+    (``var B = ['__proto__']; B.includes(k)``). Resolving the receiver avoids treating an
+    unrelated ``arr.includes(k)`` plus a stray proto string elsewhere as a guard."""
+    if _subtree_has_proto_name(src, recv):
+        return True
+    if recv.type != "identifier":
+        return False
+    rn = _text(src, recv)
+    for n in _iter(fn):
+        if n.type == "variable_declarator":
+            name, value = n.child_by_field_name("name"), n.child_by_field_name("value")
+            if name is not None and value is not None and _text(src, name) == rn:
+                if _subtree_has_proto_name(src, value):
+                    return True
+        elif n.type == "assignment_expression":
+            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
+            if left is not None and right is not None and _text(src, left) == rn:
+                if _subtree_has_proto_name(src, right):
+                    return True
+    return False
 
 
 def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | None) -> bool:
@@ -133,8 +157,8 @@ def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | 
     any ``__proto__``/``create(null)`` mention in the function — otherwise an unrelated
     proto reference or a null-proto object elsewhere in a large function would suppress a
     genuinely unguarded sink (a false negative). Recognized guards:
-      * the sink's OBJECT is a null-prototype (``Object.create(null)``) or is written via
-        ``Object.defineProperty`` — see _object_guards;
+      * the sink's OBJECT is a null-prototype (``Object.create(null)``) — see
+        _object_guards;
       * a comparison / ``in`` tying the sink's KEY to a proto name
         (``key === '__proto__'``, ``key in {__proto__: ...}``);
       * a skiplist membership test on the key (``[...proto...].includes(key)`` /
@@ -152,15 +176,14 @@ def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | 
             if callee is not None and callee.type == "member_expression":
                 prop = callee.child_by_field_name("property")
                 if prop is not None and _text(src, prop) in ("includes", "indexOf", "has"):
+                    recv = callee.child_by_field_name("object")
                     args = n.child_by_field_name("arguments")
-                    argtxt = _text(src, args) if args is not None else ""
-                    key_in_args = key_name is None or key_name in argtxt
-                    # A membership test on the key against a proto skiplist — inline
-                    # (``['__proto__'].includes(key)``) or a named list declared in the
-                    # function (``var B=['__proto__',...]; B.includes(key)``). Requiring
-                    # BOTH the key-membership test and a proto-name in the function keeps
-                    # this from firing on an unrelated ``arr.includes(x)``.
-                    if key_in_args and _subtree_has_proto_name(src, fn):
+                    # The key must be tested (a WHOLE-token match, not a substring) AND the
+                    # membership receiver must actually carry a proto name (resolved to its
+                    # declaration if named) — so an unrelated ``arr.includes(k)`` plus a
+                    # stray proto string elsewhere is not mistaken for a guard.
+                    key_tested = key_name is None or (args is not None and _has_identifier(src, args, key_name))
+                    if key_tested and recv is not None and _receiver_has_proto(src, fn, recv):
                         return True
 
     if key_name is None:
@@ -317,14 +340,17 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
         index = subscript.child_by_field_name("index")
         if index is None or not _index_is_dynamic(index):
             continue
-        fn = _enclosing_function(subscript)
-        if not _externally_derived(src, fn, index, right):
+        # The scope for externally-derived + guard analysis is the enclosing function,
+        # or the program root for a TOP-LEVEL sink (module code not wrapped in a
+        # function) — a top-level `destination[key] = source[key]` is a real sink too.
+        scope = _enclosing_function(subscript) or root
+        if not _externally_derived(src, scope, index, right):
             continue
         key_name = _key_identifier(index, src)
         obj = subscript.child_by_field_name("object")
         obj_name = _text(src, obj) if obj is not None and obj.type == "identifier" else None
-        if fn is not None and _key_is_guarded(src, fn, key_name, obj_name):
-            continue  # patched shape — the enclosing function guards THIS object/key
+        if _key_is_guarded(src, scope, key_name, obj_name):
+            continue  # patched shape — the scope guards THIS object/key
         results.append(_result(RULE_ID, subscript, uri, _message(sink_kind, _text(src, subscript)), cve))
 
     return results
