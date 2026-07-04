@@ -72,3 +72,39 @@ Each build round appends one section here using this template:
     - Notes: <false-positive traps, patched-shape discriminator>
 
 <!-- rounds append below this line -->
+
+### Prototype pollution (CWE-1321)
+
+- **When to use:** hunting a JS/TS target that merges, copies, clones, or deletes
+  object properties with a key drawn from parsed/untrusted input (config/YAML/JSON
+  loaders, deep-merge/extend/set/unset utilities, deserializers). The shape: a
+  computed-member **write** (`obj[key] = v`) or **delete** (`delete obj[key]`) where
+  `key` can be `__proto__` / `constructor` / `prototype`.
+- **Detection:** static AST (`benchmarks/pp_detector.py`, tree-sitter). Flags a
+  computed-member write/delete whose key is dynamic AND externally derived (bound by a
+  `for..in`/`for..of`, a function parameter, or copied from another object) when the
+  **enclosing function** does not guard that object/key. Guard scoping is per-function,
+  so an unguarded merge path is caught even when a sibling path in the same file guards
+  `__proto__` (the js-yaml seed).
+- **Rule id:** `DT-PP-MERGE`, emits SARIF 2.1.0 (`scan_file` / `scan_source`) into the
+  shipped `deepthought.ingest.sarif`.
+- **Verification:** static (deterministic tier) — discriminate vulnerable from patched
+  on the fixture and rediscover through NEW PROJECT → MAP → DISCOVER → `check`. No
+  execution.
+- **OSV / disclosure shape:** severity basis `permissive_oss`; the analyzer emits
+  **CWE-1321** and, for a known target, the CVE as an informational **alias** only —
+  never an authoritative `Finding.cve`, `advisory`, or `fix`.
+- **Fixtures:** seed js-yaml **CVE-2025-64718** (unguarded merge assignment); held-out
+  (real, pinned by SHA) devalue CVE-2025-57820 (for-in copy), lodash CVE-2025-13465
+  (delete by path), min-document CVE-2025-57352 (delete by namespace). Dropped for no
+  NVD record: convict CVE-2026-33863, js-object-utilities CVE-2025-28269.
+- **Held-out generalization:** **2/3 (67%)** — devalue and lodash rediscovered;
+  min-document missed (logged `v1-2026-07-04`).
+- **Notes.** Patched-shape discriminators recognized: a `key === '__proto__'` /
+  skiplist check, `Object.defineProperty`, or an `Object.create(null)` target (tied to
+  the specific object). A bare `hasOwnProperty` is deliberately NOT treated as a guard
+  (the seed writes inside a benign `!hasOwnProperty` duplicate-key check). **Known
+  miss:** min-document's patch guards via `hasOwnProperty` with skip-polarity, which is
+  indistinguishable from a benign check without control-flow analysis — the next
+  improvement-loop fixture. Precision is high at the sink but lower across a large file
+  (a static heuristic flags other dynamic writes); refining precision is future work.

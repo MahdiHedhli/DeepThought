@@ -23,3 +23,6 @@ venv/
 
 # OS
 .DS_Store
+
+# Corpus fetch cache (real package files at pinned SHAs; re-fetchable)
+benchmarks/.cache/
