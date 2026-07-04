@@ -11,7 +11,7 @@
     "heldout_missed": ["CVE-2025-57352"],
     "snapshot": "v1-2026-07-04",
     "measured_on": "real target files at pinned vuln/patched SHAs (rediscovery = a FLAGGED line's own text contains the sink probe in vuln, not in patched)",
-    "precision_note": "Two precisions, reported honestly: (1) DISCRIMINATION precision on the minimized fixture is clean (tp=1, fp=0 — flags the vulnerable function, skips the patched one); (2) held-out FILE-LEVEL precision is low (tp=2, fp=68 -> 0.03) because a static heuristic flags many other dynamic-write sites across a whole library file. fp counts every flag on the PATCHED (fixed) files, never assumed zero. Generalization (sink-level recall) is the headline; file-level precision refinement is future work."
+    "precision_note": "Two precisions, reported honestly: (1) DISCRIMINATION precision on the minimized fixture is clean (tp=1, fp=0 — flags the vulnerable function, skips the patched one); (2) held-out FILE-LEVEL precision is low (tp=2, fp=69 -> 0.03) because a static heuristic flags many other dynamic-write sites across a whole library file. fp counts every flag on the PATCHED (fixed) files, never assumed zero. Generalization (sink-level recall) is the headline; file-level precision refinement is future work."
   },
   "reproducibility": "Each entry pins a real repo + vulnerable/patched commit SHAs. The detector runs over the real trees fetched at those SHAs. An entry that cannot be resolved to fetchable ground truth at build time is dropped from the denominator with a reason (never counted missed, never hand-faked).",
   "seed": {

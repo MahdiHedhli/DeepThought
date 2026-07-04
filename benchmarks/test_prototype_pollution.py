@@ -94,6 +94,15 @@ DELETE_VULN = "function u(o,name){ delete o[name]; }"
         # into the top-level scope's analysis
         ("function g(k){if(k==='__proto__')return;} var k=getQ('k'); destination[k]=source[k];", 1),  # nested guard doesn't cover top-level sink
         ("function u(){for(const k in obj){}} destination[k]=true;", 0),  # nested for-in doesn't derive top-level k
+        # --- codex round 3 PoCs ---
+        # an OBSERVE-only proto check (no break/else) does not block the sink
+        ("function m(d,s){for(const k in s){if(k==='__proto__')console.log(k);d[k]=s[k];}}", 1),
+        # an interpolated template index can still be __proto__
+        ("function m(d,s,key){d[`${key}`]=s[key];}", 1),
+        # Object.create(NON-null) is not a null-prototype target
+        ("function m(s,key){var d=Object.create(proto);d[key]=s[key];}", 1),
+        # but a blocking else-branch guard (the seed shape) IS recognized
+        ("function sp(o,k,v){if(k==='__proto__'){Object.defineProperty(o,k,{value:v});}else{o[k]=v;}}", 0),
     ],
 )
 def test_rule_variants(src, expected):

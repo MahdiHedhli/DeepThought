@@ -17,10 +17,12 @@ The guard is scanned per ENCLOSING FUNCTION, not per file: js-yaml's vulnerable
 ``mergeMappings`` is flagged even though the sibling ``storeMappingPair`` in the same
 file already guarded ``__proto__`` — the merge path was the one that missed the guard.
 
-Patched shapes it must SKIP: a ``key === '__proto__'`` / skiplist check, a
-``hasOwnProperty`` own-property filter, ``Object.defineProperty``, or
-``Object.create(null)`` present in the enclosing function; or the sink refactored into
-a guarded helper call (a call is not a subscript, so it is not a sink here).
+Patched shapes it must SKIP: a BLOCKING ``key === '__proto__'`` / skiplist check
+(one that returns/continues/throws or routes the write into an else branch),
+``Object.defineProperty``, or an ``Object.create(null)`` target; or the sink refactored
+into a guarded helper call (a call is not a subscript, so it is not a sink here). A bare
+``hasOwnProperty`` is deliberately NOT a guard — the seed writes inside a benign
+``!hasOwnProperty`` duplicate-key check that still pollutes on ``__proto__``.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ _FUNCTION_TYPES = frozenset(
 )
 # A dangerous key must be able to carry a string like "__proto__". A numeric or string
 # LITERAL index cannot be attacker-chosen at this site, so it is not a dynamic key.
-_LITERAL_INDEX_TYPES = frozenset({"number", "string", "template_string"})
+_LITERAL_INDEX_TYPES = frozenset({"number", "string"})  # template_string handled in _index_is_dynamic
 # Signals that the enclosing function already defends against prototype pollution.
 # NOTE: bare ``hasOwnProperty`` is deliberately NOT a guard signal. The seed
 # (js-yaml) writes inside ``if (!_hasOwnProperty.call(destination, key))`` — a benign
@@ -64,6 +66,11 @@ def _text(src: bytes, node: Node) -> str:
     return src[node.start_byte : node.end_byte].decode("utf-8", "replace")
 
 
+_BREAK_TYPES = frozenset(
+    {"return_statement", "continue_statement", "throw_statement", "break_statement"}
+)
+
+
 def _enclosing_function(node: Node) -> Node | None:
     cur = node.parent
     while cur is not None:
@@ -71,6 +78,35 @@ def _enclosing_function(node: Node) -> Node | None:
             return cur
         cur = cur.parent
     return None
+
+
+def _enclosing_if(node: Node) -> Node | None:
+    """The nearest enclosing ``if_statement`` in the SAME function (stops at a function
+    boundary), or None — the ``if`` whose condition performs a proto check."""
+    cur = node.parent
+    while cur is not None:
+        if cur.type == "if_statement":
+            return cur
+        if cur.type in _FUNCTION_TYPES:
+            return None
+        cur = cur.parent
+    return None
+
+
+def _check_blocks_sink(check_node: Node, sink: Node) -> bool:
+    """Whether a proto CHECK actually prevents the sink from running — i.e. it is a real
+    guard, not a mere observation (``if (k==='__proto__') console.log(k); obj[k]=v``
+    does NOT block). True when the check's enclosing ``if`` either breaks control flow in
+    its consequence (return/continue/throw/break, so a proto key never reaches the sink)
+    OR the sink lives in the ``if``'s ELSE branch (the seed's ``if(proto){...}else{write}``)."""
+    if_stmt = _enclosing_if(check_node)
+    if if_stmt is None:
+        return False
+    cons = if_stmt.child_by_field_name("consequence")
+    if cons is not None and any(n.type in _BREAK_TYPES for n in _iter_scope(cons)):
+        return True
+    alt = if_stmt.child_by_field_name("alternative")
+    return alt is not None and alt.start_byte <= sink.start_byte and sink.end_byte <= alt.end_byte
 
 
 def _iter(node: Node):
@@ -125,13 +161,27 @@ def _has_identifier(src: bytes, node: Node, name: str) -> bool:
     return any(n.type == "identifier" and _text(src, n) == name for n in _iter(node))
 
 
+def _first_argument(call: Node) -> Node | None:
+    args = call.child_by_field_name("arguments")
+    if args is None:
+        return None
+    for c in args.children:
+        if c.type not in ("(", ",", ")", "comment"):
+            return c
+    return None
+
+
 def _is_create_null(src: bytes, value: Node | None) -> bool:
-    return (
-        value is not None
-        and value.type == "call_expression"
-        and "Object.create" in _text(src, value)
-        and "null" in _text(src, value)
-    )
+    """``Object.create(null)`` with the FIRST argument being the actual ``null`` literal
+    — not a substring match, so ``Object.create(nullableProto)`` /
+    ``Object.create(not_null)`` (a normal prototype) does not count as null-proto."""
+    if value is None or value.type != "call_expression":
+        return False
+    callee = value.child_by_field_name("function")
+    if callee is None or _text(src, callee) != "Object.create":
+        return False
+    arg = _first_argument(value)
+    return arg is not None and arg.type == "null"
 
 
 def _object_guards(src: bytes, fn: Node) -> set[str]:
@@ -179,21 +229,23 @@ def _receiver_has_proto(src: bytes, fn: Node, recv: Node) -> bool:
     return False
 
 
-def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | None) -> bool:
+def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | None, sink: Node) -> bool:
     """True if the enclosing function guards THIS sink (its object AND key) against
     prototype pollution. The guard is tied to the specific key and object, not merely to
     any ``__proto__``/``create(null)`` mention in the function — otherwise an unrelated
     proto reference or a null-proto object elsewhere in a large function would suppress a
-    genuinely unguarded sink (a false negative). Recognized guards:
+    genuinely unguarded sink (a false negative). A key CHECK counts only when it actually
+    BLOCKS the sink (see _check_blocks_sink) — a check that merely observes the key
+    (``if(k==='__proto__')log(k); obj[k]=v``) is not a guard. Recognized guards:
       * the sink's OBJECT is a null-prototype (``Object.create(null)``) — see
         _object_guards;
-      * a comparison / ``in`` tying the sink's KEY to a proto name
+      * a blocking comparison / ``in`` tying the sink's KEY to a proto name
         (``key === '__proto__'``, ``key in {__proto__: ...}``);
-      * a skiplist membership test on the key (``[...proto...].includes(key)`` /
+      * a blocking skiplist membership test on the key (``[...proto...].includes(key)`` /
         ``.indexOf`` / ``.has``).
     A bare ``hasOwnProperty`` is intentionally NOT a guard (see _PROTO_NAMES note). For a
     computed key that is not a bare identifier (e.g. ``toKey(last(path))``) the key cannot
-    be tied to a variable, so any in-function proto-name comparison counts.
+    be tied to a variable, so any in-scope proto-name comparison counts.
     """
     if obj_name is not None and obj_name in _object_guards(src, fn):
         return True
@@ -206,12 +258,17 @@ def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | 
                 if prop is not None and _text(src, prop) in ("includes", "indexOf", "has"):
                     recv = callee.child_by_field_name("object")
                     args = n.child_by_field_name("arguments")
-                    # The key must be tested (a WHOLE-token match, not a substring) AND the
+                    # The key must be tested (a WHOLE-token match, not a substring), the
                     # membership receiver must actually carry a proto name (resolved to its
-                    # declaration if named) — so an unrelated ``arr.includes(k)`` plus a
-                    # stray proto string elsewhere is not mistaken for a guard.
+                    # declaration if named), AND the test must block the sink — so an
+                    # unrelated ``arr.includes(k)`` or an observe-only check is not a guard.
                     key_tested = key_name is None or (args is not None and _has_identifier(src, args, key_name))
-                    if key_tested and recv is not None and _receiver_has_proto(src, fn, recv):
+                    if (
+                        key_tested
+                        and recv is not None
+                        and _receiver_has_proto(src, fn, recv)
+                        and _check_blocks_sink(n, sink)
+                    ):
                         return True
 
     if key_name is None:
@@ -221,7 +278,7 @@ def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | 
 
     for n in _iter_scope(fn):
         # key === '__proto__' | '__proto__' === key | key !== ... | key in {__proto__:...}
-        if n.type == "binary_expression":
+        if n.type == "binary_expression" and _check_blocks_sink(n, sink):
             left = n.child_by_field_name("left")
             right = n.child_by_field_name("right")
             if left is not None and right is not None:
@@ -234,7 +291,11 @@ def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | 
 
 def _index_is_dynamic(index: Node) -> bool:
     """A non-literal index — an identifier or expression that could resolve to a
-    ``__proto__``-class string at runtime (not a fixed ``obj["fixed"]`` / ``obj[0]``)."""
+    ``__proto__``-class string at runtime (not a fixed ``obj["fixed"]`` / ``obj[0]``).
+    A template with a substitution (``obj[`${key}`]``) is dynamic — only a template with
+    NO substitution is a literal."""
+    if index.type == "template_string":
+        return any(c.type == "template_substitution" for c in index.children)
     return index.type not in _LITERAL_INDEX_TYPES
 
 
@@ -377,7 +438,7 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
         key_name = _key_identifier(index, src)
         obj = subscript.child_by_field_name("object")
         obj_name = _text(src, obj) if obj is not None and obj.type == "identifier" else None
-        if _key_is_guarded(src, scope, key_name, obj_name):
+        if _key_is_guarded(src, scope, key_name, obj_name, subscript):
             continue  # patched shape — the scope guards THIS object/key
         results.append(_result(RULE_ID, subscript, uri, _message(sink_kind, _text(src, subscript)), cve))
 
