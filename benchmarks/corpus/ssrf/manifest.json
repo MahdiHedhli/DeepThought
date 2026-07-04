@@ -1,0 +1,74 @@
+{
+  "bug_class": "ssrf",
+  "cwe": "CWE-918",
+  "detector": "DT-SSRF-TAINT",
+  "tier": "deterministic",
+  "language": "python",
+  "reproducibility": "Each entry pins a real repo + vulnerable/patched commit SHAs; the detector runs over the real target file(s) fetched at those SHAs. Pin-or-drop: an entry that cannot be resolved to fetchable ground truth is dropped from the denominator with a reason, never counted missed, never hand-faked.",
+  "seed_swap": {
+    "original_seed": "CVE-2025-50181 (urllib3)",
+    "reason": "Its authoritative NVD weakness is CWE-601 (a redirect-mitigation bypass / open redirect), NOT CWE-918 SSRF (taint from an untrusted source to an outbound-request sink). Per the verify-at-build contract, a seed whose authoritative class does not match its row is swapped for a genuine public example of the class before calibration.",
+    "replaced_with": "CVE-2025-0184 (dify)"
+  },
+  "seed": {
+    "cve": "CVE-2025-0184",
+    "package": "dify",
+    "repo": "https://github.com/langgenius/dify",
+    "vuln_ref": "8ab05d4c36b4720dc3f1f654564745f47c5034cd",
+    "patched_ref": "c135ec4b08d946a1a1d3a198a1d72c1ccf47250f",
+    "target_paths": ["api/core/rag/extractor/word_extractor.py"],
+    "source": "rel.reltype — an external-relationship URL embedded in an attacker-uploaded DOCX, assigned to `url` in DocxExtractor._extract_images_from_docx",
+    "sink_probe": "requests.get(url, stream=True)",
+    "sink": "requests.get(url, stream=True) — outbound HTTP with the raw DOCX-supplied URL, no host/scheme allowlist or private-IP block",
+    "patched_shape": "sink substituted to the SSRF-hardened proxy: requests.get(url, stream=True) -> ssrf_proxy.get(url, stream=True) (core.helper.ssrf_proxy)",
+    "authoritative_source": "https://github.com/advisories/GHSA-jg5r-v2h9-wfxx",
+    "cwe": "CWE-918",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2024-4325", "package": "gradio", "status": "pinned", "cwe": "CWE-918",
+      "repo": "https://github.com/gradio-app/gradio",
+      "vuln_ref": "8805fc48ae7884ae8ce8dcc0f533e135d9e5d80e",
+      "patched_ref": "fe9d1cb0870a5b07d51e8cb05401af47efbacd13",
+      "target_paths": ["gradio/processing_utils.py"],
+      "sink_probe": "stream(\"GET\", url",
+      "sink": "httpx sync_client.stream(\"GET\", url, follow_redirects=True) / async_client.stream in save_url_to_cache",
+      "patched_shape": "check_public_url(url) guard (scheme http/https + socket.getaddrinfo + ipaddress.is_global) before the request and on every redirect hop"
+    },
+    {
+      "cve": "CVE-2026-25580", "package": "pydantic-ai", "status": "pinned", "cwe": "CWE-918",
+      "repo": "https://github.com/pydantic/pydantic-ai",
+      "vuln_ref": "06c77f46591c5bb5efacb170d203b9e3f4b1b413",
+      "patched_ref": "d398bc9d39aecca6530fa7486a410d5cce936301",
+      "target_paths": ["pydantic_ai_slim/pydantic_ai/models/__init__.py"],
+      "sink_probe": "client.get(item.url",
+      "sink": "await client.get(item.url, follow_redirects=True) in download_item() (httpx AsyncClient)",
+      "patched_shape": "safe_download() with scheme restriction, DNS pre-resolution (anti-rebinding), private/internal + cloud-metadata IP block (new _ssrf.py)"
+    },
+    {
+      "cve": "CVE-2023-46229", "package": "langchain", "status": "pinned", "cwe": "CWE-918",
+      "repo": "https://github.com/langchain-ai/langchain",
+      "vuln_ref": "42dcc502c7ddb5079b584d31c549d861e94358db",
+      "patched_ref": "9ecb7240a480720ec9d739b3877a52f76098a2b8",
+      "target_paths": ["libs/langchain/langchain/document_loaders/recursive_url_loader.py"],
+      "sink_probe": "requests.get(url",
+      "sink": "requests.get(url, timeout=..., headers=...) and aiohttp session.get(url) in RecursiveUrlLoader",
+      "patched_shape": "same-domain restriction: prevent_outside made a real bool defaulting True so off-domain recursively-discovered links are filtered before fetch (weaker guard — a same-domain filter, not an allowlist/IP block)",
+      "notes": "weaker patched guard (bool flag, not a validation call) — may be a harder discrimination case"
+    },
+    {
+      "cve": "CVE-2026-33626", "package": "lmdeploy", "status": "pinned", "cwe": "CWE-918",
+      "repo": "https://github.com/InternLM/lmdeploy",
+      "vuln_ref": "819a80836e991ca3f427b0e85faca159083d3d40",
+      "patched_ref": "71d64a339edb901e9005358e0633fbbab367d626",
+      "target_paths": ["lmdeploy/vl/media/connection.py"],
+      "sink_probe": "",
+      "sink": "outbound request fetching remote media by user-supplied URL (media connection)",
+      "patched_shape": "TBD — confirm the exact sink line + guard at build (fill sink_probe before measuring)"
+    }
+  ],
+  "heldout_pinned": 4,
+  "heldout_dropped": 0,
+  "denominator_note": "Generalization denominator = 4 pinned held-out CVEs (gradio, pydantic-ai, langchain, lmdeploy). All genuine Python CWE-918 SSRFs verified on NVD, distinct sinks (requests/httpx/aiohttp) and guards (proxy-substitution/validation-call/IP-block/same-domain) so a seed signature would not generalize."
+}
