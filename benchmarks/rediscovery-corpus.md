@@ -58,6 +58,14 @@ those SHAs.
 - Sandbox seeds/held-out are verified at sandbox-phase entry (they also need a
   buildable target + a fuzz harness); an unresolvable sandbox seed is swapped for a
   resolvable public equivalent of the same class before that class is built.
+- Each seed's bug CLASS / CWE is confirmed against the authoritative source (NVD/GHSA
+  or the project advisory) at that class's build. A seed whose authoritative weakness
+  class does not match its row is **relabeled or swapped** for a true public example
+  of the class before the detector is calibrated — the detector is never trained on an
+  off-class seed. Known boundary case to resolve at build: the SSRF seed
+  **CVE-2025-50181 (urllib3)** sits on the CWE-601 (redirect) / CWE-918 (SSRF)
+  boundary; if the authoritative record classes it as redirect-only, it is swapped for
+  a genuine CWE-918 request-sink SSRF CVE (or the row is relabeled to match).
 
 ## Held-out generalization sets (candidate lists — pinned per class at build)
 

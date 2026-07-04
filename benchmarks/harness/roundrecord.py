@@ -13,6 +13,7 @@ the numbers that matter are the held-out ones.
 
 from __future__ import annotations
 
+import math
 from fractions import Fraction
 from typing import Optional
 
@@ -21,6 +22,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 def _safe_div(n: int, d: int) -> float:
     return round(n / d, 3) if d else 0.0
+
+
+def _pct(value: float) -> str:
+    """Percent for the benchmark yardstick. NEVER round a sub-1.0 rate UP to 100% —
+    a single remaining miss must stay visible (199/200 shows 99.5%, not 100%). Only
+    an exact >=1.0 renders '100%'; everything else floors to 0.1%."""
+    if value >= 1.0:
+        return "100%"
+    return f"{math.floor(value * 1000) / 10:.1f}%"
 
 
 def _cell(value: str) -> str:
@@ -138,7 +148,7 @@ class HeldOutResult(BaseModel):
             self.bug_class,
             self.detector,
             f"{self.rediscovered}/{total}",
-            f"{self.generalization:.0%}",
+            _pct(self.generalization),
             f"{self.metrics.precision:.2f}",
             f"{self.metrics.recall:.2f}",
         ]
@@ -161,9 +171,23 @@ class Benchmark(BaseModel):
         return sum(r.review_rounds for r in self.rounds)
 
     def mean_generalization(self) -> float:
+        # The mean over MEASURED classes. summary_line() surfaces how many built
+        # classes are unmeasured, so this number can never be read as complete when
+        # it is not (a partial held-out set must not masquerade as the full headline).
         if not self.heldout:
             return 0.0
         return round(sum(h.generalization for h in self.heldout) / len(self.heldout), 3)
+
+    def unmeasured_classes(self) -> list[str]:
+        """Built bug classes (from rounds) that have NO held-out result yet — the
+        headline must not average as if these were measured. Empty when every built
+        class has a held-out row."""
+        measured = {h.bug_class for h in self.heldout}
+        out: list[str] = []
+        for r in self.rounds:
+            if r.bug_class not in measured and r.bug_class not in out:
+                out.append(r.bug_class)
+        return out
 
     # -- documentation tables ---------------------------------------------
     def cost_table(self) -> str:
@@ -176,11 +200,19 @@ class Benchmark(BaseModel):
 
     def summary_line(self) -> str:
         hrs = self.total_wall_seconds() / 3600
-        return (
+        measured = len({h.bug_class for h in self.heldout})
+        line = (
             f"{len(self.rounds)} classes built in {hrs:.1f}h, "
             f"{self.total_tokens():,} tokens, {self.total_review_rounds()} review rounds; "
-            f"mean held-out generalization {self.mean_generalization():.0%}"
+            f"mean held-out generalization {_pct(self.mean_generalization())} "
+            f"over {measured} measured class(es)"
         )
+        # NEVER let the headline imply completeness it does not have: name any built
+        # class with no held-out result so a partial mean cannot read as the full score.
+        unmeasured = self.unmeasured_classes()
+        if unmeasured:
+            line += f" — WARNING: {len(unmeasured)} unmeasured: {', '.join(unmeasured)}"
+        return line
 
 
 # --------------------------------------------------------------------------- #
@@ -300,8 +332,8 @@ class GeneralizationLog(BaseModel):
             # slip past a rounded comparison. Round only for the display string.
             if base_r is not None and r.exact < base_r.exact:
                 out.append(
-                    f"{r.bug_class}: {base_r.generalization:.0%} -> "
-                    f"{r.generalization:.0%} regressed"
+                    f"{r.bug_class}: {_pct(base_r.generalization)} -> "
+                    f"{_pct(r.generalization)} regressed"
                 )
         # A class present in the baseline but MISSING from the candidate is the
         # ultimate rate drop — coverage removed. Flag it, so accepts() cannot be
@@ -309,7 +341,7 @@ class GeneralizationLog(BaseModel):
         # re-measure must re-assert every prior class, not silently drop one).
         for r in base.rates:
             if r.bug_class not in candidate_classes:
-                out.append(f"{r.bug_class}: {r.generalization:.0%} -> dropped (class missing)")
+                out.append(f"{r.bug_class}: {_pct(r.generalization)} -> dropped (class missing)")
         return out
 
     def accepts(self, candidate: Snapshot) -> bool:
@@ -329,13 +361,13 @@ class GeneralizationLog(BaseModel):
             row = [c]
             for s in self.snapshots:
                 v = s.rate_for(c)
-                row.append(f"{v:.0%}" if v is not None else "-")
+                row.append(_pct(v) if v is not None else "-")
             rows.append(row)
-        rows.append(["mean", *[f"{s.mean:.0%}" for s in self.snapshots]])
+        rows.append(["mean", *[_pct(s.mean) for s in self.snapshots]])
         return _md_table(headers, rows)
 
     def climb(self) -> str:
         if len(self.snapshots) < 2:
             return "insufficient history"
         first, last = self.snapshots[0], self.snapshots[-1]
-        return f"mean generalization {first.mean:.0%} -> {last.mean:.0%} over {len(self.snapshots)} versions"
+        return f"mean generalization {_pct(first.mean)} -> {_pct(last.mean)} over {len(self.snapshots)} versions"

@@ -184,6 +184,34 @@ def test_classrate_rejects_impossible_counts():
     assert ClassRate(bug_class="pp", rediscovered=0, total=0).generalization == 0.0
 
 
+def test_percent_never_rounds_a_miss_up_to_100():
+    # A sub-1.0 rate must never render as 100% on the yardstick — a remaining miss
+    # has to stay visible. 199/200 = 0.995 must NOT show 100%.
+    h = HeldOutResult(bug_class="pp", detector="DT", rediscovered=199, missed=1)
+    assert "100%" not in h.row()[3]
+    assert h.row()[3] == "99.5%"
+    # Only a genuine 1.0 shows 100%.
+    assert HeldOutResult(bug_class="pp", detector="DT", rediscovered=5, missed=0).row()[3] == "100%"
+
+
+def test_summary_flags_unmeasured_built_classes():
+    # 2 classes built but only 1 measured: the headline must NOT imply completeness.
+    b = Benchmark(
+        rounds=[
+            RoundRecord(cve="C1", package="p", cwe="CWE-1", bug_class="pp",
+                        discovery="static_ast", tier="deterministic", language="js",
+                        fixture=Metrics(tp=1), status="rediscovered"),
+            RoundRecord(cve="C2", package="q", cwe="CWE-2", bug_class="ssrf",
+                        discovery="taint", tier="deterministic", language="py",
+                        fixture=Metrics(tp=1), status="rediscovered"),
+        ],
+        heldout=[HeldOutResult(bug_class="pp", detector="DT", rediscovered=2, missed=0)],
+    )
+    assert b.unmeasured_classes() == ["ssrf"]
+    summary = b.summary_line()
+    assert "1 measured" in summary and "unmeasured" in summary and "ssrf" in summary
+
+
 def test_negative_counts_are_rejected():
     import pytest
     from pydantic import ValidationError
