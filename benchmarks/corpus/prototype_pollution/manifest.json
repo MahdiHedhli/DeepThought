@@ -1,0 +1,79 @@
+{
+  "bug_class": "prototype_pollution",
+  "cwe": "CWE-1321",
+  "detector": "DT-PP-MERGE",
+  "tier": "deterministic",
+  "language": "js",
+  "result": {
+    "seed_rediscovered": true,
+    "heldout_generalization": "2/3",
+    "heldout_rediscovered": ["CVE-2025-57820", "CVE-2025-13465"],
+    "heldout_missed": ["CVE-2025-57352"],
+    "snapshot": "v1-2026-07-04",
+    "measured_on": "real target files at pinned vuln/patched SHAs (rediscovery = a FLAGGED line's own text contains the sink probe in vuln, not in patched)",
+    "precision_note": "Two precisions, reported honestly: (1) DISCRIMINATION precision on the minimized fixture is clean (tp=1, fp=0 — flags the vulnerable function, skips the patched one); (2) held-out FILE-LEVEL precision is low (tp=2, fp=69 -> 0.03) because a static heuristic flags many other dynamic-write sites across a whole library file. fp counts every flag on the PATCHED (fixed) files, never assumed zero. Generalization (sink-level recall) is the headline; file-level precision refinement is future work."
+  },
+  "reproducibility": "Each entry pins a real repo + vulnerable/patched commit SHAs. The detector runs over the real trees fetched at those SHAs. An entry that cannot be resolved to fetchable ground truth at build time is dropped from the denominator with a reason (never counted missed, never hand-faked).",
+  "seed": {
+    "cve": "CVE-2025-64718",
+    "package": "js-yaml",
+    "repo": "https://github.com/nodeca/js-yaml",
+    "vuln_ref": "0d3ca7a27b03a6c974790a30a89e456007d62976",
+    "patched_ref": "383665ff4248ec2192d1274e934462bb30426879",
+    "target_paths": ["lib/loader.js"],
+    "sink_probe": "destination[key] = source[key]",
+    "sink": "mergeMappings: destination[key] = source[key] (unguarded computed-member assignment of a parsed key)",
+    "patched_shape": "setProperty() special-cases __proto__ via Object.defineProperty; the raw assignment is replaced by setProperty(destination, key, source[key])",
+    "authoritative_source": "https://github.com/advisories/GHSA-mh29-5h37-fv8m",
+    "notes": "The direct-mapping path (storeMappingPair) already guarded __proto__; only the YAML merge (<<) path was unguarded. The class rule must flag the unguarded sink even when sibling paths are guarded.",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2025-57820", "package": "devalue", "status": "pinned", "cwe": "CWE-1321",
+      "repo": "https://github.com/sveltejs/devalue",
+      "vuln_ref": "02d20e8a792e5daa387b23816aba0170fec7437e",
+      "patched_ref": "0623a47c9555b639c03ff1baea82951b2d9d1132",
+      "target_paths": ["src/parse.js"],
+      "sink_probe": "object[key] = hydrate(n)",
+      "sink": "unflatten()/hydrate() reviver: unguarded object[key] = hydrate(n) inside for (const key in value)",
+      "patched_shape": "key skiplist guard that throws on __proto__ before the copy; typeof index === 'number' check",
+      "authoritative_source": "https://github.com/sveltejs/devalue/security/advisories/GHSA-vj54-72f3-p5jv"
+    },
+    {
+      "cve": "CVE-2025-13465", "package": "lodash", "status": "pinned", "cwe": "CWE-1321",
+      "repo": "https://github.com/lodash/lodash",
+      "vuln_ref": "4879a7a7d0a4494b0e83c7fa21bcc9fc6e7f1a6d",
+      "patched_ref": "edadd452146f7e4bad4ea684e955708931d84d81",
+      "target_paths": ["lodash.js"],
+      "sink_probe": "delete object[toKey(last(path))]",
+      "sink": "baseUnset(object, path): unconditional delete object[toKey(last(path))] on an attacker-controlled path (pollution via property deletion into __proto__/constructor.prototype)",
+      "patched_shape": "prototype-key guard inside baseUnset",
+      "authoritative_source": "https://github.com/lodash/lodash/security/advisories/GHSA-xxjr-mmjv-4gpg",
+      "notes": "sink is DELETION, not assignment — a class rule must cover delete obj[key], not just obj[key]=v"
+    },
+    {
+      "cve": "CVE-2025-57352", "package": "min-document", "status": "pinned", "cwe": "CWE-1321",
+      "repo": "https://github.com/Raynos/min-document",
+      "vuln_ref": "4490b40cbb19feb26b09f217690a0969d1a89d51",
+      "patched_ref": "966646172d9063f880aeaf79882edfc3a0ceaca4",
+      "target_paths": ["dom-element.js"],
+      "sink_probe": "delete attributes[name]",
+      "sink": "removeAttributeNS: attributes = this._attributes[namespace]; delete attributes[name] with namespace='__proto__' resolving to Object.prototype",
+      "patched_shape": "hasOwnProperty own-property filter on the namespace key",
+      "authoritative_source": "https://github.com/Raynos/min-document/issues/54",
+      "measured": "MISS: the patch guards via this._attributes.hasOwnProperty(namespace); a bare hasOwnProperty is indistinguishable from the benign duplicate-key check in the seed without control-flow polarity analysis, so DT-PP-MERGE flags both vuln and patched. A documented held-out miss -> future improvement-loop fixture."
+    },
+    {
+      "cve": "CVE-2026-33863", "package": "convict", "status": "dropped",
+      "drop_reason": "NVD has no CVE record (authoritative HTTP 200, totalResults=0, not a rate-limit); no resolvable fix commit"
+    },
+    {
+      "cve": "CVE-2025-28269", "package": "js-object-utilities", "status": "dropped",
+      "drop_reason": "NVD has no CVE record (authoritative HTTP 200, totalResults=0, not a rate-limit); no resolvable fix commit"
+    }
+  ],
+  "heldout_pinned": 3,
+  "heldout_dropped": 2,
+  "denominator_note": "Generalization denominator = 3 pinned held-out CVEs (devalue, lodash, min-document). 2 dropped for no authoritative NVD record — reported as coverage, never counted as missed."
+}

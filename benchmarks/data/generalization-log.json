@@ -1,0 +1,15 @@
+{
+  "snapshots": [
+    {
+      "label": "v1-2026-07-04",
+      "rates": [
+        {
+          "bug_class": "prototype_pollution",
+          "detector": "DT-PP-MERGE",
+          "rediscovered": 2,
+          "total": 3
+        }
+      ]
+    }
+  ]
+}
