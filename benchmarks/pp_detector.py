@@ -81,14 +81,42 @@ def _iter(node: Node):
         stack.extend(n.children)
 
 
-def _string_literal_texts(src: bytes, scope: Node):
-    for n in _iter(scope):
+def _iter_scope(scope: Node):
+    """Iterate scope's subtree but NOT into nested function bodies. A for-in var, a
+    parameter, a guard, or a null-proto object declared inside a NESTED function belongs
+    to that function's scope, not this one — letting it leak would hide a real sink (a
+    nested guard faking a guard) or fake one (a nested for-in faking derivation). This
+    is what makes analysis of a top-level (program-root) sink correct, and function
+    scopes with inner closures correct too."""
+    yield scope
+    stack = list(scope.children)
+    while stack:
+        n = stack.pop()
+        if n.type in _FUNCTION_TYPES:
+            continue  # a different scope — skip it and everything under it
+        yield n
+        stack.extend(n.children)
+
+
+def _string_literal_texts(src: bytes, node: Node):
+    for n in _iter(node):
         if n.type in ("string", "string_fragment"):
             yield _text(src, n).strip("\"'`")
 
 
 def _subtree_has_proto_name(src: bytes, node: Node) -> bool:
+    """A proto name anywhere in a (small) subtree — used on operands/receivers, descends
+    fully."""
     return any(lit in _PROTO_NAMES for lit in _string_literal_texts(src, node))
+
+
+def _scope_has_proto_name(src: bytes, scope: Node) -> bool:
+    """A proto name in the scope's OWN body (not nested functions) — the scope-local
+    counterpart for coarse (computed-key) guard checks."""
+    for n in _iter_scope(scope):
+        if n.type in ("string", "string_fragment") and _text(src, n).strip("\"'`") in _PROTO_NAMES:
+            return True
+    return False
 
 
 def _has_identifier(src: bytes, node: Node, name: str) -> bool:
@@ -115,7 +143,7 @@ def _object_guards(src: bytes, fn: Node) -> set[str]:
     a ``defineProperty(obj, 'x', ...)`` for one property does not make a later plain
     ``obj[key] = v`` safe."""
     safe: set[str] = set()
-    for n in _iter(fn):
+    for n in _iter_scope(fn):
         if n.type == "variable_declarator" and _is_create_null(src, n.child_by_field_name("value")):
             name = n.child_by_field_name("name")
             if name is not None and name.type == "identifier":
@@ -137,7 +165,7 @@ def _receiver_has_proto(src: bytes, fn: Node, recv: Node) -> bool:
     if recv.type != "identifier":
         return False
     rn = _text(src, recv)
-    for n in _iter(fn):
+    for n in _iter_scope(fn):
         if n.type == "variable_declarator":
             name, value = n.child_by_field_name("name"), n.child_by_field_name("value")
             if name is not None and value is not None and _text(src, name) == rn:
@@ -170,7 +198,7 @@ def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | 
     if obj_name is not None and obj_name in _object_guards(src, fn):
         return True
 
-    for n in _iter(fn):
+    for n in _iter_scope(fn):
         if n.type == "call_expression":
             callee = n.child_by_field_name("function")
             if callee is not None and callee.type == "member_expression":
@@ -188,10 +216,10 @@ def _key_is_guarded(src: bytes, fn: Node, key_name: str | None, obj_name: str | 
 
     if key_name is None:
         # Computed key — cannot bind to a variable; any proto-name comparison in the
-        # function is taken as the guard (matches the fix commits' added checks).
-        return _subtree_has_proto_name(src, fn)
+        # scope's OWN body is taken as the guard (matches the fix commits' added checks).
+        return _scope_has_proto_name(src, fn)
 
-    for n in _iter(fn):
+    for n in _iter_scope(fn):
         # key === '__proto__' | '__proto__' === key | key !== ... | key in {__proto__:...}
         if n.type == "binary_expression":
             left = n.child_by_field_name("left")
@@ -232,7 +260,7 @@ def _forin_loop_vars(src: bytes, fn: Node) -> set[str]:
     """Loop variables of every ``for..in`` / ``for..of`` in the function — these bind
     keys/values drawn from another (possibly attacker-controlled) object."""
     out: set[str] = set()
-    for n in _iter(fn):
+    for n in _iter_scope(fn):
         if n.type == "for_in_statement":
             left = n.child_by_field_name("left")
             if left is not None:

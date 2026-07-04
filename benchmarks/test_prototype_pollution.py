@@ -90,6 +90,10 @@ DELETE_VULN = "function u(o,name){ delete o[name]; }"
         ("function p(src,key){var dest;dest=Object.create(null);dest[key]=src[key];}", 0),
         # a top-level (non-function) sink is still a sink
         ("var k=getQ('k');destination[k]=source[k];", 1),
+        # scope isolation (agy round 2): a NESTED function's guard/for-in must not leak
+        # into the top-level scope's analysis
+        ("function g(k){if(k==='__proto__')return;} var k=getQ('k'); destination[k]=source[k];", 1),  # nested guard doesn't cover top-level sink
+        ("function u(){for(const k in obj){}} destination[k]=true;", 0),  # nested for-in doesn't derive top-level k
     ],
 )
 def test_rule_variants(src, expected):
