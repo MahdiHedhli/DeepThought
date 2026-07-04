@@ -13,9 +13,10 @@ the numbers that matter are the held-out ones.
 
 from __future__ import annotations
 
+from fractions import Fraction
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def _safe_div(n: int, d: int) -> float:
@@ -196,9 +197,25 @@ class ClassRate(BaseModel):
     rediscovered: int = Field(default=0, ge=0)
     total: int = Field(default=0, ge=0)
 
+    @model_validator(mode="after")
+    def _counts_are_possible(self) -> "ClassRate":
+        # rediscovered can never exceed total: a >total count would publish a
+        # >100% rate and (with nonzero rediscovered on zero total) silently show 0%.
+        # These feed the published metric and the merge gate, so reject at the boundary.
+        if self.rediscovered > self.total:
+            raise ValueError(
+                f"rediscovered ({self.rediscovered}) cannot exceed total ({self.total})"
+            )
+        return self
+
     @property
     def generalization(self) -> float:
         return _safe_div(self.rediscovered, self.total)
+
+    @property
+    def exact(self) -> Fraction:
+        # The UNROUNDED rate, for gate comparisons (rounding is display-only).
+        return Fraction(self.rediscovered, self.total) if self.total else Fraction(0)
 
 
 class Snapshot(BaseModel):
@@ -231,6 +248,12 @@ class Snapshot(BaseModel):
         for r in self.rates:
             if r.bug_class == bug_class:
                 return r.generalization
+        return None
+
+    def classrate_for(self, bug_class: str) -> Optional["ClassRate"]:
+        for r in self.rates:
+            if r.bug_class == bug_class:
+                return r
         return None
 
     @classmethod
@@ -271,9 +294,15 @@ class GeneralizationLog(BaseModel):
         out: list[str] = []
         candidate_classes = {r.bug_class for r in candidate.rates}
         for r in candidate.rates:
-            prev = base.rate_for(r.bug_class)
-            if prev is not None and r.generalization < prev:
-                out.append(f"{r.bug_class}: {prev:.0%} -> {r.generalization:.0%} regressed")
+            base_r = base.classrate_for(r.bug_class)
+            # Compare EXACT fractions, not the 3-decimal rounded rate: at large totals
+            # a real drop (e.g. 999/1000 -> 998/999) rounds to the same 0.999 and would
+            # slip past a rounded comparison. Round only for the display string.
+            if base_r is not None and r.exact < base_r.exact:
+                out.append(
+                    f"{r.bug_class}: {base_r.generalization:.0%} -> "
+                    f"{r.generalization:.0%} regressed"
+                )
         # A class present in the baseline but MISSING from the candidate is the
         # ultimate rate drop — coverage removed. Flag it, so accepts() cannot be
         # passed by simply omitting a class that would otherwise regress (a partial

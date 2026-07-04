@@ -162,6 +162,28 @@ def test_snapshot_rejects_duplicate_bug_classes():
         _snap("v1", [("pp", 8, 10), ("pp", 3, 10)])
 
 
+def test_regression_bar_compares_exact_rates_not_rounded():
+    # 999/1000 and 998/999 both round to 0.999, but the candidate DID regress.
+    # A rounded comparison would miss it; the exact-fraction gate must catch it.
+    log = GeneralizationLog()
+    log.append(_snap("v1", [("pp", 999, 1000)]))
+    candidate = _snap("v2", [("pp", 998, 999)])
+    assert log.regressions(candidate)          # exact 998/999 < 999/1000 -> flagged
+    assert log.accepts(candidate) is False
+
+
+def test_classrate_rejects_impossible_counts():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ClassRate(bug_class="pp", rediscovered=3, total=2)   # >100%
+    with pytest.raises(ValidationError):
+        ClassRate(bug_class="pp", rediscovered=1, total=0)   # nonzero on zero total
+    # The degenerate-but-valid 0/0 stays allowed (rate 0.0, nothing measured yet).
+    assert ClassRate(bug_class="pp", rediscovered=0, total=0).generalization == 0.0
+
+
 def test_negative_counts_are_rejected():
     import pytest
     from pydantic import ValidationError
