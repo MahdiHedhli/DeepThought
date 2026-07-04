@@ -131,3 +131,69 @@ def test_curve_and_climb():
     table = log.curve_table()
     assert "class" in table and "v1" in table and "v2" in table and "mean" in table
     assert "->" in log.climb()
+
+
+# --- review fixes: metric precision, regression-bar integrity, validation ----
+
+
+def test_f1_is_computed_from_raw_counts_not_rounded_inputs():
+    # Deriving F1 from already-rounded precision/recall compounds rounding error.
+    # tp=1,fp=0,fn=11: true F1 = 2/13 = 0.1538 -> 0.154, not 0.153.
+    assert Metrics(tp=1, fp=0, fn=11).f1 == 0.154
+    assert Metrics(tp=8, fp=2, fn=2).f1 == 0.8  # the existing exact case still holds
+
+
+def test_regression_bar_blocks_a_dropped_class():
+    # Omitting a previously tracked class from the candidate is the ultimate rate
+    # drop; accepts() must NOT pass just because the class vanished.
+    log = GeneralizationLog()
+    log.append(_snap("v1", [("pp", 8, 10), ("redos", 5, 5)]))
+    candidate = _snap("v2", [("pp", 9, 10)])  # redos dropped entirely
+    violations = log.regressions(candidate)
+    assert violations and "redos" in violations[0] and "dropped" in violations[0]
+    assert log.accepts(candidate) is False
+
+
+def test_snapshot_rejects_duplicate_bug_classes():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _snap("v1", [("pp", 8, 10), ("pp", 3, 10)])
+
+
+def test_negative_counts_are_rejected():
+    import pytest
+    from pydantic import ValidationError
+
+    for kwargs in ({"tp": -1}, {"fn": -3}):
+        with pytest.raises(ValidationError):
+            Metrics(**kwargs)
+    with pytest.raises(ValidationError):
+        Tokens(input=-1)
+
+
+def test_md_table_escapes_pipes_and_newlines():
+    # A stray pipe or newline in a cell must not corrupt the table into extra
+    # columns/rows.
+    b = Benchmark(
+        rounds=[
+            RoundRecord(
+                cve="CVE-2025-0001",
+                package="pkg",
+                cwe="CWE-1",
+                bug_class="proto\npollution",  # newline in a rendered cell
+                discovery="static_ast",
+                tier="deterministic",
+                language="js",
+                fixture=Metrics(tp=1),
+                status="redisc|overed",        # pipe in a rendered cell
+            )
+        ]
+    )
+    table = b.cost_table()
+    # header + separator + exactly ONE data row: a leaked newline would split the
+    # row into two lines (4 total). Flattening keeps it at 3.
+    assert len(table.splitlines()) == 3
+    assert "proto pollution" in table  # the newline became a space, one row
+    assert "\\|" in table              # the literal pipe was escaped, not structural

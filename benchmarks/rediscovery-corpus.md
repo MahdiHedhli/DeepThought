@@ -39,10 +39,31 @@ CVEs. It is the SIBLING HUNT exemplar: one root pattern, several CVEs.
 - **ReDoS (9).** Detect a regex with nested or overlapping quantifiers reachable from untrusted input, using a complexity checker. Verify by measuring superlinear match time on a crafted input under a wall bound.
 - **Command injection (10).** Taint from an untrusted value to a shell execution sink, especially `shell: true` or string-built commands. Verify with a benign marker command in the sandbox, never a real payload.
 
-## Held-out generalization sets (the real test)
+## Reproducibility contract (pin or drop)
+
+The held-out numbers must be reproducible, so ground truth is pinned, never
+implied. When a class is built, every seed and held-out entry below is resolved
+against an authoritative source (NVD/GHSA or the project's own advisory/commit)
+and pinned in that class's fixture manifest to a **repo URL + vulnerable commit
+SHA + patched commit SHA + target path**. The detector runs over the real trees at
+those SHAs.
+
+- An entry that **cannot** be resolved to fetchable ground truth at build time is
+  **dropped from the denominator** with a recorded reason (in the RoundRecord and
+  the manifest). It is never counted as a `missed` and never replaced by a
+  hand-written sample — a dropped entry lowers *coverage*, reported honestly, not
+  the generalization *rate*.
+- The lists below are therefore *candidates*. The manifest, with its pinned SHAs,
+  is the reproducible source of truth; a reader re-fetches from the SHAs and re-runs.
+- Sandbox seeds/held-out are verified at sandbox-phase entry (they also need a
+  buildable target + a fuzz harness); an unresolvable sandbox seed is swapped for a
+  resolvable public equivalent of the same class before that class is built.
+
+## Held-out generalization sets (candidate lists — pinned per class at build)
 
 For each class, run the finished detector against these CVEs, which were not used
-to build it. Generalization rate is rediscovered over total.
+to build it. Generalization rate is rediscovered over (rediscovered + missed),
+counting only entries pinned to real ground truth.
 
 - **Prototype pollution:** devalue CVE-2025-57820, lodash CVE-2025-13465, convict CVE-2026-33863, min-document CVE-2025-57352, js-object-utilities CVE-2025-28269.
 - **ReDoS:** ajv CVE-2025-69873, valibot CVE-2025-66020, picomatch CVE-2026-33671, path-to-regexp CVE-2024-52798, fedify CVE-2025-68475, octokit/endpoint GHSA-x4c5-c7rf-jjgv.
@@ -51,7 +72,8 @@ to build it. Generalization rate is rediscovered over total.
 - **Use-after-free:** HDF5 heap-UAF in H5FL (issue 5574, issue 5376), c-ares SOA double-free family.
 - **Path traversal:** the tarfile-filter-bypass cluster (CVE-2025-4138, CVE-2025-4330, CVE-2025-4435) and CVE-2007-4559 as the anchor.
 - **SSRF:** LangChain CVE-2023-46229, Apache HTTP Server CVE-2024-40898.
-- **XXE, deserialization:** source additional recent CVEs of the class at run time. These classes are common, so a held-out set of three or more each is easy to assemble.
+- **XXE:** pin three or more public CVEs of the class at build time (e.g. Java/XML-parser XXE advisories), each with vuln/patched SHAs in the manifest — not chosen ad hoc at run time.
+- **Deserialization:** pin three or more public CVEs of the class at build time (e.g. JS/Java unsafe-deserialization advisories), each with vuln/patched SHAs in the manifest — not chosen ad hoc at run time.
 
 ## Acceptance
 

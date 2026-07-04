@@ -15,17 +15,24 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _safe_div(n: int, d: int) -> float:
     return round(n / d, 3) if d else 0.0
 
 
+def _cell(value: str) -> str:
+    """A markdown table cell. The values are our own accounting data, but a stray
+    pipe or newline would corrupt the whole table into gibberish, so escape pipes
+    and flatten newlines — a row stays exactly one row."""
+    return str(value).replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+
 def _md_table(headers: list[str], rows: list[list[str]]) -> str:
-    line = "| " + " | ".join(headers) + " |"
+    line = "| " + " | ".join(_cell(h) for h in headers) + " |"
     sep = "| " + " | ".join("---" for _ in headers) + " |"
-    body = ["| " + " | ".join(r) + " |" for r in rows]
+    body = ["| " + " | ".join(_cell(c) for c in r) + " |" for r in rows]
     return "\n".join([line, sep, *body])
 
 
@@ -34,9 +41,9 @@ class Metrics(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    tp: int = 0  # vulnerable sinks correctly flagged
-    fp: int = 0  # safe code wrongly flagged
-    fn: int = 0  # vulnerable sinks missed
+    tp: int = Field(default=0, ge=0)  # vulnerable sinks correctly flagged
+    fp: int = Field(default=0, ge=0)  # safe code wrongly flagged
+    fn: int = Field(default=0, ge=0)  # vulnerable sinks missed
 
     @property
     def precision(self) -> float:
@@ -48,15 +55,17 @@ class Metrics(BaseModel):
 
     @property
     def f1(self) -> float:
-        p, r = self.precision, self.recall
-        return round(2 * p * r / (p + r), 3) if (p + r) else 0.0
+        # From RAW counts, not the already-rounded precision/recall — computing F1
+        # from rounded inputs compounds the rounding error (e.g. tp=1,fp=0,fn=11
+        # gives 0.153 via rounded recall vs the true 0.154). F1 = 2tp/(2tp+fp+fn).
+        return _safe_div(2 * self.tp, 2 * self.tp + self.fp + self.fn)
 
 
 class Tokens(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    input: int = 0
-    output: int = 0
+    input: int = Field(default=0, ge=0)
+    output: int = Field(default=0, ge=0)
 
     @property
     def total(self) -> int:
@@ -76,12 +85,12 @@ class RoundRecord(BaseModel):
     tier: str  # deterministic or sandbox
     language: str
 
-    wall_seconds: int = 0
+    wall_seconds: int = Field(default=0, ge=0)
     tokens: Tokens = Field(default_factory=Tokens)
-    review_rounds: int = 0
-    findings_fixed: int = 0
-    loc_added: int = 0
-    loc_removed: int = 0
+    review_rounds: int = Field(default=0, ge=0)
+    findings_fixed: int = Field(default=0, ge=0)
+    loc_added: int = Field(default=0, ge=0)
+    loc_removed: int = Field(default=0, ge=0)
 
     fixture: Metrics = Field(default_factory=Metrics)  # precision/recall on the seed fixture
     skill_section: str = ""  # the SKILL.md heading this round contributed
@@ -112,8 +121,8 @@ class HeldOutResult(BaseModel):
     bug_class: str
     detector: str  # the SKILL.md rule id
     heldout_cves: list[str] = Field(default_factory=list)
-    rediscovered: int = 0
-    missed: int = 0
+    rediscovered: int = Field(default=0, ge=0)
+    missed: int = Field(default=0, ge=0)
     missed_cves: list[str] = Field(default_factory=list)  # each missed CVE becomes a new fixture
     metrics: Metrics = Field(default_factory=Metrics)  # precision/recall across held-out packages
 
@@ -184,8 +193,8 @@ class ClassRate(BaseModel):
 
     bug_class: str
     detector: str = ""
-    rediscovered: int = 0
-    total: int = 0
+    rediscovered: int = Field(default=0, ge=0)
+    total: int = Field(default=0, ge=0)
 
     @property
     def generalization(self) -> float:
@@ -199,6 +208,18 @@ class Snapshot(BaseModel):
 
     label: str  # a version tag, date, or commit
     rates: list[ClassRate] = Field(default_factory=list)
+
+    @field_validator("rates")
+    @classmethod
+    def _unique_bug_classes(cls, v: list[ClassRate]) -> list[ClassRate]:
+        # A duplicate bug_class would double-count in mean() and hide a drop in
+        # regressions() (rate_for returns only the first match), silently defeating
+        # the regression bar. Reject duplicates at the model boundary.
+        names = [r.bug_class for r in v]
+        if len(names) != len(set(names)):
+            dupes = sorted({c for c in names if names.count(c) > 1})
+            raise ValueError(f"duplicate bug_class in snapshot rates: {dupes}")
+        return v
 
     @property
     def mean(self) -> float:
@@ -248,10 +269,18 @@ class GeneralizationLog(BaseModel):
         if base is None:
             return []
         out: list[str] = []
+        candidate_classes = {r.bug_class for r in candidate.rates}
         for r in candidate.rates:
             prev = base.rate_for(r.bug_class)
             if prev is not None and r.generalization < prev:
                 out.append(f"{r.bug_class}: {prev:.0%} -> {r.generalization:.0%} regressed")
+        # A class present in the baseline but MISSING from the candidate is the
+        # ultimate rate drop — coverage removed. Flag it, so accepts() cannot be
+        # passed by simply omitting a class that would otherwise regress (a partial
+        # re-measure must re-assert every prior class, not silently drop one).
+        for r in base.rates:
+            if r.bug_class not in candidate_classes:
+                out.append(f"{r.bug_class}: {r.generalization:.0%} -> dropped (class missing)")
         return out
 
     def accepts(self, candidate: Snapshot) -> bool:
