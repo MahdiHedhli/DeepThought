@@ -142,4 +142,4 @@ Each build round appends one section here using this template:
   allowlist). **Known miss:** langchain's `prevent_outside` same-domain *bool flag* is
   not a validation call, so its patched sink still flags — the next improvement-loop
   fixture. A non-literal URL is treated as potentially tainted (taint-lite), so
-  file-level precision on hardcoded-config requests is a documented limitation.
+  file-level precision on hardcoded-config requests is a documented limitation. A syntactic taint-lite rule handles module/import aliasing, request()/stream() arg positions, client-variable and safe-wrapper naming, order-aware and URL-tied guards (assignment/for-loop alias chains url->host->ip, IP-range and hostname-allowlist checks); it does NOT model control flow, so ternary-conditional guards, log-only comparisons, or post-sink derivations are documented, not chased.

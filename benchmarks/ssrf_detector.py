@@ -23,6 +23,15 @@ An SSRF fix takes two shapes, both handled:
 Guard analysis is scope-local (the enclosing function, or the module for a top-level
 sink) and does not descend into nested functions, so a guard in a sibling helper does
 not mask an unguarded request.
+
+Known limitations (a syntactic taint-lite rule, not full dataflow): guard recognition is
+position-ordered and syntactic, so a guard reached only through control flow the rule
+does not model — a ternary-conditional guard (``get(url) if check(url) else None``), a
+hostname comparison that merely logs rather than blocks, or a URL derivation that appears
+textually after the sink — may be mis-judged. Catching those needs control-flow/dataflow
+analysis beyond this class's scope; they are documented, not chased. A non-literal URL is
+treated as potentially tainted, so file-level precision on hardcoded-config requests is
+low by design.
 """
 
 from __future__ import annotations
@@ -153,7 +162,7 @@ def _is_literal_url(node: ast.AST | None) -> bool:
     return False
 
 
-def _is_request_sink(call: ast.Call, client_vars: set[str], imported: set[str]) -> bool:
+def _is_request_sink(call: ast.Call, client_vars: set[str], imported: dict, mod_aliases: dict) -> bool:
     base, attr = _name_of(call.func)
     if attr == "urlopen":
         return True  # urllib.request.urlopen / urlopen
@@ -166,17 +175,18 @@ def _is_request_sink(call: ast.Call, client_vars: set[str], imported: set[str]) 
                 str(call.args[0].value).upper() in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"):
             return True
     if attr in _HTTP_METHODS:
-        bl = base.lower()
-        # The SAFE WRAPPER an SSRF fix substitutes in (ssrf_proxy.get) is never a sink —
-        # matched on underscore-separated WORD parts, so a real client named
-        # ``unsafe_client`` (whose 'unsafe' merely contains 'safe') is NOT excluded.
-        parts = bl.split("_")
+        # A CONFIRMED request module (possibly via ``import requests as req``) or a client
+        # VARIABLE is a sink regardless of its name — a Session named ``safe_client`` is
+        # still a client. Check this BEFORE the name-based safe-wrapper exclusion.
+        if mod_aliases.get(base, base) in _REQUEST_MODULES or base in client_vars:
+            return True
+        # A name-based SAFE WRAPPER (the guarded replacement, e.g. ssrf_proxy.get) is not a
+        # sink — matched on underscore WORD parts, so ``unsafe_client`` is NOT excluded.
+        parts = base.lower().split("_")
         if any(p.startswith(s) for p in parts for s in _SAFE_WRAPPER_SIGNALS):
             return False
-        if base in _REQUEST_MODULES or base in client_vars:
-            return True
         # a base whose NAME marks it an HTTP client (client/session/http/conn/pool)
-        if any(c in bl for c in _CLIENT_NAME_SIGNALS):
+        if any(c in base.lower() for c in _CLIENT_NAME_SIGNALS):
             return True
     return False
 
@@ -290,12 +300,28 @@ def _has_ip_context(scope: ast.AST) -> bool:
     ``ip_network``, ``getaddrinfo``, ``gethostbyname``. An ``.is_global``/``.is_private``
     attribute is an IP RANGE check only in this context; otherwise ``user.is_global`` is
     just a config flag, not an SSRF guard."""
+    ip_names = ("ipaddress", "ip_address", "ip_network", "getaddrinfo", "gethostbyname",
+                "IPv4Address", "IPv6Address")
     for node in _iter_scope(scope):
-        if isinstance(node, ast.Attribute) and node.attr in ("ip_address", "ip_network", "getaddrinfo", "gethostbyname"):
+        if isinstance(node, ast.Attribute) and node.attr in ip_names:
             return True
-        if isinstance(node, ast.Name) and node.id in ("ipaddress", "ip_address", "ip_network", "getaddrinfo", "gethostbyname"):
+        if isinstance(node, ast.Name) and node.id in ip_names:
             return True
     return False
+
+
+def _module_aliases(tree: ast.AST) -> dict:
+    """Local alias -> request module for ``import <module> as <alias>`` — ``import
+    requests as req`` -> {'req':'requests'}, ``import httpx`` -> {'httpx':'httpx'} — so
+    ``req.get(url)`` is matched as a request-module sink."""
+    aliases: dict = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in ("requests", "httpx", "aiohttp", "urllib3"):
+                    aliases[alias.asname or alias.name] = root
+    return aliases
 
 
 def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
@@ -308,6 +334,7 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
     tree = ast.parse(source)
     parent = _parents(tree)
     imported = _imported_request_names(tree)
+    mod_aliases = _module_aliases(tree)
     results: list[dict] = []
     clientvars_cache: dict[int, set] = {}
 
@@ -316,12 +343,14 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
             continue
         scope = _enclosing_scope(node, parent)
         cvars = clientvars_cache.setdefault(id(scope), _client_vars(scope))
-        if not _is_request_sink(node, cvars, imported):
+        if not _is_request_sink(node, cvars, imported, mod_aliases):
             continue
         base, attr = _name_of(node.func)
-        # (verb/method, url) 2-arg signature: an attribute .stream/.request, or a bare
-        # call to an imported function whose ORIGINAL name is `request`.
-        request_style = attr in ("stream", "request") or (base == "" and imported.get(attr) == "request")
+        # (verb/method, url) 2-arg signature: an ATTRIBUTE .stream/.request call, or a
+        # bare call to an imported function whose ORIGINAL name is `request` (so an
+        # `import urlopen as request` — original urlopen — keeps the URL 1st).
+        request_style = (base != "" and attr in ("stream", "request")) or \
+            (base == "" and imported.get(attr) == "request")
         url = _url_arg(node, request_style)
         if url is None or _is_literal_url(url):
             continue  # hardcoded / no URL — not an attacker-controlled request target

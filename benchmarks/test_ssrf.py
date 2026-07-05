@@ -97,6 +97,16 @@ def test_fixture_flags_the_vulnerable_sink_and_skips_both_patched():
         ("import requests, ipaddress\ndef f(url,ip):\n    if not ipaddress.ip_address(ip).is_global: raise ValueError()\n    return requests.get(url)", 1),
         # a real client whose name merely CONTAINS 'safe' (unsafe_client) is still a sink
         ("def f(unsafe_client,url):\n    return unsafe_client.get(url)", 1),
+        # --- review regressions (agy + codex round 3) ---
+        # a module-aliased import (import requests as req) is resolved to a sink
+        ("import requests as req\ndef f(url):\n    return req.get(url)", 1),
+        ("import httpx as hx\ndef f(url):\n    return hx.get(url)", 1),
+        # a confirmed client VARIABLE named safe_client is still a sink
+        ("import requests\ndef f(url):\n    safe_client = requests.Session()\n    return safe_client.get(url)", 1),
+        # urlopen aliased as `request` keeps the URL 1st (not the request() 2-arg shape)
+        ("from urllib.request import urlopen as request\ndef f(url):\n    return request(url, 'postdata')", 1),
+        # IPv4Address(...).is_global is recognised as IP context (a real guard)
+        ("from ipaddress import IPv4Address\nimport requests\ndef f(url):\n    if IPv4Address(url).is_global:\n        return requests.get(url)", 0),
     ],
 )
 def test_rule_variants(src, expected):
