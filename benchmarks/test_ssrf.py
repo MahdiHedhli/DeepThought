@@ -88,8 +88,15 @@ def test_fixture_flags_the_vulnerable_sink_and_skips_both_patched():
         ("from requests import request as req\ndef f(url):\n    return req('GET', url)", 1),
         # `.is_global` on a NON-IP object (a config flag) is not an IP range check
         ("import requests\ndef f(url,user):\n    if user.is_global: pass\n    return requests.get(url)", 1),
-        # a real IP range check (with ipaddress context) IS still a guard
-        ("import requests, ipaddress\ndef f(url,ip):\n    if not ipaddress.ip_address(ip).is_global: raise ValueError()\n    return requests.get(url)", 0),
+        # a real IP range check (with ipaddress context) on the URL's own IP IS a guard
+        ("import requests, ipaddress\nfrom urllib.parse import urlparse\ndef f(url):\n    ip = ipaddress.ip_address(urlparse(url).hostname)\n    if not ip.is_global: raise ValueError()\n    return requests.get(url)", 0),
+        # --- review regressions (codex round 2) ---
+        # a guard AFTER the sink does not protect it
+        ("import requests\ndef f(url):\n    r = requests.get(url)\n    check_public_url(url)\n    return r", 1),
+        # a range check on an UNRELATED ip does not guard the fetched url
+        ("import requests, ipaddress\ndef f(url,ip):\n    if not ipaddress.ip_address(ip).is_global: raise ValueError()\n    return requests.get(url)", 1),
+        # a real client whose name merely CONTAINS 'safe' (unsafe_client) is still a sink
+        ("def f(unsafe_client,url):\n    return unsafe_client.get(url)", 1),
     ],
 )
 def test_rule_variants(src, expected):

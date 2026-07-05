@@ -167,8 +167,11 @@ def _is_request_sink(call: ast.Call, client_vars: set[str], imported: set[str]) 
             return True
     if attr in _HTTP_METHODS:
         bl = base.lower()
-        # The SAFE WRAPPER an SSRF fix substitutes in (ssrf_proxy.get) is never a sink.
-        if any(s in bl for s in _SAFE_WRAPPER_SIGNALS):
+        # The SAFE WRAPPER an SSRF fix substitutes in (ssrf_proxy.get) is never a sink —
+        # matched on underscore-separated WORD parts, so a real client named
+        # ``unsafe_client`` (whose 'unsafe' merely contains 'safe') is NOT excluded.
+        parts = bl.split("_")
+        if any(p.startswith(s) for p in parts for s in _SAFE_WRAPPER_SIGNALS):
             return False
         if base in _REQUEST_MODULES or base in client_vars:
             return True
@@ -201,37 +204,47 @@ def _call_idents(call: ast.Call) -> set[str]:
     return out
 
 
+def _link(rel: dict, target: str, others: set[str]) -> None:
+    for b in others:
+        rel.setdefault(target, set()).add(b)
+        rel.setdefault(b, set()).add(target)
+
+
 def _related_idents(scope: ast.AST) -> dict:
-    """Undirected relation between identifiers linked by an assignment — for
-    ``url = url_spec.geturl()`` (or ``url_spec = urlparse(url)``) the target and each
-    identifier in the value are related BOTH ways, so a guard on either name covers a
-    request on the other (the same logical URL). Two genuinely different variables never
-    linked by an assignment stay unrelated."""
+    """Undirected relation between identifiers linked by an assignment or a for-loop —
+    ``url = url_spec.geturl()``, ``host = urlparse(url).hostname``,
+    ``for info in getaddrinfo(host, None)`` all relate their names both ways, so a guard
+    on any link in the URL->host->IP chain covers a request on another. Two variables
+    never linked stay unrelated (validating a DIFFERENT url does not count)."""
     rel: dict = {}
     for node in _iter_scope(scope):
         if isinstance(node, ast.Assign):
             values = _idents(node.value)
             for tgt in node.targets:
                 if isinstance(tgt, ast.Name):
-                    for b in values:
-                        rel.setdefault(tgt.id, set()).add(b)
-                        rel.setdefault(b, set()).add(tgt.id)
+                    _link(rel, tgt.id, values)
+        elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name):
+            _link(rel, node.target.id, _idents(node.iter))
     return rel
 
 
-def _scope_guards_url(scope: ast.AST, url_node: ast.AST) -> bool:
-    """Whether the scope VALIDATES *this sink's* URL before the request. Tied to the
-    sink's URL (expanded across assignment-linked names) so validating a DIFFERENT url
-    does not suppress the sink. Three guard shapes:
-      1. an IP RANGE check (``ip.is_global``/``is_private``/...) — the actual SSRF test;
-      2. a named validation call (``check_public_url``/``is_safe_url``) referencing the
-         sink's URL (or an assignment-linked alias of it);
-      3. a hostname/netloc COMPARISON or allowlist membership on the sink's URL
-         (``urlparse(url).hostname not in ALLOW``) — but NOT a bare parse/log of it.
+def _pos(node: ast.AST) -> tuple:
+    return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+
+def _scope_guards_url(scope: ast.AST, url_node: ast.AST, sink: ast.Call) -> bool:
+    """Whether the scope VALIDATES *this sink's* URL, BEFORE the request. A guard is tied
+    to the sink's URL (expanded across assignment/for-loop-linked names) and must PRECEDE
+    the sink — a check after the request, or one on a genuinely different value, is no
+    guard. Three guard shapes:
+      1. an IP RANGE check (``ip.is_global``/``is_private``/...) whose checked object is
+         URL-derived, in a scope that resolves an IP;
+      2. a named validation call (``check_public_url``/``is_safe_url``) on the sink's URL;
+      3. a hostname/netloc COMPARISON or allowlist on the sink's URL — not a bare parse.
     """
     rel = _related_idents(scope)
     relevant = set(_idents(url_node))
-    for _ in range(3):  # bounded closure over assignment-linked aliases
+    for _ in range(4):  # bounded closure over linked aliases (url -> host -> ip)
         grown = set(relevant)
         for v in relevant:
             grown |= rel.get(v, set())
@@ -239,11 +252,13 @@ def _scope_guards_url(scope: ast.AST, url_node: ast.AST) -> bool:
             break
         relevant = grown
     ip_context = _has_ip_context(scope)
+    sink_pos = _pos(sink)
     for node in _iter_scope(scope):
-        # a range check is a guard ONLY where an IP is actually resolved/parsed — else
-        # ``user.is_global`` is a config flag, not an SSRF check.
-        if ip_context and isinstance(node, ast.Attribute) and node.attr in _RANGE_CHECKS:
-            return True
+        if _pos(node) >= sink_pos:
+            continue  # a guard must PRECEDE the sink to protect it
+        if (ip_context and isinstance(node, ast.Attribute) and node.attr in _RANGE_CHECKS
+                and (relevant & _idents(node.value))):
+            return True  # a range check on a URL-derived IP
         if isinstance(node, ast.Call) and _looks_like_guard_call(node.func):
             if relevant & _call_idents(node):
                 return True
@@ -310,7 +325,7 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
         url = _url_arg(node, request_style)
         if url is None or _is_literal_url(url):
             continue  # hardcoded / no URL — not an attacker-controlled request target
-        if _scope_guards_url(scope, url):
+        if _scope_guards_url(scope, url, node):
             continue  # patched shape — the scope validates THIS URL before the request
         results.append(_result(node, uri, base, attr, cve))
 
