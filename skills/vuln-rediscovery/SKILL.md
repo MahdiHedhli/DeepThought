@@ -108,3 +108,38 @@ Each build round appends one section here using this template:
   indistinguishable from a benign check without control-flow analysis — the next
   improvement-loop fixture. Precision is high at the sink but lower across a large file
   (a static heuristic flags other dynamic writes); refining precision is future work.
+
+### SSRF (CWE-918)
+
+- **When to use:** hunting a Python target that fetches a URL/host derived from
+  untrusted input — document/media loaders, webhook/avatar fetchers, LLM URL loaders,
+  proxy endpoints. The shape: an outbound-request call whose URL can be attacker-chosen
+  (an internal service or the cloud metadata endpoint).
+- **Detection:** static taint-lite (`benchmarks/ssrf_detector.py`, Python `ast`). Flags
+  a call to an outbound-request **sink** (`requests`/`httpx`/`aiohttp`/`urllib`/`urllib3`,
+  incl. `.stream("GET", url)` and client-variable methods) whose **URL argument is
+  non-literal** when the enclosing **scope** applies no SSRF guard. Scope-local, so a
+  guard in a sibling helper does not mask an unguarded request.
+- **Rule id:** `DT-SSRF-TAINT`, emits SARIF 2.1.0 into the shipped
+  `deepthought.ingest.sarif`.
+- **Verification:** static (deterministic tier) — discriminate vulnerable from patched
+  on the fixture and rediscover through NEW PROJECT → MAP → DISCOVER → `check`. No
+  execution.
+- **OSV / disclosure shape:** severity basis `permissive_oss`; emits **CWE-918** and,
+  for a known target, the CVE as an informational **alias** only.
+- **Fixtures:** seed **dify CVE-2025-0184** (raw `requests.get(url)` → `ssrf_proxy.get`);
+  held-out (real, pinned by SHA) gradio CVE-2024-4325 (`httpx` + `check_public_url`),
+  pydantic-ai CVE-2026-25580 (`httpx` + `safe_download`), lmdeploy CVE-2026-33626
+  (`requests` + `_is_safe_url`/`ipaddress.is_global`), langchain CVE-2023-46229
+  (`requests`/`aiohttp` + same-domain). **Seed swapped** from urllib3 CVE-2025-50181
+  (authoritatively CWE-601, not SSRF).
+- **Held-out generalization:** **3/4 (75%)** — dify seed + gradio + pydantic-ai +
+  lmdeploy rediscovered; langchain missed (logged `v2-2026-07-05`; skill mean 70.9%).
+- **Notes.** Two SSRF-fix shapes handled: **sink substitution** (the raw sink replaced
+  by a safe wrapper like `ssrf_proxy.get`/`safe_download`, recognized by a safe-wrapper
+  name so it is never a sink) and **guard added** (a validation of the URL/host —
+  `check_public_url`, an `ipaddress.is_global` / `getaddrinfo` check, a scheme/netloc
+  allowlist). **Known miss:** langchain's `prevent_outside` same-domain *bool flag* is
+  not a validation call, so its patched sink still flags — the next improvement-loop
+  fixture. A non-literal URL is treated as potentially tainted (taint-lite), so
+  file-level precision on hardcoded-config requests is a documented limitation. A syntactic taint-lite rule handles module/import aliasing, request()/stream() arg positions, client-variable and safe-wrapper naming, order-aware and URL-tied guards (assignment/for-loop alias chains url->host->ip, IP-range and hostname-allowlist checks); it does NOT model control flow, so ternary-conditional guards, log-only comparisons, or post-sink derivations are documented, not chased.
