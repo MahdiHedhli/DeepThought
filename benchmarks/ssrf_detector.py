@@ -56,7 +56,13 @@ _GUARD_VERBS = ("check", "validate", "verify", "ensure", "assert", "guard",
                 "sanitize", "is_", "allow", "block", "filter", "safe", "restrict")
 _GUARD_NOUNS = ("url", "host", "ip", "ssrf", "public", "private", "global",
                 "internal", "address", "domain", "netloc", "redirect", "outside")
-_IPADDR_NAMES = frozenset({"ip_address", "ip_network", "getaddrinfo", "gethostbyname"})
+# The actual VALIDATION step of an SSRF guard — an IP RANGE check. Merely parsing a URL
+# (.netloc/.hostname) or instantiating an IP (ipaddress.ip_address) is NOT a guard; the
+# guard is testing the resolved IP's range (is_global/is_private/...).
+_RANGE_CHECKS = frozenset(
+    {"is_global", "is_private", "is_loopback", "is_reserved", "is_link_local",
+     "is_multicast", "is_unspecified"}
+)
 
 
 def _parents(tree: ast.AST) -> dict:
@@ -126,12 +132,13 @@ def _client_vars(scope: ast.AST) -> set[str]:
 
 
 def _url_arg(call: ast.Call, attr: str) -> ast.AST | None:
-    """The URL argument of a request call: the 2nd positional for ``.stream(verb, url)``,
-    the ``url=`` kwarg if present, else the 1st positional."""
+    """The URL argument of a request call: the 2nd positional for the
+    ``(verb/method, url)`` signatures ``.stream("GET", url)`` and
+    ``.request("GET", url)``, the ``url=`` kwarg if present, else the 1st positional."""
     for kw in call.keywords:
         if kw.arg == "url":
             return kw.value
-    if attr == "stream" and len(call.args) >= 2:
+    if attr in ("stream", "request") and len(call.args) >= 2:
         return call.args[1]
     return call.args[0] if call.args else None
 
@@ -146,10 +153,13 @@ def _is_literal_url(node: ast.AST | None) -> bool:
     return False
 
 
-def _is_request_sink(call: ast.Call, client_vars: set[str]) -> bool:
+def _is_request_sink(call: ast.Call, client_vars: set[str], imported: set[str]) -> bool:
     base, attr = _name_of(call.func)
     if attr == "urlopen":
         return True  # urllib.request.urlopen / urlopen
+    # a bare call to a directly-imported request function: from requests import get -> get(url)
+    if base == "" and attr in imported:
+        return True
     if attr == "stream":
         # httpx .stream("GET", url, ...) — first arg an HTTP verb literal
         if call.args and isinstance(call.args[0], ast.Constant) and \
@@ -169,28 +179,91 @@ def _is_request_sink(call: ast.Call, client_vars: set[str]) -> bool:
 
 
 def _looks_like_guard_call(func: ast.AST) -> bool:
+    """A named validation call — ``check_public_url``, ``validate_host``, ``is_safe_url``
+    — carrying both a guard verb (check/validate/is_/...) and a guard noun (url/host/ip/
+    ssrf/...). Merely parsing/resolving (ip_address, getaddrinfo, urlparse) is NOT a guard
+    on its own; the range-check is."""
     base, attr = _name_of(func)
     name = f"{base}_{attr}".lower()
-    if any(n in name for n in _IPADDR_NAMES):
-        return True
-    if attr in ("is_global", "is_private", "is_loopback", "is_reserved", "is_link_local"):
-        return True
-    has_verb = any(v in name for v in _GUARD_VERBS)
-    has_noun = any(n in name for n in _GUARD_NOUNS)
-    return has_verb and has_noun
+    return any(v in name for v in _GUARD_VERBS) and any(n in name for n in _GUARD_NOUNS)
 
 
-def _scope_has_ssrf_guard(scope: ast.AST) -> bool:
-    """Whether the scope validates the URL/host before the request: a validation-style
-    call (``check_public_url``, ``validate_host``, ``is_global`` ...), ``ipaddress`` /
-    ``getaddrinfo`` use, or a same-domain/allowlist netloc check via ``urlparse``."""
+def _idents(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _call_idents(call: ast.Call) -> set[str]:
+    out: set[str] = set()
+    for a in call.args:
+        out |= _idents(a)
+    for kw in call.keywords:
+        out |= _idents(kw.value)
+    return out
+
+
+def _related_idents(scope: ast.AST) -> dict:
+    """Undirected relation between identifiers linked by an assignment — for
+    ``url = url_spec.geturl()`` (or ``url_spec = urlparse(url)``) the target and each
+    identifier in the value are related BOTH ways, so a guard on either name covers a
+    request on the other (the same logical URL). Two genuinely different variables never
+    linked by an assignment stay unrelated."""
+    rel: dict = {}
     for node in _iter_scope(scope):
+        if isinstance(node, ast.Assign):
+            values = _idents(node.value)
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name):
+                    for b in values:
+                        rel.setdefault(tgt.id, set()).add(b)
+                        rel.setdefault(b, set()).add(tgt.id)
+    return rel
+
+
+def _scope_guards_url(scope: ast.AST, url_node: ast.AST) -> bool:
+    """Whether the scope VALIDATES *this sink's* URL before the request. Tied to the
+    sink's URL (expanded across assignment-linked names) so validating a DIFFERENT url
+    does not suppress the sink. Three guard shapes:
+      1. an IP RANGE check (``ip.is_global``/``is_private``/...) — the actual SSRF test;
+      2. a named validation call (``check_public_url``/``is_safe_url``) referencing the
+         sink's URL (or an assignment-linked alias of it);
+      3. a hostname/netloc COMPARISON or allowlist membership on the sink's URL
+         (``urlparse(url).hostname not in ALLOW``) — but NOT a bare parse/log of it.
+    """
+    rel = _related_idents(scope)
+    relevant = set(_idents(url_node))
+    for _ in range(3):  # bounded closure over assignment-linked aliases
+        grown = set(relevant)
+        for v in relevant:
+            grown |= rel.get(v, set())
+        if grown == relevant:
+            break
+        relevant = grown
+    for node in _iter_scope(scope):
+        if isinstance(node, ast.Attribute) and node.attr in _RANGE_CHECKS:
+            return True
         if isinstance(node, ast.Call) and _looks_like_guard_call(node.func):
-            return True
-        # urlparse(...).netloc compared/checked -> a host allowlist / same-domain guard
-        if isinstance(node, ast.Attribute) and node.attr in ("netloc", "hostname"):
-            return True
+            if relevant & _call_idents(node):
+                return True
+        if isinstance(node, ast.Compare):
+            attrs = {a.attr for a in ast.walk(node) if isinstance(a, ast.Attribute)}
+            if ({"hostname", "netloc"} & attrs) and (relevant & _idents(node)):
+                return True
     return False
+
+
+def _imported_request_names(tree: ast.AST) -> set[str]:
+    """Local names bound to a request function by a direct import — ``from requests import
+    get`` / ``from urllib.request import urlopen as fetch`` — so a bare ``get(url)`` /
+    ``fetch(url)`` call is recognised as a sink."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".")[0]
+            if root in ("requests", "httpx", "aiohttp", "urllib", "urllib3"):
+                for alias in node.names:
+                    if alias.name in _HTTP_METHODS or alias.name in ("urlopen", "request"):
+                        names.add(alias.asname or alias.name)
+    return names
 
 
 def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
@@ -202,8 +275,8 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
     """
     tree = ast.parse(source)
     parent = _parents(tree)
+    imported = _imported_request_names(tree)
     results: list[dict] = []
-    guard_cache: dict[int, bool] = {}
     clientvars_cache: dict[int, set] = {}
 
     for node in ast.walk(tree):
@@ -211,15 +284,14 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
             continue
         scope = _enclosing_scope(node, parent)
         cvars = clientvars_cache.setdefault(id(scope), _client_vars(scope))
-        if not _is_request_sink(node, cvars):
+        if not _is_request_sink(node, cvars, imported):
             continue
         base, attr = _name_of(node.func)
         url = _url_arg(node, attr)
         if url is None or _is_literal_url(url):
             continue  # hardcoded / no URL — not an attacker-controlled request target
-        guarded = guard_cache.setdefault(id(scope), _scope_has_ssrf_guard(scope))
-        if guarded:
-            continue  # patched shape — the scope validates the URL/host before the request
+        if _scope_guards_url(scope, url):
+            continue  # patched shape — the scope validates THIS URL before the request
         results.append(_result(node, uri, base, attr, cve))
 
     return results

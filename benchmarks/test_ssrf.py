@@ -69,6 +69,20 @@ def test_fixture_flags_the_vulnerable_sink_and_skips_both_patched():
         ("def f(cache,key):\n    return cache.get(key)", 0),                                        # non-client .get
         # scope isolation: a guard in a SIBLING helper must not cover this sink
         ("import requests\ndef helper(u):\n    check_url(u)\n\ndef f(url):\n    return requests.get(url)", 1),
+        # --- review regressions (agy + codex adversarial PoCs) ---
+        # requests.request('GET', url): the URL is the 2nd positional, not the method
+        ("import requests\ndef f(url):\n    return requests.request('GET', url)", 1),
+        # a directly-imported request function (bare-name call) is still a sink
+        ("from requests import get\ndef f(url):\n    return get(url)", 1),
+        ("from urllib.request import urlopen as fetch\ndef f(url):\n    return fetch(url)", 1),
+        # parsing/logging the hostname is NOT a guard
+        ("import requests\nfrom urllib.parse import urlparse\ndef f(url):\n    print(urlparse(url).hostname)\n    return requests.get(url)", 1),
+        # instantiating an IP without a range check is NOT a guard
+        ("import requests, ipaddress\ndef f(url,ip):\n    addr=ipaddress.ip_address(ip)\n    return requests.get(url)", 1),
+        # a validation of a DIFFERENT url must not suppress this sink
+        ("import requests\ndef f(callback_url,user_url):\n    check_public_url(callback_url)\n    return requests.get(user_url)", 1),
+        # ...but a guard on an assignment-LINKED alias of the sink url IS a guard
+        ("import requests\ndef f(url_spec):\n    url = url_spec.geturl()\n    is_safe = check_url(url)\n    return requests.get(url_spec.geturl())", 0),
     ],
 )
 def test_rule_variants(src, expected):
