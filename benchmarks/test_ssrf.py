@@ -61,7 +61,7 @@ def test_fixture_flags_the_vulnerable_sink_and_skips_both_patched():
         # --- guarded / substituted shapes (skipped) ---
         ("from h import ssrf_proxy\ndef f(url):\n    return ssrf_proxy.get(url, stream=True)", 0),  # safe wrapper
         ("import httpx\ndef f(url):\n    check_public_url(url)\n    return httpx.get(url)", 0),      # validation call
-        ("import requests, ipaddress\ndef f(url,ip):\n    if not ipaddress.ip_address(ip).is_global: raise ValueError()\n    return requests.get(url)", 0),  # IP guard
+        ("import requests, ipaddress\nfrom urllib.parse import urlparse\ndef f(url):\n    host=urlparse(url).hostname\n    if not ipaddress.ip_address(host).is_global: raise ValueError()\n    return requests.get(url)", 0),  # IP guard on the URL's own host
         ("import requests\nfrom urllib.parse import urlparse\ndef f(url):\n    if urlparse(url).hostname not in ALLOW: raise ValueError()\n    return requests.get(url)", 0),  # allowlist
         # --- precision: not SSRF (skipped) ---
         ("import requests\ndef f():\n    return requests.get('http://fixed.example/api')", 0),      # literal URL
