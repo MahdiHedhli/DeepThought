@@ -5,6 +5,16 @@
   "tier": "deterministic",
   "language": "python",
   "reproducibility": "Each entry pins a real repo + vulnerable/patched commit SHAs; the detector runs over the real target file(s) fetched at those SHAs. Pin-or-drop: an entry that cannot be resolved to fetchable ground truth is dropped from the denominator with a reason, never counted missed, never hand-faked.",
+  "result": {
+    "seed_rediscovered": true,
+    "heldout_generalization": "3/4",
+    "heldout_rediscovered": ["CVE-2024-4325", "CVE-2026-25580", "CVE-2026-33626"],
+    "heldout_missed": ["CVE-2023-46229"],
+    "snapshot": "v2-2026-07-05",
+    "skill_mean_after": "70.9% (prototype_pollution 2/3 + ssrf 3/4)",
+    "measured_on": "real target files at pinned vuln/patched SHAs (line-precise: a FLAGGED line's own text contains the sink probe in vuln, not in patched)",
+    "miss_note": "langchain CVE-2023-46229 patches via prevent_outside (a same-domain bool flag), not a validation call, so its sink still flags in the patched tree -> documented miss / future improvement-loop fixture."
+  },
   "seed_swap": {
     "original_seed": "CVE-2025-50181 (urllib3)",
     "reason": "Its authoritative NVD weakness is CWE-601 (a redirect-mitigation bypass / open redirect), NOT CWE-918 SSRF (taint from an untrusted source to an outbound-request sink). Per the verify-at-build contract, a seed whose authoritative class does not match its row is swapped for a genuine public example of the class before calibration.",
@@ -63,9 +73,9 @@
       "vuln_ref": "819a80836e991ca3f427b0e85faca159083d3d40",
       "patched_ref": "71d64a339edb901e9005358e0633fbbab367d626",
       "target_paths": ["lmdeploy/vl/media/connection.py"],
-      "sink_probe": "",
-      "sink": "outbound request fetching remote media by user-supplied URL (media connection)",
-      "patched_shape": "TBD — confirm the exact sink line + guard at build (fill sink_probe before measuring)"
+      "sink_probe": "client.get(url_spec.geturl()",
+      "sink": "client.get(url_spec.geturl(), headers=..., timeout=...) where client = requests.Session(); url_spec from a user-supplied media URL",
+      "patched_shape": "validation added before the fetch (sink line remains client.get); confirmed at build"
     }
   ],
   "heldout_pinned": 4,
