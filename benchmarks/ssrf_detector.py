@@ -131,14 +131,14 @@ def _client_vars(scope: ast.AST) -> set[str]:
     return names
 
 
-def _url_arg(call: ast.Call, attr: str) -> ast.AST | None:
-    """The URL argument of a request call: the 2nd positional for the
-    ``(verb/method, url)`` signatures ``.stream("GET", url)`` and
-    ``.request("GET", url)``, the ``url=`` kwarg if present, else the 1st positional."""
+def _url_arg(call: ast.Call, request_style: bool) -> ast.AST | None:
+    """The URL argument of a request call: the 2nd positional for a ``(verb/method, url)``
+    signature (``.stream("GET", url)`` / ``.request("GET", url)`` / an aliased bare
+    ``request``), the ``url=`` kwarg if present, else the 1st positional."""
     for kw in call.keywords:
         if kw.arg == "url":
             return kw.value
-    if attr in ("stream", "request") and len(call.args) >= 2:
+    if request_style and len(call.args) >= 2:
         return call.args[1]
     return call.args[0] if call.args else None
 
@@ -238,8 +238,11 @@ def _scope_guards_url(scope: ast.AST, url_node: ast.AST) -> bool:
         if grown == relevant:
             break
         relevant = grown
+    ip_context = _has_ip_context(scope)
     for node in _iter_scope(scope):
-        if isinstance(node, ast.Attribute) and node.attr in _RANGE_CHECKS:
+        # a range check is a guard ONLY where an IP is actually resolved/parsed — else
+        # ``user.is_global`` is a config flag, not an SSRF check.
+        if ip_context and isinstance(node, ast.Attribute) and node.attr in _RANGE_CHECKS:
             return True
         if isinstance(node, ast.Call) and _looks_like_guard_call(node.func):
             if relevant & _call_idents(node):
@@ -251,19 +254,33 @@ def _scope_guards_url(scope: ast.AST, url_node: ast.AST) -> bool:
     return False
 
 
-def _imported_request_names(tree: ast.AST) -> set[str]:
-    """Local names bound to a request function by a direct import — ``from requests import
-    get`` / ``from urllib.request import urlopen as fetch`` — so a bare ``get(url)`` /
-    ``fetch(url)`` call is recognised as a sink."""
-    names: set[str] = set()
+def _imported_request_names(tree: ast.AST) -> dict:
+    """Local name -> ORIGINAL request-function name for direct imports — ``from requests
+    import get`` -> {'get':'get'}, ``... import request as req`` -> {'req':'request'} — so
+    a bare ``get(url)`` / ``req('GET', url)`` call is recognised as a sink AND its URL
+    argument is read from the right position (``request`` puts the URL 2nd)."""
+    names: dict = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             root = node.module.split(".")[0]
             if root in ("requests", "httpx", "aiohttp", "urllib", "urllib3"):
                 for alias in node.names:
                     if alias.name in _HTTP_METHODS or alias.name in ("urlopen", "request"):
-                        names.add(alias.asname or alias.name)
+                        names[alias.asname or alias.name] = alias.name
     return names
+
+
+def _has_ip_context(scope: ast.AST) -> bool:
+    """Whether the scope resolves/parses an IP — ``ipaddress``, ``ip_address``,
+    ``ip_network``, ``getaddrinfo``, ``gethostbyname``. An ``.is_global``/``.is_private``
+    attribute is an IP RANGE check only in this context; otherwise ``user.is_global`` is
+    just a config flag, not an SSRF guard."""
+    for node in _iter_scope(scope):
+        if isinstance(node, ast.Attribute) and node.attr in ("ip_address", "ip_network", "getaddrinfo", "gethostbyname"):
+            return True
+        if isinstance(node, ast.Name) and node.id in ("ipaddress", "ip_address", "ip_network", "getaddrinfo", "gethostbyname"):
+            return True
+    return False
 
 
 def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
@@ -287,7 +304,10 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
         if not _is_request_sink(node, cvars, imported):
             continue
         base, attr = _name_of(node.func)
-        url = _url_arg(node, attr)
+        # (verb/method, url) 2-arg signature: an attribute .stream/.request, or a bare
+        # call to an imported function whose ORIGINAL name is `request`.
+        request_style = attr in ("stream", "request") or (base == "" and imported.get(attr) == "request")
+        url = _url_arg(node, request_style)
         if url is None or _is_literal_url(url):
             continue  # hardcoded / no URL — not an attacker-controlled request target
         if _scope_guards_url(scope, url):

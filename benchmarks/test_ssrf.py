@@ -83,6 +83,13 @@ def test_fixture_flags_the_vulnerable_sink_and_skips_both_patched():
         ("import requests\ndef f(callback_url,user_url):\n    check_public_url(callback_url)\n    return requests.get(user_url)", 1),
         # ...but a guard on an assignment-LINKED alias of the sink url IS a guard
         ("import requests\ndef f(url_spec):\n    url = url_spec.geturl()\n    is_safe = check_url(url)\n    return requests.get(url_spec.geturl())", 0),
+        # --- review regressions (agy round 2) ---
+        # an ALIASED direct import of `request` still reads the URL as the 2nd arg
+        ("from requests import request as req\ndef f(url):\n    return req('GET', url)", 1),
+        # `.is_global` on a NON-IP object (a config flag) is not an IP range check
+        ("import requests\ndef f(url,user):\n    if user.is_global: pass\n    return requests.get(url)", 1),
+        # a real IP range check (with ipaddress context) IS still a guard
+        ("import requests, ipaddress\ndef f(url,ip):\n    if not ipaddress.ip_address(ip).is_global: raise ValueError()\n    return requests.get(url)", 0),
     ],
 )
 def test_rule_variants(src, expected):
