@@ -109,16 +109,19 @@ class's rate may drop). Measured to date:
 | 1 | Prototype pollution (1321) | `DT-PP-MERGE` | JS (tree-sitter) | js-yaml → devalue, lodash, min-document | **2/3** |
 | 2 | SSRF (918) | `DT-SSRF-TAINT` | Python (ast taint) | dify → gradio, pydantic-ai, langchain, lmdeploy | **3/4** |
 | 3 | XXE (611) | `DT-XXE-PARSER` | Java + Python | tika → python-docx, dom4j, JDOM2 | **1/3** |
+| 7 | OS command injection (78) | `DT-CMDI-EXEC` | JS + Python | node-glob → cyclonedx, dulwich, ansys, aws-cdk | **3/4** |
 
 Every number is honest: unresolvable CVEs are **dropped-with-reason** (never counted as
-missed), two **mis-classed corpus seeds were caught and swapped** by the verify-at-build
-contract (urllib3 was really an open redirect, CWE-601, not SSRF), and misses are
-documented as improvement-loop fixtures rather than hidden. The rising-then-honest curve
-(`benchmarks/data/generalization-log.json`) is the proof the skill compounds. See
-[`benchmarks/deep-thought-benchmark.md`](benchmarks/deep-thought-benchmark.md) and the
-[corpus](benchmarks/rediscovery-corpus.md). The remaining classes (path-traversal,
-deserialization, ReDoS, command-injection, and the sandbox-tier memory-safety classes)
-are in progress.
+missed), **mis-classed corpus seeds are caught and swapped** by the verify-at-build
+contract (urllib3 was really an open redirect, CWE-601, not SSRF; the ReactRSC deser seed
+was a prototype-pollution-flavored mechanism), held-out sets are **re-curated to
+user-code-misuse** where the raw corpus was dominated by library-internal CVEs a user-code
+rule can't discriminate, and misses are documented as improvement-loop fixtures rather than
+hidden. The curve moves both ways honestly — 66.7% → 70.9% → 58.3% (XXE dip) → **62.5%**
+(command-injection) — under a regression bar (`benchmarks/data/generalization-log.json`).
+See [`benchmarks/deep-thought-benchmark.md`](benchmarks/deep-thought-benchmark.md) and the
+[corpus](benchmarks/rediscovery-corpus.md). Path-traversal and deserialization are drafted
+(honest 1/3, in iteration); ReDoS and the sandbox-tier memory-safety classes are next.
 
 ```bash
 # reproduce a class's held-out generalization on the real pinned trees (network)
