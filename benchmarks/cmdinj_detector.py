@@ -74,17 +74,32 @@ def _is_dynamic_string(node: Node) -> bool:
     return False
 
 
+_SHELL_NAMES = ("sh", "bash", "zsh", "cmd", "cmd.exe", "powershell", "pwsh")
+
+
 def _has_shell_true(src: bytes, args: Node) -> bool:
-    """An options object argument containing ``shell: true``."""
+    """An options object with a dangerous ``shell`` value — ``shell: true`` OR a shell
+    STRING (``shell: '/bin/bash'``). Node runs the command through a shell for any
+    non-empty string too, so a string value is as dangerous as ``true``; only ``false``
+    (or absent) is safe."""
     for a in args.children:
-        if a.type == "object":
-            for pair in _iter(a):
-                if pair.type == "pair":
-                    k = pair.child_by_field_name("key")
-                    v = pair.child_by_field_name("value")
-                    if k is not None and _text(src, k).strip("\"'") == "shell" and v is not None and _text(src, v) == "true":
-                        return True
+        if a.type != "object":
+            continue
+        for pair in _iter(a):
+            if pair.type != "pair":
+                continue
+            k = pair.child_by_field_name("key")
+            v = pair.child_by_field_name("value")
+            if k is None or v is None or _text(src, k).strip("\"'") != "shell":
+                continue
+            # dangerous unless the value is literally false/undefined/null/0
+            if _text(src, v) not in ("false", "undefined", "null", "0"):
+                return True
     return False
+
+
+def _first_positionals(args: Node) -> list[Node]:
+    return [a for a in args.children if a.type not in ("(", ",", ")", "comment")]
 
 
 def _enclosing_scope(node: Node, root: Node) -> Node:
@@ -104,14 +119,29 @@ def _first_positional(args: Node) -> Node | None:
 
 
 def _has_shell_dash_c(src: bytes, args: Node) -> bool:
-    """An explicit shell invocation: an argument list containing a ``-c``/``/c`` flag AND a
-    dynamic (non-literal) command — the ``exec('bash', ['-c', cmd])`` / ``spawn('sh', ...)``
-    shape (aws-cdk CVE-2026-11417)."""
-    argtxt = _text(src, args)
-    if "'-c'" not in argtxt and '"-c"' not in argtxt and "'/c'" not in argtxt and '"/c"' not in argtxt:
+    """An explicit shell invocation ``exec(SHELL, ['-c', <dynamic>])`` — the FIRST positional
+    must be a shell (``bash``/``sh``/``cmd``/…), the SECOND must be an argv ARRAY containing a
+    ``-c``/``/c`` flag AND a dynamic element (the command). This is precise: a ``-c`` flag on a
+    non-shell program (``git -c``, ``ssh -c``), or a dynamic *option value* like ``{cwd: dir}``,
+    does not match — only a dynamic command handed to a shell's ``-c``."""
+    pos = _first_positionals(args)
+    if len(pos) < 2:
         return False
-    for a in _iter(args):
-        if a.type == "identifier" or (a.type == "template_string" and any(c.type == "template_substitution" for c in a.children)):
+    first = _text(src, pos[0]).strip("'\"`")
+    if not any(s == first or s in first.split("'") or s in first.split('"') for s in _SHELL_NAMES):
+        # allow a ternary/expr that names a shell, e.g. (win ? 'cmd' : 'bash')
+        if not (pos[0].type in ("ternary_expression", "parenthesized_expression") and any(s in _text(src, pos[0]) for s in _SHELL_NAMES)):
+            return False
+    arr = pos[1]
+    if arr.type != "array":
+        return False
+    arrtxt = _text(src, arr)
+    if "-c" not in arrtxt and "/c" not in arrtxt:
+        return False
+    for el in arr.children:
+        if el.type == "identifier" or el.type == "binary_expression" or (
+            el.type == "template_string" and any(c.type == "template_substitution" for c in el.children)
+        ):
             return True
     return False
 
@@ -195,7 +225,8 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
                     flagged = True
         elif name in _PY_SHELL_SINKS:
             seg = ast.get_source_segment(source, node.func) or ""
-            if name != "system" or "os" in seg:
+            # os.system(...) or a bare system(...) from `from os import system`
+            if name != "system" or "os" in seg or "from os import" in source:
                 flagged = dynamic_first
         if not flagged:
             continue

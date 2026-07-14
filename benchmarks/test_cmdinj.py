@@ -42,6 +42,17 @@ def test_fixtures_discriminate():
         # --- guard: shlex.quote in scope (dulwich shape) ---
         ("a.py", "import subprocess, shlex\ndef f(p): cmd='cat '+shlex.quote(p); return subprocess.run(cmd, shell=True)", 0),
         ("a.js", "const {execSync}=require('cp'); const q=require('shell-quote'); function f(x){return execSync(q.quote(['npm',x]));}", 0),
+        # --- review round-1 findings ---
+        # P1 FP: a `-c` flag on a NON-shell program is not a shell invocation
+        ("a.js", "const {execFile}=require('cp'); execFile('git',['-c','user.name='+name,'commit']);", 0),
+        # P1 FP: bash -c with a CONSTANT command and only a dynamic option value (cwd)
+        ("a.js", "const {spawn}=require('cp'); spawn('bash',['-c','ls'],{cwd:dir});", 0),
+        # ...but bash -c with a DYNAMIC command is still flagged
+        ("a.js", "const {exec}=require('cp'); exec('bash',['-c',localCommand]);", 1),
+        # P2 FN: a string-valued shell option is as dangerous as shell:true
+        ("a.js", "const {spawn}=require('cp'); function f(u){return spawn(u,[],{shell:'/bin/bash'});}", 1),
+        # minor: a bare `system` imported from os
+        ("a.py", "from os import system\ndef f(x): return system('rm '+x)", 1),
     ],
 )
 def test_rule_variants(uri, src, expected):
