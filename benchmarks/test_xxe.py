@@ -47,6 +47,13 @@ def test_fixtures_discriminate_vulnerable_from_hardened():
         ("a.py", "import defusedxml.lxml\np = defusedxml.lxml.parse(f)", 0),
         # --- precision: a non-XML factory is not flagged ---
         ("a.java", "class A{ void m(){ var x = SomeOtherThing.newInstance(); } }", 0),
+        # --- agy round-1 FPs ---
+        # xml.sax parser hardened via setFeature must NOT be flagged
+        ("a.py", "from xml.sax import make_parser\np=make_parser()\np.setFeature('http://xml.org/sax/features/external-general-entities', False)", 0),
+        # resolve_entities=0 (a falsy int) is safe in lxml
+        ("a.py", "from lxml import etree\np=etree.XMLParser(resolve_entities=0)", 0),
+        # but a bare make_parser() with no hardening still flags
+        ("a.py", "from xml.sax import make_parser\np=make_parser()", 1),
     ],
 )
 def test_rule_variants(uri, src, expected):

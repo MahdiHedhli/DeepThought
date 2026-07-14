@@ -158,26 +158,38 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
         return []
     if "defusedxml" in source:
         return []  # module uses the safe-by-default library
+    # SAX/xml hardening is applied via setFeature(...external-general/parameter-entities...,
+    # False) or the feature_external_ges symbol, on the parser object AFTER construction —
+    # a call-site kwarg check would miss it, so treat the module as hardened when such a
+    # disabling call is present.
+    sax_hardened = any(
+        marker in source
+        for marker in ("external-general-entities", "external-parameter-entities",
+                       "feature_external_ges", "feature_external_pes", "load-external-dtd")
+    )
     results: list[dict] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or _py_call_name(node) not in _PY_PARSER_CALLS:
             continue
-        kwargs = {kw.arg for kw in node.keywords if kw.arg}
-        # hardened if it passes resolve_entities=False / no_network=True / forbid_*
+        if _py_call_name(node) == "make_parser" and sax_hardened:
+            continue  # xml.sax parser hardened via setFeature elsewhere in the module
         hardened = False
         for kw in node.keywords:
-            if kw.arg in _PY_HARDENING_KWARGS:
-                val = kw.value
-                # resolve_entities=False (safe) vs =True (unsafe); no_network=True (safe)
-                if kw.arg == "resolve_entities" and isinstance(val, ast.Constant) and val.value is False:
-                    hardened = True
-                elif kw.arg in ("no_network", "forbid_dtd", "forbid_entities") and isinstance(val, ast.Constant) and val.value is True:
-                    hardened = True
+            if kw.arg not in _PY_HARDENING_KWARGS:
+                continue
+            val = kw.value
+            if not isinstance(val, ast.Constant):
+                continue
+            # resolve_entities safe when FALSY (False/0); no_network/forbid_* safe when TRUTHY.
+            if kw.arg == "resolve_entities" and not val.value:
+                hardened = True
+            elif kw.arg in ("no_network", "forbid_dtd", "forbid_entities") and val.value:
+                hardened = True
         if hardened:
             continue
         results.append(_result(uri, node.lineno, node.col_offset + 1,
-                               f"XXE (CWE-611): lxml parser constructed without resolve_entities=False "
-                               f"(external entities resolved on untrusted XML)", cve))
+                               f"XXE (CWE-611): XML parser constructed without disabling external "
+                               f"entities (resolved on untrusted XML)", cve))
     return results
 
 
