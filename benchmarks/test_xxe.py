@@ -54,6 +54,20 @@ def test_fixtures_discriminate_vulnerable_from_hardened():
         ("a.py", "from lxml import etree\np=etree.XMLParser(resolve_entities=0)", 0),
         # but a bare make_parser() with no hardening still flags
         ("a.py", "from xml.sax import make_parser\np=make_parser()", 1),
+        # --- code-review round-1 findings (F1-F3) ---
+        # F1: a mixed module (defusedxml on one path, raw lxml on another) still flags the raw one
+        ("a.py", "import defusedxml.ElementTree as S\nfrom lxml import etree\ndef b(d): return etree.XMLParser(remove_blank_text=True)", 1),
+        # F1: a defusedxml-qualified parser IS safe
+        ("a.py", "import defusedxml.lxml\np=defusedxml.lxml.XMLParser()", 0),
+        # F2: SUPPORT_DTD set to TRUE enables DTDs -> still flagged (argument-sensitive)
+        ("a.java", "class A{void m(){var f=XMLInputFactory.newFactory();f.setProperty(XMLInputFactory.SUPPORT_DTD,true);}}", 1),
+        # F2: a hardening token in a comment/log is not a real disabling call
+        ("a.java", "class A{void m(){var f=SAXParserFactory.newInstance();/* ACCESS_EXTERNAL_DTD */ parse(f);}}", 1),
+        # F2: setExpandEntityReferences(true) is not hardening; (false) is
+        ("a.java", "class A{void m(){var f=DocumentBuilderFactory.newInstance();f.setExpandEntityReferences(true);}}", 1),
+        ("a.java", "class A{void m(){var f=DocumentBuilderFactory.newInstance();f.setExpandEntityReferences(false);}}", 0),
+        # F3: an unrelated make_parser in another function is not masked by a sibling's setFeature
+        ("a.py", "from xml.sax import make_parser\ndef u(d):\n  p=make_parser()\n  return p.parse(d)\ndef o():\n  q=make_parser()\n  q.setFeature('http://xml.org/sax/features/external-general-entities', False)", 1),
     ],
 )
 def test_rule_variants(uri, src, expected):

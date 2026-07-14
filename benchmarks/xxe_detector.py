@@ -54,12 +54,6 @@ _JAVA_CTOR_TYPES = frozenset({"SAXReader", "SAXBuilder"})  # `new SAXReader()` e
 #    had in its VULNERABLE version (the fix still had to add SUPPORT_DTD=false), so it does
 #    not by itself harden the parser;
 #  * a method name like createDefault — a name, not a hardening API call.
-_JAVA_HARDENING = (
-    "disallow-doctype-decl", "external-general-entities", "external-parameter-entities",
-    "load-external-dtd", "SUPPORT_DTD", "IS_SUPPORTING_EXTERNAL_ENTITIES",
-    "FEATURE_SECURE_PROCESSING", "ACCESS_EXTERNAL_DTD", "ACCESS_EXTERNAL_SCHEMA",
-    "ACCESS_EXTERNAL_STYLESHEET", "setExpandEntityReferences", "setXIncludeAware",
-)
 
 # Python: constructing one of these builds an XML parser.
 _PY_PARSER_CALLS = frozenset({"XMLParser", "ETCompatXMLParser", "make_parser"})
@@ -111,12 +105,42 @@ def _java_factory_node(src: bytes, node: Node) -> Node | None:
     return None
 
 
-def _java_scope_hardened(src: bytes, node: Node) -> bool:
+def _java_call_hardens(src: bytes, call: Node) -> bool:
+    """Whether a single call actually DISABLES DTDs/external entities — argument-sensitive,
+    so ``setProperty(SUPPORT_DTD, true)`` (which ENABLES DTDs) is not mistaken for
+    hardening, and a bare token in a comment/log string never matches (only real calls are
+    inspected). Pairs each feature with the value that makes it safe."""
+    txt = _jtext(src, call)
+    # DTD/external-entity feature flags are safe only when set to false.
+    if any(t in txt for t in ("SUPPORT_DTD", "IS_SUPPORTING_EXTERNAL_ENTITIES",
+                              "external-general-entities", "external-parameter-entities",
+                              "load-external-dtd")) and "false" in txt:
+        return True
+    # These are safe only when set to true.
+    if any(t in txt for t in ("disallow-doctype-decl", "FEATURE_SECURE_PROCESSING")) and "true" in txt:
+        return True
+    if "setExpandEntityReferences" in txt and "false" in txt:
+        return True
+    if "setXIncludeAware" in txt and "false" in txt:
+        return True
+    # ACCESS_EXTERNAL_* are safe when set to the empty string.
+    if any(t in txt for t in ("ACCESS_EXTERNAL_DTD", "ACCESS_EXTERNAL_SCHEMA",
+                              "ACCESS_EXTERNAL_STYLESHEET")) and ('""' in txt or "''" in txt):
+        return True
+    return False
+
+
+def _java_scope_hardened(src: bytes, node: Node, root: Node) -> bool:
     """Whether the parser's enclosing method (or, if none, the whole compilation unit)
-    disables DTDs / external entities."""
-    method = _enclosing_method(node)
-    scope_text = _jtext(src, method) if method is not None else src.decode("utf-8", "replace")
-    return any(tok in scope_text for tok in _JAVA_HARDENING)
+    contains a real DTD/external-entity DISABLING call. Scope is the method — hardening
+    factored into a separate helper is not seen (an interprocedural limitation, a possible
+    false positive, documented) and per-variable binding is not modeled (two parsers in one
+    method share the verdict)."""
+    scope = _enclosing_method(node) or root
+    for n in _jiter(scope):
+        if n.type == "method_invocation" and _java_call_hardens(src, n):
+            return True
+    return False
 
 
 def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
@@ -128,7 +152,7 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
         factory = _java_factory_node(src, node)
         if factory is None or factory.start_point[0] in seen:
             continue
-        if _java_scope_hardened(src, factory):
+        if _java_scope_hardened(src, factory, root):
             continue  # hardened parser — DTDs/external entities disabled in scope
         seen.add(factory.start_point[0])
         results.append(_result(uri, factory.start_point[0] + 1, factory.start_point[1] + 1,
@@ -151,40 +175,50 @@ def _py_call_name(call: ast.Call) -> str:
     return ""
 
 
+_PY_SAX_HARDENING = ("external-general-entities", "external-parameter-entities",
+                     "feature_external_ges", "feature_external_pes", "load-external-dtd")
+
+
 def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
-    if "defusedxml" in source:
-        return []  # module uses the safe-by-default library
-    # SAX/xml hardening is applied via setFeature(...external-general/parameter-entities...,
-    # False) or the feature_external_ges symbol, on the parser object AFTER construction —
-    # a call-site kwarg check would miss it, so treat the module as hardened when such a
-    # disabling call is present.
-    sax_hardened = any(
-        marker in source
-        for marker in ("external-general-entities", "external-parameter-entities",
-                       "feature_external_ges", "feature_external_pes", "load-external-dtd")
-    )
+    funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+    def scope_text(node: ast.AST) -> str:
+        """The source of the SMALLEST function enclosing node, else the whole module —
+        so SAX setFeature hardening is bound to THIS parser's function, not any make_parser
+        elsewhere in the module (a module-wide check masked unrelated unhardened parsers)."""
+        best = None
+        for f in funcs:
+            if f.lineno <= node.lineno <= (getattr(f, "end_lineno", None) or f.lineno):
+                if best is None or f.lineno > best.lineno:
+                    best = f
+        return (ast.get_source_segment(source, best) if best is not None else None) or source
+
     results: list[dict] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or _py_call_name(node) not in _PY_PARSER_CALLS:
             continue
-        if _py_call_name(node) == "make_parser" and sax_hardened:
-            continue  # xml.sax parser hardened via setFeature elsewhere in the module
+        # A defusedxml-qualified parser is safe — but only THIS call, not the whole module
+        # (a mixed module using defusedxml on one path and raw lxml on another is common).
+        func_seg = ast.get_source_segment(source, node.func) or ""
+        if "defusedxml" in func_seg:
+            continue
         hardened = False
         for kw in node.keywords:
-            if kw.arg not in _PY_HARDENING_KWARGS:
-                continue
-            val = kw.value
-            if not isinstance(val, ast.Constant):
+            if kw.arg not in _PY_HARDENING_KWARGS or not isinstance(kw.value, ast.Constant):
                 continue
             # resolve_entities safe when FALSY (False/0); no_network/forbid_* safe when TRUTHY.
-            if kw.arg == "resolve_entities" and not val.value:
+            if kw.arg == "resolve_entities" and not kw.value.value:
                 hardened = True
-            elif kw.arg in ("no_network", "forbid_dtd", "forbid_entities") and val.value:
+            elif kw.arg in ("no_network", "forbid_dtd", "forbid_entities") and kw.value.value:
                 hardened = True
+        # SAX/xml parsers hardened via setFeature(...external...) on the parser object — bound
+        # to the enclosing function's source, not the whole module.
+        if not hardened and any(m in scope_text(node) for m in _PY_SAX_HARDENING):
+            hardened = True
         if hardened:
             continue
         results.append(_result(uri, node.lineno, node.col_offset + 1,
