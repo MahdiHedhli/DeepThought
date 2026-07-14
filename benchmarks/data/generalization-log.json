@@ -27,6 +27,29 @@
           "total": 4
         }
       ]
+    },
+    {
+      "label": "v3-2026-07-05",
+      "rates": [
+        {
+          "bug_class": "prototype_pollution",
+          "detector": "DT-PP-MERGE",
+          "rediscovered": 2,
+          "total": 3
+        },
+        {
+          "bug_class": "ssrf",
+          "detector": "DT-SSRF-TAINT",
+          "rediscovered": 3,
+          "total": 4
+        },
+        {
+          "bug_class": "xxe",
+          "detector": "DT-XXE-PARSER",
+          "rediscovered": 1,
+          "total": 3
+        }
+      ]
     }
   ]
 }

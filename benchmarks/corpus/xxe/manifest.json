@@ -1,0 +1,64 @@
+{
+  "bug_class": "xxe",
+  "cwe": "CWE-611",
+  "detector": "DT-XXE-PARSER",
+  "tier": "deterministic",
+  "language": "java+python",
+  "reproducibility": "Each entry pins a real repo + vulnerable/patched commit SHAs; the detector runs over the real target file(s) at those SHAs. Pin-or-drop: an unresolvable entry is dropped from the denominator with a reason, never counted missed, never hand-faked. sink_probe values are refined against the real vuln file at detector-build time.",
+  "result": {
+    "seed_rediscovered": true,
+    "heldout_generalization": "1/3",
+    "heldout_rediscovered": ["CVE-2016-5851"],
+    "heldout_missed": ["CVE-2020-10683", "CVE-2021-33813"],
+    "snapshot": "v3-2026-07-05",
+    "measured_on": "real target files at pinned vuln/patched SHAs (line-precise config rule: an unhardened XML parser flagged in vuln, not in patched)",
+    "miss_note": "Both misses are ATYPICAL fixes where the static XXE signal persists in the patched tree — dom4j adds a safe ALTERNATIVE (createDefault() in SAXReader.java) while leaving the flagged SAXHelper.createXMLReader path, and JDOM2 REORDERS existing setFeature calls (present in both versions). A pure config rule (and mainstream SAST) flags both versions; discriminating them needs dataflow/ordering analysis. Documented improvement-loop fixtures. The standard in-place-hardening shape (Tika seed, python-docx) is rediscovered."
+  },
+  "note": "XXE spans Java (DocumentBuilderFactory/SAXParserFactory/XMLInputFactory/SAXReader) and Python (lxml etree.XMLParser). The detector is multi-language: tree-sitter-java for Java, ast for Python. Calibrated on the Java Tika seed.",
+  "seed": {
+    "cve": "CVE-2025-66516", "package": "apache/tika (tika-core)", "language": "java",
+    "repo": "https://github.com/apache/tika",
+    "vuln_ref": "0c89f4b894395af57d441e0cbebdf2cb6657416d",
+    "patched_ref": "94acef2854eed07f0ded357c13a659409495ca49",
+    "target_paths": ["tika-core/src/main/java/org/apache/tika/utils/XMLReaderUtils.java"],
+    "sink": "StAX XMLInputFactory in getXMLInputFactory() used on untrusted XML with DTDs + external general entities enabled",
+    "sink_probe": "XMLInputFactory",
+    "patched_shape": "set XMLInputFactory.SUPPORT_DTD=false and IS_SUPPORTING_EXTERNAL_ENTITIES=false (via tryToSetStaxProperty)",
+    "authoritative_source": "NVD CVE-2025-66516 (CWE-611, CVSS 9.8); same vuln as CVE-2025-54988",
+    "cwe": "CWE-611", "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2020-10683", "package": "dom4j", "language": "java", "status": "pinned", "cwe": "CWE-611",
+      "repo": "https://github.com/dom4j/dom4j",
+      "vuln_ref": "1707bf3d898a8ada3b213acb0e3b38f16eaae73d",
+      "patched_ref": "a8228522a99a02146106672a34c104adbda5c658",
+      "target_paths": ["src/main/java/org/dom4j/io/SAXHelper.java"],
+      "sink": "SAXReader/SAXParserFactory.newInstance() default config parses untrusted XML with external entities/DTD enabled",
+      "sink_probe": "createXMLReader",
+      "patched_shape": "createDefault() sets load-external-dtd=false, external-general-entities=false, external-parameter-entities=false"
+    },
+    {
+      "cve": "CVE-2021-33813", "package": "jdom2", "language": "java", "status": "pinned", "cwe": "CWE-611",
+      "repo": "https://github.com/hunterhacker/jdom",
+      "vuln_ref": "3c4e2cfec3b8c7de45ec04cf5c2a01e3dc20c59c",
+      "patched_ref": "bd3ab78370098491911d7fe9d7a43b97144a234e",
+      "target_paths": ["core/src/java/org/jdom2/input/SAXBuilder.java"],
+      "sink": "SAXBuilder.configureParser builds an XMLReader over untrusted XML with DTD/external entities",
+      "sink_probe": "configureParser",
+      "patched_shape": "REORDER: apply the disallow-doctype-decl/external-entity features LAST so they take effect (features were present but overridden) — likely a HARD discrimination case (both versions contain the setFeature calls)"
+    },
+    {
+      "cve": "CVE-2016-5851", "package": "python-docx", "language": "python", "status": "pinned", "cwe": "CWE-611",
+      "repo": "https://github.com/python-openxml/python-docx",
+      "vuln_ref": "19b16648093f4893bf96d7f4e008f8ea7bbf6231",
+      "patched_ref": "61b40b161b64173ab8e362aec1fd197948431beb",
+      "target_paths": ["docx/oxml/__init__.py"],
+      "sink": "etree.XMLParser(remove_blank_text=True) — lxml parser with resolve_entities defaulting True, parsing untrusted .docx XML",
+      "sink_probe": "etree.XMLParser(",
+      "patched_shape": "add resolve_entities=False to the etree.XMLParser construction"
+    }
+  ],
+  "heldout_pinned": 3,
+  "denominator_note": "Generalization denominator = 3 pinned held-out CVEs (dom4j, JDOM2, python-docx). JDOM2's fix is a REORDER (features present in both versions) so it is expected hard/miss — the honest generalization measure. A 5th candidate (from the research workflow) can be added if it resolves cleanly."
+}

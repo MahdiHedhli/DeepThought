@@ -92,6 +92,39 @@ uv pip install --python .venv -e ".[dev]"
 State lands as clean, reviewable Markdown under `state/`. Read the work from the
 repository alone.
 
+## Round 2 — the vuln-rediscovery skill
+
+The platform is the spine; the **`vuln-rediscovery` skill** (`skills/vuln-rediscovery/`)
+is what runs on it. Each round calibrates one bug-class detector against a seed CVE and
+proves it **generalizes to held-out CVEs it was never tuned on** — measured on the *real
+package source at pinned vulnerable/patched commit SHAs*, not synthetic fixtures. The
+detector ships as a rule for the **class**, never a signature for the one CVE, and emits
+SARIF into the same DISCOVER ingest the platform already uses.
+
+The score is **held-out generalization**, versioned over time under a regression bar (no
+class's rate may drop). Measured to date:
+
+| # | Class (CWE) | Detector | Lang | Seed → held-out | Generalization |
+|---|---|---|---|---|---|
+| 1 | Prototype pollution (1321) | `DT-PP-MERGE` | JS (tree-sitter) | js-yaml → devalue, lodash, min-document | **2/3** |
+| 2 | SSRF (918) | `DT-SSRF-TAINT` | Python (ast taint) | dify → gradio, pydantic-ai, langchain, lmdeploy | **3/4** |
+| 3 | XXE (611) | `DT-XXE-PARSER` | Java + Python | tika → python-docx, dom4j, JDOM2 | **1/3** |
+
+Every number is honest: unresolvable CVEs are **dropped-with-reason** (never counted as
+missed), two **mis-classed corpus seeds were caught and swapped** by the verify-at-build
+contract (urllib3 was really an open redirect, CWE-601, not SSRF), and misses are
+documented as improvement-loop fixtures rather than hidden. The rising-then-honest curve
+(`benchmarks/data/generalization-log.json`) is the proof the skill compounds. See
+[`benchmarks/deep-thought-benchmark.md`](benchmarks/deep-thought-benchmark.md) and the
+[corpus](benchmarks/rediscovery-corpus.md). The remaining classes (path-traversal,
+deserialization, ReDoS, command-injection, and the sandbox-tier memory-safety classes)
+are in progress.
+
+```bash
+# reproduce a class's held-out generalization on the real pinned trees (network)
+DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_xxe.py
+```
+
 ## Architecture
 
 ```
