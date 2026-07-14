@@ -171,3 +171,27 @@ Each build round appends one section here using this template:
   flagged path) and JDOM2 (fix reorders existing `setFeature` calls) — the static XXE
   signal persists in both patched trees, so a config rule (like mainstream SAST) flags
   both; discriminating needs dataflow/ordering analysis. Future improvement-loop fixtures.
+
+### OS command injection (CWE-78)
+
+- **When to use:** hunting a JS/Node or Python target that runs a shell command built from
+  untrusted input — CLI tools, build/bundler steps, MCP servers, git drivers, cloud SDKs.
+- **Detection:** static taint-lite (`benchmarks/cmdinj_detector.py`). JS (tree-sitter):
+  `child_process` `exec`/`execSync`(dynamic string), `spawn`/`execFile`/`foregroundChild`
+  with `{shell:true}`, or an `exec('bash', ['-c', <dynamic>])` shell invocation. Python
+  (ast): `subprocess.*(shell=<non-False>)`, `os.system`/`os.popen`(dynamic). Skipped when
+  the scope applies a shell-escape guard (`shell-quote`/`shlex.quote`/`.quote(`).
+- **Rule id:** `DT-CMDI-EXEC`, emits SARIF 2.1.0 into the shipped `deepthought.ingest.sarif`.
+- **Verification:** static (deterministic tier) — discriminate + rediscover through NEW
+  PROJECT → MAP → DISCOVER → `check`. No execution.
+- **OSV / disclosure shape:** CWE-78, CVE as an informational alias only.
+- **Fixtures:** seed node-glob **CVE-2025-64756** (`foregroundChild(..., {shell:true})`);
+  held-out (real, pinned, re-curated to user-code-misuse) cyclonedx-npm CVE-2026-55849
+  (execSync→execFile), dulwich CVE-2026-42563 (shlex.quote guard), ansys-geometry
+  CVE-2024-29189 (Popen shell=), aws-cdk CVE-2026-11417.
+- **Held-out generalization:** **3/4 (75%)** — cyclonedx, dulwich, ansys rediscovered;
+  aws-cdk missed (logged `v4-2026-07-05`).
+- **Notes.** The held-out was re-curated to user-code-misuse CVEs whose fix VISIBLY changes
+  the sink (dropped: systeminformation — sanitize-only, sink persists; shell-quote —
+  library-internal). **Known miss:** aws-cdk's patched tree keeps a `bash -c` exec for the
+  explicit command-hooks case, so the signal persists — a future improvement-loop fixture.
