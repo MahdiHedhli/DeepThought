@@ -1,0 +1,105 @@
+{
+  "bug_class": "command_injection",
+  "cwe": "CWE-78",
+  "detector": "DT-CMDI-EXEC",
+  "tier": "deterministic",
+  "language": "js+python",
+  "reproducibility": "real repo + pinned vuln/patched SHAs; line-precise; pin-or-drop.",
+  "seed": {
+    "cve": "CVE-2025-64756",
+    "package": "glob",
+    "repo": "https://github.com/isaacs/node-glob",
+    "vuln_ref": "bc33fe1c6a47abd497703d79ad96036e7891ff62",
+    "patched_ref": "47473c046b91c67269df7a66eab782a6c2716146",
+    "target_paths": [
+      "src/bin.mts"
+    ],
+    "sink_probe": "foregroundChild(cmd, matches, { shell: true })",
+    "sink": "foregroundChild(cmd, matches, { shell: true }) in the glob -c/--cmd CLI path \u2014 untrusted matched filenames (`matches`) are passed to a shell with shell:true, so shell metacharacters in filenames execute as commands (child_process spawn with shell:true via foreground-child). Authoritative NVD weakness CWE-78; GHSA-5j98-mcp5-4vw2.",
+    "patched_shape": "Matched filenames are no longer exposed to shell expansion: they are pushed as literal argv (cmdArg) and, when shell interpretation of the command itself is needed, glob invokes `$SHELL -c 'cmd \"$@\"'` with matches as positional args on known shells (foregroundChild(SHELL, cmdArg)) so filename metacharacters are never re-parsed by the shell; --shell deprecated.",
+    "status": "pinned",
+    "cwe": "CWE-78"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2024-29189",
+      "package": "ansys-geometry-core (pyansys-geometry)",
+      "language": "python",
+      "repo": "https://github.com/ansys/pyansys-geometry",
+      "vuln_ref": "138ae18f810b3e556f90ca12164fc68bc76f063c",
+      "patched_ref": "f82346b9432b06532e84f3278125f5879b4e9f3f",
+      "target_paths": [
+        "src/ansys/geometry/core/connection/product_instance.py"
+      ],
+      "sink_probe": "subprocess.Popen(",
+      "sink": "_start_program(args, local_env) runs subprocess.Popen(args, shell=os.name != \"nt\", ...). On any non-Windows host os.name != \"nt\" is True, so the process is spawned via a shell; the args list (built in prepare_and_start_backend from host/product-path values) reaches the shell and metacharacters execute. Authoritative NVD weakness CWE-78; GHSA-38jr-29fh-w9vm.",
+      "patched_shape": "Fix commit f82346b (PR #1076) VISIBLY changes the sink: the shell=os.name != \"nt\" argument is deleted from the subprocess.Popen(args, ...) call so the process is spawned directly with no shell, plus a Windows-only guard is added to prepare_and_start_backend. Follow-up PR #1077/902071701 only adds # nosec B404/B603 annotations and renames the method, so the security-relevant sink change is f82346b.",
+      "cwe": "CWE-78",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-55849",
+      "package": "@cyclonedx/cyclonedx-npm",
+      "language": "js",
+      "repo": "https://github.com/CycloneDX/cyclonedx-node-npm",
+      "vuln_ref": "79704d50e4e05df0a9138f69148bb32fccb51583",
+      "patched_ref": "9f646253f4263d8644dadb86e5597fad996f688f",
+      "target_paths": [
+        "src/npmRunner.ts"
+      ],
+      "sink_probe": "execSync('npm ' + args.join(' ')",
+      "sink": "In NpmRunner.makeNpmRunner, the fallback branch (npm exec path undefined) returns (args, options) => execSync('npm ' + args.join(' '), options). args carries the user-supplied --workspace CLI value, string-concatenated into a shell command executed by child_process.execSync, so shell metacharacters in --workspace inject commands. Authoritative NVD weakness CWE-78; GHSA-v75r-vx73-82pj.",
+      "patched_shape": "The execSync('npm ' + args.join(' ')) string-building fallback line is removed entirely (PR #1476). The runner now always returns execFileSync with an argv array instead: execFileSync(execPath, args) / execFileSync('cmd.exe', ['/c', execPath, ...args]) / execFileSync(nodeExecPath, ['--', execPath, ...args]); the remaining execSync calls in the patched file use only constant strings ('where npm' / 'which npm'), so the tainted --workspace value is never re-parsed by a shell. Clean exec(string)->execFile(argv) sink change; line-precise (probe is vuln-only).",
+      "cwe": "CWE-78",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-42563",
+      "package": "dulwich",
+      "language": "python",
+      "repo": "https://github.com/jelmer/dulwich",
+      "vuln_ref": "957f0dec2f095d5c87ba12eec383f75ffd021350",
+      "patched_ref": "e3331b3b3a122fc313460182f928f59723580b7b",
+      "target_paths": [
+        "dulwich/merge_drivers.py"
+      ],
+      "sink_probe": "subprocess.run(",
+      "sink": "ProcessMergeDriver.merge builds a shell command by string-replacing the placeholders %O/%A/%B/%L/%P into the merge-driver command template, then runs it via subprocess.run(cmd, shell=True). %P is an attacker-controllable file path taken from a merged (untrusted) git tree, so shell metacharacters in the path inject a second command. Authoritative NVD weakness CWE-78; GHSA-9277-mp7x-85jf.",
+      "patched_shape": "Adds a _shell_quote() helper (shlex.quote on POSIX, cmd.exe double-quote escaping on Windows) and wraps every placeholder value before substitution: cmd.replace(\"%P\", _shell_quote(path)), likewise for %O/%A/%B/%L. This is the accepted 'adds a shell-escaping call' fix shape. NOTE: the subprocess.run(cmd, shell=True) sink CALL itself is unchanged (still present at the patched ref, line 139), so a pure shell=True config rule flags both versions; discriminating vuln-vs-patched requires noticing the added shlex.quote wrap at the taint-prep lines -> deliberately harder generalization case (analogous to the SSRF langchain / XXE jdom2 harder fixtures).",
+      "cwe": "CWE-78",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-11417",
+      "package": "aws-cdk-lib",
+      "language": "js",
+      "repo": "https://github.com/aws/aws-cdk",
+      "vuln_ref": "c0849ea241c8f8707b26f07239aa1078b196bf1c",
+      "patched_ref": "9bf4263ea631cae7c0cfff8872ec4fb3a3164cc1",
+      "target_paths": [
+        "packages/aws-cdk-lib/aws-lambda-nodejs/lib/bundling.ts"
+      ],
+      "sink_probe": "localCommand,",
+      "sink": "In the NodejsFunction LOCAL bundling path, createLocalCommand() joins the esbuild/tsc invocation (with user-controllable entry paths, esbuild args, and commandHooks) into one shell string localCommand, then runs exec(osPlatform === 'win32' ? 'cmd' : 'bash', ['-c'|'/c', localCommand], ...) i.e. bash -c over an attacker-influenced command string. Authoritative NVD weakness CWE-78 (CNA source); GHSA-999r-qq7v-r334.",
+      "patched_shape": "Local bundling is refactored into structured steps executed via DIRECT SPAWN with argv arrays: { type: 'spawn', command: [...esbuildRunner, '--bundle', relativeEntryPath, ...esbuildArgs] } -> exec(step.command[0], step.command.slice(1), ...). The esbuild invocation no longer flows through bash -c (createLocalCommand/localCommand are removed; probe is vuln-only). NOTE: a bash -c exec() remains ONLY for the explicit 'shell' commandHooks case, so discrimination hinges on the vulnerable esbuild command moving to spawn -> moderately harder generalization case.",
+      "cwe": "CWE-78",
+      "status": "pinned"
+    }
+  ],
+  "recurated": "Held-out re-curated to user-code-misuse CVEs where the fix VISIBLY changes the sink (execSync-string->execFileSync-argv, exec(bash,-c)->spawn, Popen(shell=)->removed). dulwich adds shlex.quote with the sink unchanged (documented harder case).",
+  "result": {
+    "seed_rediscovered": true,
+    "heldout_generalization": "3/4",
+    "heldout_rediscovered": [
+      "CVE-2026-55849",
+      "CVE-2026-42563",
+      "CVE-2024-29189"
+    ],
+    "heldout_missed": [
+      "CVE-2026-11417"
+    ],
+    "snapshot": "v4-2026-07-05",
+    "measured_on": "real target files at pinned SHAs (line-precise)",
+    "miss_note": "aws-cdk keeps a bash -c exec for the command-hooks case in the patched tree, so the signal persists -> documented miss / improvement-loop fixture."
+  }
+}
