@@ -1,0 +1,74 @@
+{
+  "bug_class": "ldap_injection",
+  "cwe": "CWE-90",
+  "detector": "DT-LDAP-FILTER",
+  "tier": "deterministic",
+  "language": "java+python+php",
+  "reproducibility": "real repo + pinned vuln/patched SHAs; line-precise; pin-or-drop.",
+  "seed": {
+    "cve": "CVE-2026-42568",
+    "package": "yamcs",
+    "language": "java",
+    "repo": "https://github.com/yamcs/yamcs",
+    "vuln_ref": "e90099fba98e96214217c195b6a5b87b5f46e51c",
+    "patched_ref": "c79cd966be6c28b8ce2916775426de6ec0cc4d03",
+    "target_paths": [
+      "yamcs-core/src/main/java/org/yamcs/security/LdapAuthModule.java"
+    ],
+    "sink_probe": "var filter = userFilter.replace(\"{0}\", username)",
+    "sink": "The searchUserInfo username parameter replaces {0} in userFilter; the resulting filter is passed through getSingleResult to DirContext.search without RFC 4515 filter escaping.",
+    "patched_shape": "Wrap username in escapeLdapFilter before substituting it into userFilter.",
+    "cwe": "CWE-90",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2026-40606",
+      "package": "mitmproxy",
+      "language": "python",
+      "repo": "https://github.com/mitmproxy/mitmproxy",
+      "vuln_ref": "cc58fc9f38e5865c4fa1eb07d7cc598eca1ebd4d",
+      "patched_ref": "71c9234057922bc29b9734ec408d712113d294d2",
+      "target_paths": [
+        "mitmproxy/addons/proxyauth.py"
+      ],
+      "sink_probe": "self.conn.search(self.dn_subtree, f\"({self.filter_key}={username})\")",
+      "sink": "An authentication username is interpolated directly into the ldap3 search filter passed to Connection.search.",
+      "patched_shape": "Build the filter in make_search_filter after ldap3.utils.conv.escape_filter_chars(username).",
+      "cwe": "CWE-90",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-46745",
+      "package": "apache-airflow",
+      "language": "python",
+      "repo": "https://github.com/apache/airflow",
+      "vuln_ref": "d3ea3ef0bccb23786e5b69a5534806ed6ed67c5e",
+      "patched_ref": "3f7756bea71a7c7988511ec0557314ffb15fbe5e",
+      "target_paths": [
+        "providers/fab/src/airflow/providers/fab/auth_manager/security_manager/override.py"
+      ],
+      "sink_probe": "filter_str = f\"(&{self.auth_ldap_search_filter}({self.auth_ldap_uid_field}={username}))\"",
+      "sink": "The LDAP-auth username is interpolated into filter_str and later supplied as the filter argument to python-ldap search_s. A second nested-groups filter similarly interpolates user_dn.",
+      "patched_shape": "Escape username and user_dn with ldap.filter.escape_filter_chars before constructing either search filter.",
+      "cwe": "CWE-90",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2017-14596",
+      "package": "joomla-cms",
+      "language": "php",
+      "repo": "https://github.com/joomla/joomla-cms",
+      "vuln_ref": "220802a6f6d2ab431ab938057220a5f51f3184dd",
+      "patched_ref": "590fd61dfacabe0f776880864667631ff8ec9014",
+      "target_paths": [
+        "plugins/authentication/ldap/ldap.php"
+      ],
+      "sink_probe": "$binddata = $ldap->simple_search(str_replace('[search]', $credentials['username'], $this->params->get('search_string')));",
+      "sink": "The authentication username replaces [search] in the configured LDAP filter and the result is passed directly to simple_search.",
+      "patched_shape": "Escape credentials username with LDAP_ESCAPE_FILTER before str_replace; use LDAP_ESCAPE_DN separately for bind DNs.",
+      "cwe": "CWE-90",
+      "status": "pinned"
+    }
+  ]
+}
