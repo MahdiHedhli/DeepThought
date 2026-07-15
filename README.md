@@ -114,6 +114,7 @@ class's rate may drop). Measured to date:
 | 7 | OS command injection (78) | `DT-CMDI-EXEC` | JS + Python | node-glob → cyclonedx, dulwich, ansys, aws-cdk | **3/4** |
 | 11 | SQL injection (89) | `DT-SQLI-QUERY` | Python + PHP + Velocity | Arches → OpenCart, Cacti, XWiki | **2/3** |
 | 12 | LDAP injection (90) | `DT-LDAP-FILTER` | Java + Python + PHP | Yamcs → mitmproxy, Airflow, Joomla | **3/3** |
+| 13 | Open redirect (601) | `DT-OPEN-REDIRECT` | Python | Archivy → Spirit, Grappelli, Jupyter | **3/3** |
 
 Every number is honest: unresolvable CVEs are **dropped-with-reason** (never counted as
 missed), **mis-classed corpus seeds are caught and swapped** by the verify-at-build
@@ -123,16 +124,16 @@ user-code-misuse** where the raw corpus was dominated by library-internal CVEs a
 rule can't discriminate, and misses are documented as improvement-loop fixtures rather than
 hidden. The curve moves both ways honestly — 66.7% → 70.9% → 58.3% (XXE dip) → 62.5%
 (command injection) → 63.3% (path traversal) → 69.5% (deserialization) → **69.1%**
-(SQL injection) → **72.9%** (LDAP injection) under a regression bar
+(SQL injection) → **72.9%** (LDAP injection) → **75.9%** (open redirect) under a regression bar
 (`benchmarks/data/generalization-log.json`).
 See [`benchmarks/deep-thought-benchmark.md`](benchmarks/deep-thought-benchmark.md) and the
-[corpus](benchmarks/rediscovery-corpus.md). Six of the original ten classes plus two Round 3
+[corpus](benchmarks/rediscovery-corpus.md). Six of the original ten classes plus three Round 3
 broad-surface classes are measured; ReDoS and the sandbox-tier memory-safety classes remain
 unbuilt.
 
 ```bash
 # reproduce a class's held-out generalization on the real pinned trees (network)
-DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_ldap_injection.py
+DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_open_redirect.py
 ```
 
 ## Agent memory — portable, self-contained, multi-agent

@@ -83,6 +83,7 @@ counting only entries pinned to real ground truth.
 - **XXE:** pin three or more public CVEs of the class at build time (e.g. Java/XML-parser XXE advisories), each with vuln/patched SHAs in the manifest — not chosen ad hoc at run time.
 - **Deserialization:** serialize-to-js CVE-2017-5954 is the verified seed; held-out Superset CVE-2018-8021, suricata-update CVE-2018-1000167, and Struts CVE-2017-9805 are pinned in the manifest. The React RSC seed was swapped because its property-traversal mechanism did not match this unsafe-deserialization sink class.
 - **LDAP injection:** Yamcs CVE-2026-42568 is the verified seed; held-out mitmproxy CVE-2026-40606, Apache Airflow CVE-2026-46745, and Joomla CVE-2017-14596 are pinned in the manifest.
+- **Open redirect:** Archivy CVE-2022-0697 is the verified seed; held-out Spirit CVE-2022-0869, Django Grappelli CVE-2021-46898, and Jupyter Notebook CVE-2020-26215 are pinned in the manifest.
 
 ## Acceptance
 
@@ -129,3 +130,26 @@ The honest ceiling is path-sensitive control flow: source-order state is not a c
 CFG/dominance proof, so a raw intermediate assigned on one conditional arm and a safe or
 constant value assigned on another can be lost before a filter is built after the merge.
 That shape is documented rather than represented as covered by the measured 3/3 cohort.
+
+## Round 3 broad-surface extension: open redirect
+
+The Round 3 open-redirect class extends the corpus into Python web-framework redirects and
+same-origin validation. The manifest at `benchmarks/corpus/open_redirect/manifest.json` is
+the executable source of truth:
+
+| Role | CVE / package | Vulnerable SHA | Patched SHA | Result |
+| --- | --- | --- | --- | --- |
+| seed | CVE-2022-0697 / Archivy | `fa389e7d59f91980693965830839d6de1f1db45f` | `2d8cb29853190d42572b36deb61127e68d6be574` | pipeline rediscovered |
+| held-out | CVE-2022-0869 / Spirit | `8b48d18e44f1dbb4b0f0a0a975d0dc14b88f0f41` | `8f32f89654d6c30d56e0dd167059d32146fb32ef` | rediscovered |
+| held-out | CVE-2021-46898 / Django Grappelli | `55f88d661c28598d059cf81dbfd38dacb945662f` | `4ca94bcda0fa2720594506853d85e00c8212968f` | rediscovered |
+| held-out | CVE-2020-26215 / Jupyter Notebook | `d8308e13803ba1c6e92f129381e615af6c6e00d3` | `3cec4bbe21756de9f0c4bccf18cf61d840314d74` | rediscovered; one unrelated patched flag |
+
+The held-out score is **3/3** with **1 patched-file flag**. Jupyter's surviving
+`self.redirect(url)` uses `url_path_join(..., url_escape(path))` and does not contain the
+distinctive vulnerable sink probe, so line-precise rediscovery remains valid. Archivy's
+patched seed also contains three unrelated `request.referrer` redirect flags; they are
+outside the held-out metric and are not represented as clean.
+
+urllib3 **CVE-2025-50181** is authoritatively CWE-601 but is dropped from this user-code
+cohort because its fix changes library-internal redirect bookkeeping rather than an
+application redirect sink. It is not counted as a miss.

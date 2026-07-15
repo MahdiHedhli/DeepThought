@@ -136,19 +136,23 @@ own text must contain the sink probe in the vulnerable tree and not in the patch
 | Unsafe deserialization (502) | `DT-DESERIAL` (JS+Python+Java) | serialize-to-js CVE-2017-5954 | **3/3** | receiver-bound Java hardening and import-provenanced dynamic sinks |
 | SQL injection (89) | `DT-SQLI-QUERY` (Python+PHP+Velocity) | Arches CVE-2022-41892 | **2/3** | XWiki fix reorders a framework check while the dynamic ORDER BY signal persists; 48 patched-file flags reported |
 | LDAP injection (90) | `DT-LDAP-FILTER` (Java+Python+PHP) | Yamcs CVE-2026-42568 | **3/3** | RFC 4515 filter escaping, value-linked helper summaries, and source-order state; 0 patched-file flags |
+| Open redirect (601) | `DT-OPEN-REDIRECT` (Python) | Archivy CVE-2022-0697 | **3/3** | validator dominance and fixed same-origin path prefixes; 1 unrelated patched-file flag reported |
 
 The generalization log (`benchmarks/data/generalization-log.json`) versions the score
 under a **regression bar** — no merged change may lower any class's rate. Discipline held:
 CVEs with no authoritative NVD record are **dropped-with-reason**, seeds whose authoritative
 CWE doesn't match the class are **swapped-with-reason**, and misses are documented as
 improvement-loop fixtures — the numbers are the honest measurement, never gamed. The
-eight-class mean is **72.9%** after LDAP injection's 3/3 held-out result. The
+nine-class mean is **75.9%** after open redirect's 3/3 held-out result. Jupyter's
+patched tree retains one unrelated `self.redirect(url)` flag whose value is built from
+`url_path_join(..., url_escape(path))`; it does not contain the vulnerable sink probe and is
+reported honestly rather than hidden. The
 sandbox tier (heap-overflow / UAF) executes target code and runs only behind the Article
 III sign-off (`benchmarks/corpus/SIGNOFF-sandbox-tier.md`).
 
 ```bash
 # reproduce a class on the real pinned trees (network); default runs skip these
-DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_ldap_injection.py
+DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_open_redirect.py
 ```
 
 ## Run it
