@@ -11,7 +11,8 @@ Code, Codex, and any other agent compound into the SAME memory.
 
 - **At session start:** `python3 memory/mem.py backup`, read `memory/vault/MEMORY.md`, then
   recall **scoped** — `recall --class methodology` (always-load) + `recall --class <attack> --tag
-  <surface>` — instead of loading the whole notebook.
+  <surface>` + `recall --harness claude` (Claude-specific quirks) — instead of loading the whole
+  notebook.
 - **Record durable facts** per [`memory/AGENTS.md`](memory/AGENTS.md) via `python3 memory/mem.py
   add` (or by editing markdown + `mem.py index`). Notes are typed
   `user|feedback|lesson|project|reference`; a `lesson` also carries `class` + `tags` for scoped

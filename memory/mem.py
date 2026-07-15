@@ -16,6 +16,7 @@ Usage:
   python memory/mem.py index                        # rebuild MEMORY.md from the notes
   python memory/mem.py recall [query]               # print notes matching a query (or the index)
   python memory/mem.py recall --class ssrf --tag python   # SCOPED recall: only the relevant slice
+  python memory/mem.py recall --harness codex             # only this harness's known quirks
   python memory/mem.py list                         # list every note + its description
   python memory/mem.py backup                       # snapshot the vault (rotating, gitignored)
   python memory/mem.py restore [timestamp]          # revert to the newest (or a named) backup
@@ -76,11 +77,14 @@ def _notes() -> list[Path]:
     return sorted(p for p in VAULT.glob("*.md") if p.name != INDEX)
 
 
-def _note_meta(fm: dict) -> tuple[str, list[str]]:
-    """(class, tags) from a note's frontmatter — for scoped recall by attack class / surface."""
+def _note_meta(fm: dict) -> tuple[str, list[str], str]:
+    """(class, tags, harness) from a note's frontmatter — for scoped recall by attack class /
+    surface / harness. `harness` is set only on notes that apply to ONE harness (a Codex/Claude/
+    Cursor-specific gotcha); most notes are harness-agnostic and leave it empty."""
     klass = fm.get("class", "").strip()
     tags = [t.strip().lower() for t in fm.get("tags", "").strip("[]").split(",") if t.strip()]
-    return klass, tags
+    harness = fm.get("harness", "").strip().lower()
+    return klass, tags, harness
 
 
 def _make_backup(keep: int = KEEP_BACKUPS) -> Path | None:
@@ -144,6 +148,8 @@ def cmd_add(args) -> int:
     tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
     if tags:
         meta.append(f"  tags: [{', '.join(tags)}]")     # surface/platform/language for scoped recall
+    if getattr(args, "harness", ""):
+        meta.append(f"  harness: {args.harness}")       # set only for a harness-specific fact
     meta.append(f"  updated: {date}")
     note = (
         f"---\nname: {slug}\ndescription: {args.description}\n"
@@ -171,8 +177,8 @@ def cmd_index(quiet: bool = False) -> int:
             mt = re.search(r"type:\s*(\w+)", p.read_text(encoding="utf-8"))
             t = mt.group(1) if mt and mt.group(1) in TYPES else "reference"
         desc = fm.get("description", "")
-        klass, _tags = _note_meta(fm)
-        label = f"`{klass}` " if klass else ""
+        klass, _tags, harness = _note_meta(fm)
+        label = (f"`{klass}` " if klass else "") + (f"`@{harness}` " if harness else "")
         by_type.setdefault(t, []).append(f"- [{fm.get('name', p.stem)}]({p.name}) {label}— {desc}")
     lines = ["# Memory index", "",
              "_DeepThought portable agent memory. One fact per note; this index is generated "
@@ -198,17 +204,20 @@ def cmd_recall(args) -> int:
         return 1
     cls = (getattr(args, "klass", "") or "").strip().lower()
     tag = (getattr(args, "tag", "") or "").strip().lower()
+    harn = (getattr(args, "harness", "") or "").strip().lower()
     q = (args.query or "").lower()
-    if not (cls or tag or q):
+    if not (cls or tag or harn or q):
         print((VAULT / INDEX).read_text(encoding="utf-8") if (VAULT / INDEX).exists() else "(empty)")
         return 0
     hits = 0
     for p in _notes():
         text = p.read_text(encoding="utf-8")
-        klass, tags = _note_meta(_fm(text))
+        klass, tags, harness = _note_meta(_fm(text))
         if cls and klass.lower() != cls:
             continue
         if tag and tag not in tags:
+            continue
+        if harn and harness != harn:
             continue
         if q and q not in text.lower() and q not in p.stem.lower():
             continue
@@ -216,6 +225,7 @@ def cmd_recall(args) -> int:
         hits += 1
     if not hits:
         scope = " ".join(x for x in (f"class={cls}" if cls else "", f"tag={tag}" if tag else "",
+                                     f"harness={harn}" if harn else "",
                                      f"query={args.query!r}" if q else "") if x)
         print(f"no notes match {scope}")
     return 0
@@ -272,6 +282,7 @@ def main() -> int:
     a.add_argument("--description", required=True)
     a.add_argument("--class", dest="klass", default="", help="attack class / CWE this lesson is about")
     a.add_argument("--tags", default="", help="comma list: surface/platform/language (e.g. web,python,taint)")
+    a.add_argument("--harness", default="", help="set ONLY for a harness-specific fact (codex|claude|cursor)")
     a.add_argument("--body", default="")
     a.add_argument("--body-file", default="")
     a.add_argument("--date", default="")
@@ -280,6 +291,7 @@ def main() -> int:
     r.add_argument("query", nargs="?", default="")
     r.add_argument("--class", dest="klass", default="", help="only notes of this attack class")
     r.add_argument("--tag", default="", help="only notes carrying this surface/platform/language tag")
+    r.add_argument("--harness", default="", help="only notes specific to this harness (codex|claude|cursor)")
     sub.add_parser("list")
     b = sub.add_parser("backup")
     b.add_argument("--keep", type=int, default=0, help=f"snapshots to retain (default {KEEP_BACKUPS})")

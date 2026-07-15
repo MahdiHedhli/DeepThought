@@ -32,6 +32,9 @@ assume Claude has already populated the shared vault.
 - `python3 memory/mem.py recall --tag python` — returns the Python-surface notes across classes
   (ssrf/xxe/command-injection detection), NOT the JS-only ones.
 - `python3 memory/mem.py recall --class ssrf --tag python` — the intersection.
+- `python3 memory/mem.py recall --harness codex` — returns ONLY the Codex-specific quirks (e.g.
+  `codex-clobbers-venv`, labeled `` `@codex` `` in the index). This is the note you as Codex
+  should always pull at session start.
 PASS = each filter narrows the set as described (scoped recall works, so you never have to load
 the entire notebook).
 
