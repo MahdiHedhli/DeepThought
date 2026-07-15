@@ -30,3 +30,6 @@ benchmarks/.cache/
 # Portable agent memory — the DATA is co-located but never committed (mechanism stays in memory/)
 memory/vault/
 memory/backups/
+
+# Obsidian per-user workspace config (never commit)
+.obsidian/
