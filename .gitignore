@@ -26,3 +26,6 @@ venv/
 
 # Corpus fetch cache (real package files at pinned SHAs; re-fetchable)
 benchmarks/.cache/
+
+# Portable agent memory — the DATA is co-located but never committed (mechanism stays in memory/)
+memory/vault/
