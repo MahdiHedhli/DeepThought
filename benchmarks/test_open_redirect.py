@@ -277,6 +277,22 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             1,
         ),
         (
+            "def outer():\n import flask as web\n"
+            " def inner(request): return web.redirect(request.args.get('next'))\n"
+            " return inner",
+            1,
+        ),
+        (
+            "import flask as web\n"
+            "def f(web,request): return web.redirect(request.args.get('next'))",
+            0,
+        ),
+        (
+            "import flask\n"
+            "def f(): return flask.RedirectResponse(flask.request.args.get('next'))",
+            0,
+        ),
+        (
             "from flask import redirect\ndef f(): return redirect(location='/fixed')",
             0,
         ),
@@ -338,6 +354,40 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             "  return\n finally:\n  redirect(target)",
             1,
         ),
+        (
+            "from flask import redirect,request\n"
+            "def f(flag):\n target='/'\n try:\n  if flag:\n"
+            "   target=request.args.get('next')\n   raise ValueError\n"
+            "  target='/'\n except Exception:\n  return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(flag):\n target='/'\n try:\n  if flag:\n"
+            "   target=request.args.get('next')\n   return\n"
+            " finally:\n  redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n target='/'\n try:\n  raise ValueError\n"
+            " except Exception:\n  target=request.args.get('next')\n"
+            "  may_raise()\n  target='/'\n finally:\n  redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n target='/'\n try:\n  pass\n except Exception:\n  pass\n"
+            " else:\n  target=request.args.get('next')\n  may_raise()\n"
+            "  target='/'\n finally:\n  redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n target='/'\n try:\n  target=request.args.get('next')\n"
+            "  target='/'\n except Exception:\n  return redirect(target)",
+            0,
+        ),
         ("from flask import redirect\ndef f(): return redirect('/fixed')", 0),
         ("from flask import redirect,url_for\ndef f(): return redirect(url_for('index'))", 0),
         (
@@ -366,6 +416,22 @@ def test_fixture_discriminates_one_vulnerable_redirect():
         (
             "from flask import redirect,request\n"
             "def f(): return redirect(''.join([request.path,request.args.get('next')]))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n sep=request.args.get('next')\n"
+            " return redirect(sep.join(['','']))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect(''.join(['/u/',request.args.get('next')]))",
+            0,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect(''.join(['/',request.args.get('next')]))",
             1,
         ),
         # Prefixing a raw value with one slash can still produce // or ///. The

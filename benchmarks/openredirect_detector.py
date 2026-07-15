@@ -17,14 +17,15 @@ from pathlib import Path
 RULE_ID = "DT-OPEN-REDIRECT"
 GROUND_TRUTH_CWE = "CWE-601"
 
-_REDIRECT_MODULES = {
-    "flask",
-    "django.shortcuts",
-    "django.http",
-    "starlette.responses",
-    "fastapi.responses",
+_REDIRECT_EXPORTS = {
+    "flask": {"redirect"},
+    "django.shortcuts": {"redirect"},
+    "django.http": {"HttpResponseRedirect"},
+    "starlette.responses": {"RedirectResponse"},
+    "fastapi.responses": {"RedirectResponse"},
 }
-_REDIRECT_NAMES = {"redirect", "HttpResponseRedirect", "RedirectResponse"}
+_REDIRECT_MODULES = set(_REDIRECT_EXPORTS)
+_REDIRECT_NAMES = set().union(*_REDIRECT_EXPORTS.values())
 _VALIDATORS = {
     "is_safe_redirect_url",
     "url_has_allowed_host_and_scheme",
@@ -241,6 +242,7 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
         for name in _assigned_names(node.target):
             state.env[name] = value_flow
             state.validated.discard(name)
+            state.module_aliases.pop(name, None)
         return value_flow
     if isinstance(node, ast.Await):
         return _flow(node.value, state)
@@ -312,6 +314,9 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
                     else:
                         elements.append(arg)
                 values = [_flow(arg, state) for arg in elements]
+                first_literal = _literal_string(elements[0]) if elements else None
+                if _has_internal_path_prefix(first_literal):
+                    return Flow.INTERNAL
                 # An unclassified tainted suffix can introduce a second leading slash;
                 # an internal first element alone does not make the joined URL safe.
                 if (
@@ -323,7 +328,7 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
                     )
                 ):
                     return Flow.INTERNAL
-                return _join_values(values)
+                return _join_values([receiver, *values])
             if callee == "format":
                 values = [
                     receiver,
@@ -404,6 +409,17 @@ def _block_always_exits(statements: list[ast.stmt]) -> bool:
     return isinstance(last, ast.If) and _block_always_exits(last.body) and _block_always_exits(last.orelse)
 
 
+def _statement_may_raise(statement: ast.stmt) -> bool:
+    """Whether evaluation can transfer control before the next statement."""
+    if isinstance(statement, (ast.Raise, ast.Assert, ast.Import, ast.ImportFrom)):
+        return True
+    return any(
+        isinstance(node, (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.Subscript))
+        for node in ast.walk(statement)
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
+    )
+
+
 def _merge_states(target: State, branches: list[State]) -> None:
     if not branches:
         return
@@ -414,6 +430,15 @@ def _merge_states(target: State, branches: list[State]) -> None:
         merged[name] = _join_values(values)
     target.env = merged
     target.validated = set.intersection(*(branch.validated for branch in branches))
+    common_aliases = set.intersection(*(set(branch.module_aliases) for branch in branches))
+    target.module_aliases = {
+        name: branches[0].module_aliases[name]
+        for name in common_aliases
+        if all(
+            branch.module_aliases[name] == branches[0].module_aliases[name]
+            for branch in branches[1:]
+        )
+    }
 
 
 class _ScopeImportCollector(ast.NodeVisitor):
@@ -441,7 +466,7 @@ class _ScopeImportCollector(ast.NodeVisitor):
         for alias in node.names:
             local = alias.asname or alias.name
             qualified = f"{module}.{alias.name}" if module else alias.name
-            if module in _REDIRECT_MODULES and alias.name in _REDIRECT_NAMES:
+            if alias.name in _REDIRECT_EXPORTS.get(module, set()):
                 self.redirect_aliases.add(local)
             if alias.name in _VALIDATORS:
                 self.validator_aliases.add(local)
@@ -463,11 +488,46 @@ class _ScopeImportCollector(ast.NodeVisitor):
         return
 
 
+class _ScopeBindingCollector(ast.NodeVisitor):
+    """Collect names bound by one function without descending into child scopes."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit_Name(self, node: ast.Name) -> None:  # noqa: N802
+        if isinstance(node.ctx, ast.Store):
+            self.names.add(node.id)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self.names.add(node.name)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        self.names.add(node.name)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        self.names.add(node.name)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:  # noqa: N802
+        if node.name:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
+
 def _imports(statements: list[ast.stmt]) -> tuple[set[str], set[str], dict[str, str]]:
     collector = _ScopeImportCollector()
     for statement in statements:
         collector.visit(statement)
     return collector.redirect_aliases, collector.validator_aliases, collector.module_aliases
+
+
+def _scope_bindings(statements: list[ast.stmt]) -> set[str]:
+    collector = _ScopeBindingCollector()
+    for statement in statements:
+        collector.visit(statement)
+    return collector.names
 
 
 class _Scanner:
@@ -492,8 +552,8 @@ class _Scanner:
         resolved = _resolved_dotted(call.func, state.module_aliases)
         if any(
             resolved == f"{module}.{name}"
-            for module in _REDIRECT_MODULES
-            for name in _REDIRECT_NAMES
+            for module, names in _REDIRECT_EXPORTS.items()
+            for name in names
         ):
             return True
         return (
@@ -524,6 +584,7 @@ class _Scanner:
             for name in _assigned_names(expr.target):
                 state.env[name] = value_flow
                 state.validated.discard(name)
+                state.module_aliases.pop(name, None)
             return
         if isinstance(expr, ast.Call):
             # Python evaluates the callee and arguments before invoking the call.
@@ -554,10 +615,32 @@ class _Scanner:
         for child in ast.iter_child_nodes(expr):
             self._scan_expr(child, state, web_handler)
 
-    def _scan_block(self, statements: list[ast.stmt], state: State, web_handler: bool) -> None:
+    def _scan_block(
+        self,
+        statements: list[ast.stmt],
+        state: State,
+        web_handler: bool,
+        exception_states: list[State] | None = None,
+        exit_states: list[State] | None = None,
+    ) -> None:
         for stmt in statements:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
+            if exception_states is not None and _statement_may_raise(stmt):
+                exception_states.append(state.branch())
+            if isinstance(stmt, ast.Return):
+                self._scan_expr(stmt.value, state, web_handler)
+                if exit_states is not None:
+                    exit_states.append(state.branch())
+                break
+            if isinstance(stmt, ast.Raise):
+                self._scan_expr(stmt.exc, state, web_handler)
+                self._scan_expr(stmt.cause, state, web_handler)
+                if exception_states is not None:
+                    exception_states.append(state.branch())
+                if exit_states is not None:
+                    exit_states.append(state.branch())
+                break
             if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
                 value = stmt.value
                 self._scan_expr(value, state, web_handler)
@@ -567,6 +650,7 @@ class _Scanner:
                     for name in _assigned_names(target):
                         state.env[name] = value_flow
                         state.validated.discard(name)
+                        state.module_aliases.pop(name, None)
                 continue
             if isinstance(stmt, ast.AugAssign):
                 self._scan_expr(stmt.value, state, web_handler)
@@ -574,17 +658,30 @@ class _Scanner:
                 for name in _assigned_names(stmt.target):
                     state.env[name] = value_flow
                     state.validated.discard(name)
+                    state.module_aliases.pop(name, None)
                 continue
             if isinstance(stmt, ast.If):
                 self._scan_expr(stmt.test, state, web_handler)
                 positive, negative = _validation_guarantees(stmt.test, self.validator_aliases)
                 body_state = state.branch()
                 body_state.validated.update(positive)
-                self._scan_block(stmt.body, body_state, web_handler)
+                self._scan_block(
+                    stmt.body,
+                    body_state,
+                    web_handler,
+                    exception_states,
+                    exit_states,
+                )
                 false_state = state.branch()
                 false_state.validated.update(negative)
                 else_state = false_state.branch()
-                self._scan_block(stmt.orelse, else_state, web_handler)
+                self._scan_block(
+                    stmt.orelse,
+                    else_state,
+                    web_handler,
+                    exception_states,
+                    exit_states,
+                )
 
                 continuing: list[State] = []
                 if not _block_always_exits(stmt.body):
@@ -606,11 +703,24 @@ class _Scanner:
                     for name in _assigned_names(stmt.target):
                         body_state.env[name] = target_flow
                         body_state.validated.discard(name)
-                self._scan_block(stmt.body, body_state, web_handler)
+                        body_state.module_aliases.pop(name, None)
+                self._scan_block(
+                    stmt.body,
+                    body_state,
+                    web_handler,
+                    exception_states,
+                    exit_states,
+                )
                 _merge_states(state, [before, body_state])
                 if stmt.orelse:
                     else_state = state.branch()
-                    self._scan_block(stmt.orelse, else_state, web_handler)
+                    self._scan_block(
+                        stmt.orelse,
+                        else_state,
+                        web_handler,
+                        exception_states,
+                        exit_states,
+                    )
                     # A break can bypass the else arm, so preserve both paths.
                     _merge_states(state, [state.branch(), else_state])
                 continue
@@ -619,42 +729,92 @@ class _Scanner:
                     self._scan_expr(item.context_expr, state, web_handler)
                 # A later statement is reached only after the with body completes,
                 # so its assignments dominate that continuation.
-                self._scan_block(stmt.body, state, web_handler)
+                self._scan_block(
+                    stmt.body,
+                    state,
+                    web_handler,
+                    exception_states,
+                    exit_states,
+                )
                 continue
             if isinstance(stmt, (ast.Try, ast.TryStar)):
                 before = state.branch()
                 body_state = state.branch()
-                exceptional_states = [before.branch()]
-                for body_stmt in stmt.body:
-                    self._scan_block([body_stmt], body_state, web_handler)
-                    exceptional_states.append(body_state.branch())
+                body_exceptions = [before.branch()]
+                body_exits: list[State] = []
+                self._scan_block(
+                    stmt.body,
+                    body_state,
+                    web_handler,
+                    body_exceptions,
+                    body_exits,
+                )
                 normal_state = body_state.branch()
-                self._scan_block(stmt.orelse, normal_state, web_handler)
+                else_exceptions: list[State] = []
+                else_exits: list[State] = []
+                self._scan_block(
+                    stmt.orelse,
+                    normal_state,
+                    web_handler,
+                    else_exceptions,
+                    else_exits,
+                )
                 continuing: list[State] = []
-                exiting: list[State] = []
+                exiting: list[State] = [*body_exits, *else_exits]
                 if not _block_always_exits(stmt.body) and not _block_always_exits(stmt.orelse):
                     continuing.append(normal_state)
                 else:
                     exiting.append(normal_state)
                 handler_states: list[State] = []
+                handler_exceptions: list[State] = []
+                handler_exits: list[State] = []
                 for handler in stmt.handlers:
                     handler_state = before.branch()
-                    _merge_states(handler_state, exceptional_states)
-                    self._scan_block(handler.body, handler_state, web_handler)
+                    _merge_states(handler_state, body_exceptions)
+                    current_exceptions: list[State] = []
+                    current_exits: list[State] = []
+                    self._scan_block(
+                        handler.body,
+                        handler_state,
+                        web_handler,
+                        current_exceptions,
+                        current_exits,
+                    )
                     handler_states.append(handler_state)
+                    handler_exceptions.extend(current_exceptions)
+                    handler_exits.extend(current_exits)
                     if not _block_always_exits(handler.body):
                         continuing.append(handler_state)
                     else:
                         exiting.append(handler_state)
+                exiting.extend(handler_exits)
                 if stmt.finalbody:
                     # Finally runs on normal, handled, exiting, and still-exceptional
                     # prefixes. Scan that conservative union once for findings.
                     finally_state = before.branch()
                     _merge_states(
                         finally_state,
-                        [*exceptional_states, normal_state, *handler_states, *exiting],
+                        [
+                            *body_exceptions,
+                            *body_exits,
+                            normal_state,
+                            *else_exceptions,
+                            *else_exits,
+                            *handler_states,
+                            *handler_exceptions,
+                            *handler_exits,
+                            *exiting,
+                        ],
                     )
-                    self._scan_block(stmt.finalbody, finally_state, web_handler)
+                    final_exceptions: list[State] = []
+                    final_exits: list[State] = []
+                    self._scan_block(
+                        stmt.finalbody,
+                        finally_state,
+                        web_handler,
+                        final_exceptions,
+                        final_exits,
+                    )
 
                     if continuing:
                         # Reapply finally to continuing paths to compute the state
@@ -671,13 +831,31 @@ class _Scanner:
                         state.validated = finally_state.validated
                 else:
                     _merge_states(state, continuing or [before])
+                if exception_states is not None:
+                    # A surrounding try conservatively sees unresolved body paths
+                    # plus exceptions raised by else/handler/finally processing.
+                    exception_states.extend(body_exceptions)
+                    exception_states.extend(else_exceptions)
+                    exception_states.extend(handler_exceptions)
+                    if stmt.finalbody:
+                        exception_states.extend(final_exceptions)
+                if exit_states is not None:
+                    exit_states.extend(exiting)
+                    if stmt.finalbody:
+                        exit_states.extend(final_exits)
                 continue
             if isinstance(stmt, ast.Match):
                 self._scan_expr(stmt.subject, state, web_handler)
                 branches = [state.branch()]
                 for case in stmt.cases:
                     case_state = state.branch()
-                    self._scan_block(case.body, case_state, web_handler)
+                    self._scan_block(
+                        case.body,
+                        case_state,
+                        web_handler,
+                        exception_states,
+                        exit_states,
+                    )
                     if not _block_always_exits(case.body):
                         branches.append(case_state)
                 _merge_states(state, branches)
@@ -688,28 +866,53 @@ class _Scanner:
                     self._scan_expr(value, state, web_handler)
 
     def scan_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, web_handler: bool) -> None:
+        parameters = [
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        ]
+        if node.args.vararg:
+            parameters.append(node.args.vararg)
+        if node.args.kwarg:
+            parameters.append(node.args.kwarg)
         env = {
             arg.arg: Flow.TAINTED
-            for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            for arg in parameters
             if arg.arg not in {"self", "cls", "request"}
         }
         local_redirects, local_validators, local_modules = _imports(node.body)
+        local_bindings = _scope_bindings(node.body) | {arg.arg for arg in parameters}
         prior_redirects = self.redirect_aliases
         prior_validators = self.validator_aliases
         prior_modules = self.module_aliases
-        self.redirect_aliases = prior_redirects | local_redirects
-        self.validator_aliases = prior_validators | local_validators
-        self.module_aliases = {**prior_modules, **local_modules}
+        self.redirect_aliases = (prior_redirects - local_bindings) | local_redirects
+        self.validator_aliases = (prior_validators - local_bindings) | local_validators
+        inherited_modules = {
+            name: module
+            for name, module in prior_modules.items()
+            if name not in local_bindings
+        }
+        self.module_aliases = {**inherited_modules, **local_modules}
         try:
             self._scan_block(
                 node.body,
                 State(env, set(), dict(self.module_aliases)),
                 web_handler,
             )
+            self.scan_definitions(node.body, web_handler)
         finally:
             self.redirect_aliases = prior_redirects
             self.validator_aliases = prior_validators
             self.module_aliases = prior_modules
+
+    def scan_definitions(self, statements: list[ast.stmt], web_handler: bool) -> None:
+        for node in statements:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.scan_function(node, web_handler)
+            elif isinstance(node, ast.ClassDef):
+                base_names = {_name(base) for base in node.bases}
+                class_is_web = bool(base_names & _WEB_HANDLER_BASES)
+                self.scan_definitions(node.body, class_is_web)
 
 
 def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
@@ -725,17 +928,7 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
     # independently so its validation state cannot leak into its parent or siblings.
     scanner._scan_block(tree.body, State({}, set(), dict(module_aliases)), False)
 
-    def scan_definitions(statements: list[ast.stmt], web_handler: bool) -> None:
-        for node in statements:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                scanner.scan_function(node, web_handler)
-                scan_definitions(node.body, web_handler)
-            elif isinstance(node, ast.ClassDef):
-                base_names = {_name(base) for base in node.bases}
-                class_is_web = bool(base_names & _WEB_HANDLER_BASES)
-                scan_definitions(node.body, class_is_web)
-
-    scan_definitions(tree.body, False)
+    scanner.scan_definitions(tree.body, False)
     return scanner.results
 
 
