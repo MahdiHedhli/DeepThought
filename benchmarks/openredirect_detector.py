@@ -167,6 +167,12 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
         if node.id in state.validated:
             return Flow.INTERNAL
         return state.env.get(node.id, Flow.UNTAINTED)
+    if isinstance(node, ast.NamedExpr):
+        value_flow = _flow(node.value, state)
+        for name in _assigned_names(node.target):
+            state.env[name] = value_flow
+            state.validated.discard(name)
+        return value_flow
     if isinstance(node, ast.Constant):
         return Flow.UNTAINTED
     if isinstance(node, ast.BoolOp):
@@ -333,30 +339,58 @@ class _Scanner:
             and call.func.value.id == "self"
         )
 
+    @staticmethod
+    def _redirect_target(call: ast.Call) -> ast.AST | None:
+        if call.args:
+            return call.args[0]
+        for keyword in call.keywords:
+            if keyword.arg in {"location", "redirect_to", "url"}:
+                return keyword.value
+        return None
+
     def _scan_expr(self, expr: ast.AST | None, state: State, web_handler: bool) -> None:
         if expr is None:
             return
-        for node in ast.walk(expr):
-            if not isinstance(node, ast.Call) or not self._is_sink(node, web_handler):
-                continue
-            target = node.args[0] if node.args else None
-            if target is not None and _flow(target, state) is Flow.TAINTED:
-                self.results.append(
-                    _result(
-                        self.uri,
-                        node.lineno,
-                        node.col_offset + 1,
-                        "open redirect (CWE-601): request-derived URL reaches a framework redirect "
-                        "without same-origin validation",
-                        self.cve,
+        if isinstance(expr, ast.Lambda):
+            return
+        if isinstance(expr, ast.NamedExpr):
+            self._scan_expr(expr.value, state, web_handler)
+            value_flow = _flow(expr.value, state)
+            for name in _assigned_names(expr.target):
+                state.env[name] = value_flow
+                state.validated.discard(name)
+            return
+        if isinstance(expr, ast.Call):
+            # Python evaluates the callee and arguments before invoking the call.
+            # Preserve that order so assignment expressions in a redirect target
+            # update the same state used to classify the sink.
+            self._scan_expr(expr.func, state, web_handler)
+            for arg in expr.args:
+                self._scan_expr(arg, state, web_handler)
+            for keyword in expr.keywords:
+                self._scan_expr(keyword.value, state, web_handler)
+            if self._is_sink(expr, web_handler):
+                target = self._redirect_target(expr)
+                if target is not None and _flow(target, state) is Flow.TAINTED:
+                    self.results.append(
+                        _result(
+                            self.uri,
+                            expr.lineno,
+                            expr.col_offset + 1,
+                            "open redirect (CWE-601): request-derived URL reaches a framework redirect "
+                            "without same-origin validation",
+                            self.cve,
+                        )
                     )
-                )
+            return
+        for child in ast.iter_child_nodes(expr):
+            self._scan_expr(child, state, web_handler)
 
     def _scan_block(self, statements: list[ast.stmt], state: State, web_handler: bool) -> None:
         for stmt in statements:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
-            if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
                 value = stmt.value
                 self._scan_expr(value, state, web_handler)
                 targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]

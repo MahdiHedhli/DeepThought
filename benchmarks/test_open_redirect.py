@@ -138,6 +138,43 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             "def f(): return redirect('{}'.format(request.args.get('next')))",
             1,
         ),
+        # Review P2: assignment expressions bind before the surrounding branch or
+        # redirect call, including when used as a standalone expression.
+        (
+            "from flask import redirect,request\n"
+            "def f():\n if (target := request.args.get('next')):\n  return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect((target := request.args.get('next')))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n (target := request.args.get('next'))\n return redirect(target)",
+            1,
+        ),
+        # Framework keyword-only spellings carry the same sink semantics.
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect(location=request.args.get('next'))",
+            1,
+        ),
+        (
+            "from django.http import HttpResponseRedirect\n"
+            "def f(request): return HttpResponseRedirect(redirect_to=request.GET.get('next'))",
+            1,
+        ),
+        (
+            "from starlette.responses import RedirectResponse\n"
+            "def f(request): return RedirectResponse(url=request.query_params.get('next'))",
+            1,
+        ),
+        (
+            "from flask import redirect\ndef f(): return redirect(location='/fixed')",
+            0,
+        ),
         ("from flask import redirect\ndef f(): return redirect('/fixed')", 0),
         ("from flask import redirect,url_for\ndef f(): return redirect(url_for('index'))", 0),
         (
