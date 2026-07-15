@@ -1,0 +1,6 @@
+## Unsafe ORDER BY construction.
+#set ($order = "$!request.sort")
+#set ($orderQueryPart = "order by ${order}")
+
+## A bound value changes only the parameter list, not the SQL text.
+#set ($whereQueryPart = "where ddoc.batchId = ?1")
