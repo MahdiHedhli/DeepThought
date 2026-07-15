@@ -138,6 +138,43 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             "def f(): return redirect('{}'.format(request.args.get('next')))",
             1,
         ),
+        # A literal, single-origin path prefix is safe across equivalent string
+        # construction forms; a bare or protocol-relative slash prefix is not.
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect(f'/dataobj/{request.args.get(\"id\")}')",
+            0,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('/u/{}'.format(request.args.get('id')))",
+            0,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('/u/%s' % request.args.get('id'))",
+            0,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect(f'/{request.args.get(\"id\")}')",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('//' + request.args.get('next'))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('///' + request.args.get('next'))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('/\\\\' + request.args.get('next'))",
+            1,
+        ),
         # Review P2: assignment expressions bind before the surrounding branch or
         # redirect call, including when used as a standalone expression.
         (
@@ -173,6 +210,38 @@ def test_fixture_discriminates_one_vulnerable_redirect():
         ),
         (
             "from flask import redirect\ndef f(): return redirect(location='/fixed')",
+            0,
+        ),
+        # Assignments in compound statements must reach a later redirect on every
+        # feasible continuation, with may-taint merged across alternative paths.
+        (
+            "from flask import redirect,request\n"
+            "def f():\n target='/'\n with open('x') as fh:\n"
+            "  target=request.args.get('next')\n return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n target='/'\n try:\n  target=request.args.get('next')\n"
+            " except Exception:\n  target='/'\n return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(items):\n target='/'\n for item in items:\n"
+            "  target=request.args.get('next')\n return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(flag):\n target='/'\n while flag:\n"
+            "  target=request.args.get('next')\n  break\n return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n target=request.args.get('next')\n try:\n  pass\n"
+            " finally:\n  target='/'\n return redirect(target)",
             0,
         ),
         ("from flask import redirect\ndef f(): return redirect('/fixed')", 0),

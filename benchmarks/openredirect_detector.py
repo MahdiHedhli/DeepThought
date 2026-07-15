@@ -113,6 +113,16 @@ def _strips_leading_slashes(node: ast.AST) -> bool:
     return _literal_string(node.args[0]) == "/"
 
 
+def _has_internal_path_prefix(value: str | None) -> bool:
+    """Return whether a literal prefix fixes the URL to this origin.
+
+    A bare slash is insufficient because an attacker can supply a second slash.
+    Two slashes, or slash followed by backslash, are protocol-relative in browsers.
+    A non-separator character after the first slash establishes an internal path.
+    """
+    return bool(value and len(value) > 1 and value[0] == "/" and value[1] not in "/\\")
+
+
 def _request_source(node: ast.AST) -> bool:
     dotted = _dotted(node)
     if dotted in {"request.path", "self.request.path"}:
@@ -180,21 +190,34 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
     if isinstance(node, ast.IfExp):
         return _join_values([_flow(node.body, state), _flow(node.orelse, state)])
     if isinstance(node, ast.JoinedStr):
-        return _join_values(
-            [_flow(value.value, state) for value in node.values if isinstance(value, ast.FormattedValue)]
-        )
+        values = [
+            _flow(value.value, state)
+            for value in node.values
+            if isinstance(value, ast.FormattedValue)
+        ]
+        if Flow.TAINTED in values:
+            prefix = _literal_string(node.values[0]) if node.values else None
+            if _has_internal_path_prefix(prefix):
+                return Flow.INTERNAL
+        return _join_values(values)
     if isinstance(node, ast.BinOp):
         left = _flow(node.left, state)
         right = _flow(node.right, state)
         if isinstance(node.op, ast.Add):
             prefix = _literal_string(node.left)
             if prefix and prefix.startswith("/") and right is Flow.TAINTED:
-                # A non-root path prefix stays internal. A bare slash is safe only
-                # when attacker-controlled leading slashes were removed first;
-                # otherwise '/' + '//evil.example' is still protocol-relative.
-                if prefix != "/" or _strips_leading_slashes(node.right):
+                # A single-origin path prefix stays internal. A bare slash is safe
+                # only when attacker-controlled leading slashes were removed first;
+                # otherwise '/' + '/evil.example' is protocol-relative.
+                if _has_internal_path_prefix(prefix) or (
+                    prefix == "/" and _strips_leading_slashes(node.right)
+                ):
                     return Flow.INTERNAL
             if left is Flow.INTERNAL:
+                return Flow.INTERNAL
+        if isinstance(node.op, ast.Mod):
+            template = _literal_string(node.left)
+            if right is Flow.TAINTED and _has_internal_path_prefix(template):
                 return Flow.INTERNAL
         return _join_values([left, right])
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
@@ -228,9 +251,15 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
                     return Flow.INTERNAL
                 return _join_values(values)
             if callee == "format":
-                return _join_values(
-                    [receiver, *[_flow(arg, state) for arg in node.args], *[_flow(kw.value, state) for kw in node.keywords]]
-                )
+                values = [
+                    receiver,
+                    *[_flow(arg, state) for arg in node.args],
+                    *[_flow(kw.value, state) for kw in node.keywords],
+                ]
+                template = _literal_string(node.func.value)
+                if Flow.TAINTED in values and _has_internal_path_prefix(template):
+                    return Flow.INTERNAL
+                return _join_values(values)
             if callee in _PRESERVING_TRANSFORMS:
                 return receiver
         return _join_values([_flow(arg, state) for arg in node.args])
@@ -430,25 +459,54 @@ class _Scanner:
                 continue
             if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
                 self._scan_expr(stmt.iter if hasattr(stmt, "iter") else stmt.test, state, web_handler)
-                self._scan_block(stmt.body, state.branch(), web_handler)
-                self._scan_block(stmt.orelse, state.branch(), web_handler)
+                before = state.branch()
+                body_state = state.branch()
+                self._scan_block(stmt.body, body_state, web_handler)
+                _merge_states(state, [before, body_state])
+                if stmt.orelse:
+                    else_state = state.branch()
+                    self._scan_block(stmt.orelse, else_state, web_handler)
+                    # A break can bypass the else arm, so preserve both paths.
+                    _merge_states(state, [state.branch(), else_state])
                 continue
             if isinstance(stmt, (ast.With, ast.AsyncWith)):
                 for item in stmt.items:
                     self._scan_expr(item.context_expr, state, web_handler)
-                self._scan_block(stmt.body, state.branch(), web_handler)
+                # A later statement is reached only after the with body completes,
+                # so its assignments dominate that continuation.
+                self._scan_block(stmt.body, state, web_handler)
                 continue
             if isinstance(stmt, (ast.Try, ast.TryStar)):
-                self._scan_block(stmt.body, state.branch(), web_handler)
+                before = state.branch()
+                body_state = state.branch()
+                self._scan_block(stmt.body, body_state, web_handler)
+                normal_state = body_state.branch()
+                self._scan_block(stmt.orelse, normal_state, web_handler)
+                continuing: list[State] = []
+                if not _block_always_exits(stmt.body) and not _block_always_exits(stmt.orelse):
+                    continuing.append(normal_state)
                 for handler in stmt.handlers:
-                    self._scan_block(handler.body, state.branch(), web_handler)
-                self._scan_block(stmt.orelse, state.branch(), web_handler)
-                self._scan_block(stmt.finalbody, state.branch(), web_handler)
+                    # An exception can be raised after any body assignment. Merge
+                    # the pre-body and completed-body states conservatively before
+                    # applying the handler.
+                    handler_state = before.branch()
+                    _merge_states(handler_state, [before, body_state])
+                    self._scan_block(handler.body, handler_state, web_handler)
+                    if not _block_always_exits(handler.body):
+                        continuing.append(handler_state)
+                _merge_states(state, continuing or [before])
+                # finally runs on every path that reaches the following statement.
+                self._scan_block(stmt.finalbody, state, web_handler)
                 continue
             if isinstance(stmt, ast.Match):
                 self._scan_expr(stmt.subject, state, web_handler)
+                branches = [state.branch()]
                 for case in stmt.cases:
-                    self._scan_block(case.body, state.branch(), web_handler)
+                    case_state = state.branch()
+                    self._scan_block(case.body, case_state, web_handler)
+                    if not _block_always_exits(case.body):
+                        branches.append(case_state)
+                _merge_states(state, branches)
                 continue
             for field in ("value", "test", "exc", "cause"):
                 value = getattr(stmt, field, None)
