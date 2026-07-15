@@ -255,6 +255,28 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             1,
         ),
         (
+            "from django.shortcuts import redirect\n"
+            "def f(request): return redirect(to=request.GET.get('next'))",
+            1,
+        ),
+        # Live review: framework modules and request objects can be qualified or
+        # aliased, including imports local to one view without sibling leakage.
+        (
+            "import flask\ndef f(): return flask.redirect(flask.request.args.get('next'))",
+            1,
+        ),
+        (
+            "def f():\n import flask as fw\n"
+            " return fw.redirect(fw.request.args.get('next'))\n"
+            "def sibling(): return fw.redirect(fw.request.args.get('next'))",
+            1,
+        ),
+        (
+            "from flask import redirect,request as req\n"
+            "def f(): return redirect(req.args.get('next'))",
+            1,
+        ),
+        (
             "from flask import redirect\ndef f(): return redirect(location='/fixed')",
             0,
         ),
@@ -280,6 +302,19 @@ def test_fixture_discriminates_one_vulnerable_redirect():
         ),
         (
             "from flask import redirect,request\n"
+            "def f():\n for target in [request.args.get('next')]:\n"
+            "  return redirect(target)",
+            1,
+        ),
+        (
+            "from starlette.responses import RedirectResponse\n"
+            "async def f(request,values):\n"
+            " async for target in values(request.query_params.get('next')):\n"
+            "  return RedirectResponse(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
             "def f(flag):\n target='/'\n while flag:\n"
             "  target=request.args.get('next')\n  break\n return redirect(target)",
             1,
@@ -289,6 +324,19 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             "def f():\n target=request.args.get('next')\n try:\n  pass\n"
             " finally:\n  target='/'\n return redirect(target)",
             0,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n target='/'\n try:\n  target=request.args.get('next')\n"
+            "  may_raise()\n  target='/'\n except Exception:\n"
+            "  return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f():\n target='/'\n try:\n  target=request.args.get('next')\n"
+            "  return\n finally:\n  redirect(target)",
+            1,
         ),
         ("from flask import redirect\ndef f(): return redirect('/fixed')", 0),
         ("from flask import redirect,url_for\ndef f(): return redirect(url_for('index'))", 0),
@@ -314,6 +362,11 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             " def get(self):\n  path,*rest=self.request.uri.partition('?')\n"
             "  path='/' + path.strip('/')\n  new_uri=''.join([path,*rest])\n  self.redirect(new_uri)",
             0,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect(''.join([request.path,request.args.get('next')]))",
+            1,
         ),
         # Prefixing a raw value with one slash can still produce // or ///. The
         # Jupyter patched shape is safe because strip('/') removes that ambiguity.

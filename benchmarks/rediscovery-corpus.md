@@ -62,10 +62,10 @@ those SHAs.
   or the project advisory) at that class's build. A seed whose authoritative weakness
   class does not match its row is **relabeled or swapped** for a true public example
   of the class before the detector is calibrated — the detector is never trained on an
-  off-class seed. Known boundary case to resolve at build: the SSRF seed
-  **CVE-2025-50181 (urllib3)** sits on the CWE-601 (redirect) / CWE-918 (SSRF)
-  boundary; if the authoritative record classes it as redirect-only, it is swapped for
-  a genuine CWE-918 request-sink SSRF CVE (or the row is relabeled to match).
+  off-class seed. **CVE-2025-50181 (urllib3)** was resolved as authoritative CWE-601,
+  swapped out of the SSRF seed, and later excluded from the open-redirect user-code
+  cohort because its fix changes library-internal redirect bookkeeping. It is not
+  counted as a miss in either class.
 
 ## Held-out generalization sets (candidate lists — pinned per class at build)
 

@@ -134,7 +134,7 @@ Each build round appends one section here using this template:
   (`requests`/`aiohttp` + same-domain). **Seed swapped** from urllib3 CVE-2025-50181
   (authoritatively CWE-601, not SSRF).
 - **Held-out generalization:** **3/4 (75%)** — dify seed + gradio + pydantic-ai +
-  lmdeploy rediscovered; langchain missed (logged `v2-2026-07-05`; skill mean 70.9%).
+  lmdeploy rediscovered; langchain missed (logged `v2-2026-07-05`; skill mean 70.8%).
 - **Notes.** Two SSRF-fix shapes handled: **sink substitution** (the raw sink replaced
   by a safe wrapper like `ssrf_proxy.get`/`safe_download`, recognized by a safe-wrapper
   name so it is never a sink) and **guard added** (a validation of the URL/host —

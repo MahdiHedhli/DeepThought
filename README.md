@@ -122,8 +122,8 @@ contract (urllib3 was really an open redirect, CWE-601, not SSRF; the ReactRSC d
 was a prototype-pollution-flavored mechanism), held-out sets are **re-curated to
 user-code-misuse** where the raw corpus was dominated by library-internal CVEs a user-code
 rule can't discriminate, and misses are documented as improvement-loop fixtures rather than
-hidden. The curve moves both ways honestly — 66.7% → 70.9% → 58.3% (XXE dip) → 62.5%
-(command injection) → 63.3% (path traversal) → 69.5% (deserialization) → **69.1%**
+hidden. The curve moves both ways honestly — 66.7% → 70.8% → 58.3% (XXE dip) → 62.5%
+(command injection) → 63.3% (path traversal) → 69.4% (deserialization) → **69.0%**
 (SQL injection) → **72.9%** (LDAP injection) → **75.9%** (open redirect) under a regression bar
 (`benchmarks/data/generalization-log.json`).
 See [`benchmarks/deep-thought-benchmark.md`](benchmarks/deep-thought-benchmark.md) and the

@@ -60,15 +60,17 @@ class Flow(Enum):
     UNTAINTED = 0
     TAINTED = 1
     INTERNAL = 2
+    URL_SUFFIX = 3
 
 
 @dataclass
 class State:
     env: dict[str, Flow]
     validated: set[str]
+    module_aliases: dict[str, str]
 
     def branch(self) -> "State":
-        return State(dict(self.env), set(self.validated))
+        return State(dict(self.env), set(self.validated), dict(self.module_aliases))
 
 
 def _name(node: ast.AST | None) -> str:
@@ -88,6 +90,15 @@ def _dotted(node: ast.AST | None) -> str:
     if isinstance(cur, ast.Name):
         parts.append(cur.id)
     return ".".join(reversed(parts))
+
+
+def _resolved_dotted(node: ast.AST | None, module_aliases: dict[str, str]) -> str:
+    dotted = _dotted(node)
+    head, separator, tail = dotted.partition(".")
+    resolved = module_aliases.get(head)
+    if not resolved:
+        return dotted
+    return resolved + (separator + tail if separator else "")
 
 
 def _root_name(node: ast.AST | None) -> str:
@@ -154,51 +165,61 @@ def _percent_literal_prefix(template: str | None) -> str | None:
     return "".join(prefix)
 
 
-def _request_source(node: ast.AST) -> bool:
-    dotted = _dotted(node)
-    if dotted in {"request.path", "self.request.path"}:
+def _request_source(node: ast.AST, module_aliases: dict[str, str]) -> bool:
+    dotted = _resolved_dotted(node, module_aliases)
+    request_prefixes = ("request", "self.request", "flask.request")
+    if dotted in {f"{prefix}.path" for prefix in request_prefixes}:
         return False
-    if dotted in {"request.referrer", "request.url", "request.uri", "self.request.uri"}:
+    if dotted in {
+        f"{prefix}.{attribute}"
+        for prefix in request_prefixes
+        for attribute in _REQUEST_URL_ATTRS
+    }:
         return True
     if isinstance(node, ast.Attribute) and node.attr in _REQUEST_CONTAINERS:
-        return _root_name(node) in {"request", "self"} and "request" in dotted
+        return dotted in {f"{prefix}.{node.attr}" for prefix in request_prefixes}
     if isinstance(node, ast.Call):
-        callee = _dotted(node.func)
-        if callee in {"request.get_full_path", "self.request.get_full_path"}:
+        callee = _resolved_dotted(node.func, module_aliases)
+        if callee in {f"{prefix}.get_full_path" for prefix in request_prefixes}:
             return False
         if callee in {
-            "request.get_json",
-            "self.request.get_json",
-            "request.json",
-            "self.request.json",
+            f"{prefix}.{accessor}"
+            for prefix in request_prefixes
+            for accessor in ("get_json", "json")
         }:
             return True
         if _name(node.func) in {"get_argument", "get_query_argument"}:
             return _root_name(node.func) in {"self", "request"}
         if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
-            return _request_source(node.func.value)
+            return _request_source(node.func.value, module_aliases)
     if isinstance(node, ast.Subscript):
-        return _request_source(node.value)
+        return _request_source(node.value, module_aliases)
     return False
 
 
-def _internal_source(node: ast.AST) -> bool:
-    if isinstance(node, ast.Attribute) and _dotted(node) in {"request.path", "self.request.path"}:
+def _internal_source(node: ast.AST, module_aliases: dict[str, str]) -> bool:
+    dotted = _resolved_dotted(node, module_aliases)
+    request_prefixes = ("request", "self.request", "flask.request")
+    if isinstance(node, ast.Attribute) and dotted in {
+        f"{prefix}.path" for prefix in request_prefixes
+    }:
         return True
     if not isinstance(node, ast.Call):
         return False
     callee = _name(node.func)
-    dotted = _dotted(node.func)
+    dotted = _resolved_dotted(node.func, module_aliases)
     return (
         callee in _INTERNAL_BUILDERS
         or callee == "get_absolute_url"
-        or dotted in {"request.get_full_path", "self.request.get_full_path"}
+        or dotted in {f"{prefix}.get_full_path" for prefix in request_prefixes}
     )
 
 
 def _join_values(values: list[Flow]) -> Flow:
     if Flow.TAINTED in values:
         return Flow.TAINTED
+    if Flow.URL_SUFFIX in values:
+        return Flow.URL_SUFFIX
     if Flow.INTERNAL in values:
         return Flow.INTERNAL
     return Flow.UNTAINTED
@@ -207,9 +228,9 @@ def _join_values(values: list[Flow]) -> Flow:
 def _flow(node: ast.AST | None, state: State) -> Flow:
     if node is None:
         return Flow.UNTAINTED
-    if _internal_source(node):
+    if _internal_source(node, state.module_aliases):
         return Flow.INTERNAL
-    if _request_source(node):
+    if _request_source(node, state.module_aliases):
         return Flow.TAINTED
     if isinstance(node, ast.Name):
         if node.id in state.validated:
@@ -245,7 +266,10 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
         right = _flow(node.right, state)
         if isinstance(node.op, ast.Add):
             prefix = _literal_string(node.left)
-            if prefix and prefix.startswith("/") and right is Flow.TAINTED:
+            if prefix and prefix.startswith("/") and right in {
+                Flow.TAINTED,
+                Flow.URL_SUFFIX,
+            }:
                 # A single-origin path prefix stays internal. A bare slash is safe
                 # only when attacker-controlled leading slashes were removed first;
                 # otherwise '/' + '/evil.example' is protocol-relative.
@@ -288,8 +312,16 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
                     else:
                         elements.append(arg)
                 values = [_flow(arg, state) for arg in elements]
-                # Joining query/suffix pieces to an established internal path stays internal.
-                if values and values[0] is Flow.INTERNAL:
+                # An unclassified tainted suffix can introduce a second leading slash;
+                # an internal first element alone does not make the joined URL safe.
+                if (
+                    values
+                    and values[0] is Flow.INTERNAL
+                    and all(
+                        value in {Flow.UNTAINTED, Flow.URL_SUFFIX}
+                        for value in values[1:]
+                    )
+                ):
                     return Flow.INTERNAL
                 return _join_values(values)
             if callee == "format":
@@ -304,6 +336,13 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
                 ):
                     return Flow.INTERNAL
                 return _join_values(values)
+            if (
+                callee == "partition"
+                and receiver in {Flow.TAINTED, Flow.URL_SUFFIX}
+                and node.args
+                and _literal_string(node.args[0]) in {"?", "#"}
+            ):
+                return Flow.URL_SUFFIX
             if callee in _PRESERVING_TRANSFORMS:
                 return receiver
         return _join_values([_flow(arg, state) for arg in node.args])
@@ -383,15 +422,33 @@ class _ScopeImportCollector(ast.NodeVisitor):
     def __init__(self) -> None:
         self.redirect_aliases: set[str] = set()
         self.validator_aliases: set[str] = set()
+        self.module_aliases: dict[str, str] = {}
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        for alias in node.names:
+            module = alias.name
+            relevant = module in _REDIRECT_MODULES or any(
+                candidate.startswith(module + ".") for candidate in _REDIRECT_MODULES
+            )
+            if not relevant:
+                continue
+            local = alias.asname or module.split(".", 1)[0]
+            resolved = module if alias.asname else module.split(".", 1)[0]
+            self.module_aliases[local] = resolved
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         module = node.module or ""
         for alias in node.names:
             local = alias.asname or alias.name
+            qualified = f"{module}.{alias.name}" if module else alias.name
             if module in _REDIRECT_MODULES and alias.name in _REDIRECT_NAMES:
                 self.redirect_aliases.add(local)
             if alias.name in _VALIDATORS:
                 self.validator_aliases.add(local)
+            if qualified in _REDIRECT_MODULES:
+                self.module_aliases[local] = qualified
+            if module == "flask" and alias.name == "request":
+                self.module_aliases[local] = "flask.request"
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
         return
@@ -406,24 +463,39 @@ class _ScopeImportCollector(ast.NodeVisitor):
         return
 
 
-def _imports(statements: list[ast.stmt]) -> tuple[set[str], set[str]]:
+def _imports(statements: list[ast.stmt]) -> tuple[set[str], set[str], dict[str, str]]:
     collector = _ScopeImportCollector()
     for statement in statements:
         collector.visit(statement)
-    return collector.redirect_aliases, collector.validator_aliases
+    return collector.redirect_aliases, collector.validator_aliases, collector.module_aliases
 
 
 class _Scanner:
-    def __init__(self, redirect_aliases: set[str], validator_aliases: set[str], uri: str, cve: str | None):
+    def __init__(
+        self,
+        redirect_aliases: set[str],
+        validator_aliases: set[str],
+        module_aliases: dict[str, str],
+        uri: str,
+        cve: str | None,
+    ):
         self.redirect_aliases = redirect_aliases
         self.validator_aliases = validator_aliases
+        self.module_aliases = module_aliases
         self.uri = uri
         self.cve = cve
         self.results: list[dict] = []
 
-    def _is_sink(self, call: ast.Call, web_handler: bool) -> bool:
+    def _is_sink(self, call: ast.Call, web_handler: bool, state: State) -> bool:
         if isinstance(call.func, ast.Name):
             return call.func.id in self.redirect_aliases
+        resolved = _resolved_dotted(call.func, state.module_aliases)
+        if any(
+            resolved == f"{module}.{name}"
+            for module in _REDIRECT_MODULES
+            for name in _REDIRECT_NAMES
+        ):
+            return True
         return (
             web_handler
             and isinstance(call.func, ast.Attribute)
@@ -437,7 +509,7 @@ class _Scanner:
         if call.args:
             return call.args[0]
         for keyword in call.keywords:
-            if keyword.arg in {"location", "redirect_to", "url"}:
+            if keyword.arg in {"location", "redirect_to", "url", "to"}:
                 return keyword.value
         return None
 
@@ -462,9 +534,12 @@ class _Scanner:
                 self._scan_expr(arg, state, web_handler)
             for keyword in expr.keywords:
                 self._scan_expr(keyword.value, state, web_handler)
-            if self._is_sink(expr, web_handler):
+            if self._is_sink(expr, web_handler, state):
                 target = self._redirect_target(expr)
-                if target is not None and _flow(target, state) is Flow.TAINTED:
+                if target is not None and _flow(target, state) in {
+                    Flow.TAINTED,
+                    Flow.URL_SUFFIX,
+                }:
                     self.results.append(
                         _result(
                             self.uri,
@@ -522,9 +597,15 @@ class _Scanner:
                 _merge_states(state, continuing)
                 continue
             if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
-                self._scan_expr(stmt.iter if hasattr(stmt, "iter") else stmt.test, state, web_handler)
+                control_expr = stmt.iter if isinstance(stmt, (ast.For, ast.AsyncFor)) else stmt.test
+                self._scan_expr(control_expr, state, web_handler)
                 before = state.branch()
                 body_state = state.branch()
+                if isinstance(stmt, (ast.For, ast.AsyncFor)):
+                    target_flow = _flow(stmt.iter, state)
+                    for name in _assigned_names(stmt.target):
+                        body_state.env[name] = target_flow
+                        body_state.validated.discard(name)
                 self._scan_block(stmt.body, body_state, web_handler)
                 _merge_states(state, [before, body_state])
                 if stmt.orelse:
@@ -543,24 +624,53 @@ class _Scanner:
             if isinstance(stmt, (ast.Try, ast.TryStar)):
                 before = state.branch()
                 body_state = state.branch()
-                self._scan_block(stmt.body, body_state, web_handler)
+                exceptional_states = [before.branch()]
+                for body_stmt in stmt.body:
+                    self._scan_block([body_stmt], body_state, web_handler)
+                    exceptional_states.append(body_state.branch())
                 normal_state = body_state.branch()
                 self._scan_block(stmt.orelse, normal_state, web_handler)
                 continuing: list[State] = []
+                exiting: list[State] = []
                 if not _block_always_exits(stmt.body) and not _block_always_exits(stmt.orelse):
                     continuing.append(normal_state)
+                else:
+                    exiting.append(normal_state)
+                handler_states: list[State] = []
                 for handler in stmt.handlers:
-                    # An exception can be raised after any body assignment. Merge
-                    # the pre-body and completed-body states conservatively before
-                    # applying the handler.
                     handler_state = before.branch()
-                    _merge_states(handler_state, [before, body_state])
+                    _merge_states(handler_state, exceptional_states)
                     self._scan_block(handler.body, handler_state, web_handler)
+                    handler_states.append(handler_state)
                     if not _block_always_exits(handler.body):
                         continuing.append(handler_state)
-                _merge_states(state, continuing or [before])
-                # finally runs on every path that reaches the following statement.
-                self._scan_block(stmt.finalbody, state, web_handler)
+                    else:
+                        exiting.append(handler_state)
+                if stmt.finalbody:
+                    # Finally runs on normal, handled, exiting, and still-exceptional
+                    # prefixes. Scan that conservative union once for findings.
+                    finally_state = before.branch()
+                    _merge_states(
+                        finally_state,
+                        [*exceptional_states, normal_state, *handler_states, *exiting],
+                    )
+                    self._scan_block(stmt.finalbody, finally_state, web_handler)
+
+                    if continuing:
+                        # Reapply finally to continuing paths to compute the state
+                        # after the try without duplicating already-recorded findings.
+                        continuation_state = before.branch()
+                        _merge_states(continuation_state, continuing)
+                        result_count = len(self.results)
+                        self._scan_block(stmt.finalbody, continuation_state, web_handler)
+                        del self.results[result_count:]
+                        state.env = continuation_state.env
+                        state.validated = continuation_state.validated
+                    else:
+                        state.env = finally_state.env
+                        state.validated = finally_state.validated
+                else:
+                    _merge_states(state, continuing or [before])
                 continue
             if isinstance(stmt, ast.Match):
                 self._scan_expr(stmt.subject, state, web_handler)
@@ -583,16 +693,23 @@ class _Scanner:
             for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
             if arg.arg not in {"self", "cls", "request"}
         }
-        local_redirects, local_validators = _imports(node.body)
+        local_redirects, local_validators, local_modules = _imports(node.body)
         prior_redirects = self.redirect_aliases
         prior_validators = self.validator_aliases
+        prior_modules = self.module_aliases
         self.redirect_aliases = prior_redirects | local_redirects
         self.validator_aliases = prior_validators | local_validators
+        self.module_aliases = {**prior_modules, **local_modules}
         try:
-            self._scan_block(node.body, State(env, set()), web_handler)
+            self._scan_block(
+                node.body,
+                State(env, set(), dict(self.module_aliases)),
+                web_handler,
+            )
         finally:
             self.redirect_aliases = prior_redirects
             self.validator_aliases = prior_validators
+            self.module_aliases = prior_modules
 
 
 def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
@@ -600,13 +717,13 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
         tree = ast.parse(source)
     except SyntaxError:
         return []
-    redirect_aliases, imported_validators = _imports(tree.body)
+    redirect_aliases, imported_validators, module_aliases = _imports(tree.body)
     validator_aliases = set(_VALIDATORS) | imported_validators
-    scanner = _Scanner(redirect_aliases, validator_aliases, uri, cve)
+    scanner = _Scanner(redirect_aliases, validator_aliases, module_aliases, uri, cve)
 
     # Module-level redirects are rare but valid. Each nested function is then scanned
     # independently so its validation state cannot leak into its parent or siblings.
-    scanner._scan_block(tree.body, State({}, set()), False)
+    scanner._scan_block(tree.body, State({}, set(), dict(module_aliases)), False)
 
     def scan_definitions(statements: list[ast.stmt], web_handler: bool) -> None:
         for node in statements:
