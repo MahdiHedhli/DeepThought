@@ -22,7 +22,7 @@
     ],
     "sink_probe": "path.join(output, x.path)",
     "sink": "const dest = path.join(output, x.path) then fsP.writeFile(dest, x.data)/fsP.link/fsP.symlink \u2014 archive member path x.path joined to output and written with no containment (also arbitrary write through a symlink; CWE-22 + CWE-59)",
-    "patched_shape": "realpath both the destination dir and output (Promise.all([fsP.realpath(path.dirname(dest)), fsP.realpath(output)])) and throw unless realDestinationDir.indexOf(realOutputDir) === 0 \u2014 realpath containment that also defeats symlink escape",
+    "patched_shape": "resolve the real output path, use safeMakeDir to reject destination parents outside it, refuse writes through an existing symlink, then realpath the final destination parent and require realDestinationDir.indexOf(realOutputPath) === 0 before link, symlink, or file writes",
     "cwe": "CWE-22",
     "status": "pinned"
   },
