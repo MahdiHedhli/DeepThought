@@ -9,6 +9,7 @@ validated on the path to the sink or normalized to a single-leading-slash intern
 from __future__ import annotations
 
 import ast
+import string
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -123,6 +124,36 @@ def _has_internal_path_prefix(value: str | None) -> bool:
     return bool(value and len(value) > 1 and value[0] == "/" and value[1] not in "/\\")
 
 
+def _format_literal_prefix(template: str | None) -> str | None:
+    """Return literal text before the first ``str.format`` replacement field."""
+    if template is None:
+        return None
+    try:
+        return next(string.Formatter().parse(template))[0]
+    except (StopIteration, ValueError):
+        return None
+
+
+def _percent_literal_prefix(template: str | None) -> str | None:
+    """Return literal text before the first percent-format replacement field."""
+    if template is None:
+        return None
+    prefix: list[str] = []
+    index = 0
+    while index < len(template):
+        char = template[index]
+        if char != "%":
+            prefix.append(char)
+            index += 1
+            continue
+        if index + 1 < len(template) and template[index + 1] == "%":
+            prefix.append("%")
+            index += 2
+            continue
+        break
+    return "".join(prefix)
+
+
 def _request_source(node: ast.AST) -> bool:
     dotted = _dotted(node)
     if dotted in {"request.path", "self.request.path"}:
@@ -217,7 +248,9 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
                 return Flow.INTERNAL
         if isinstance(node.op, ast.Mod):
             template = _literal_string(node.left)
-            if right is Flow.TAINTED and _has_internal_path_prefix(template):
+            if right is Flow.TAINTED and _has_internal_path_prefix(
+                _percent_literal_prefix(template)
+            ):
                 return Flow.INTERNAL
         return _join_values([left, right])
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
@@ -257,7 +290,9 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
                     *[_flow(kw.value, state) for kw in node.keywords],
                 ]
                 template = _literal_string(node.func.value)
-                if Flow.TAINTED in values and _has_internal_path_prefix(template):
+                if Flow.TAINTED in values and _has_internal_path_prefix(
+                    _format_literal_prefix(template)
+                ):
                     return Flow.INTERNAL
                 return _join_values(values)
             if callee in _PRESERVING_TRANSFORMS:

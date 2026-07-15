@@ -157,6 +157,31 @@ def test_fixture_discriminates_one_vulnerable_redirect():
         ),
         (
             "from flask import redirect,request\n"
+            "def f(): return redirect('/{}'.format(request.args.get('next')))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('/{0}'.format(request.args.get('next')))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('/{}/'.format(request.args.get('next')))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('/%s' % request.args.get('next'))",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('/%(next)s' % {'next': request.args.get('next')})",
+            1,
+        ),
+        (
+            "from flask import redirect,request\n"
             "def f(): return redirect(f'/{request.args.get(\"id\")}')",
             1,
         ),
