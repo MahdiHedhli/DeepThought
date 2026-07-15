@@ -63,6 +63,60 @@ def _iter_nodes(node: Node):
         stack.extend(reversed(current.children))
 
 
+def _is_structural_parameter(name: str) -> bool:
+    """Exclude directory handles and filter templates from untrusted value sources."""
+    normalized = name.lstrip("$").lower().replace("_", "")
+    return normalized in {
+        "base",
+        "client",
+        "con",
+        "conn",
+        "connection",
+        "context",
+        "control",
+        "controls",
+        "ctx",
+        "dc",
+        "directory",
+        "ldap",
+        "scope",
+        "searchbase",
+        "searchstring",
+        "template",
+        "userbase",
+        "userfilter",
+    }
+
+
+def _ts_branch_arms(node: Node) -> dict[int, str]:
+    """Return enclosing tree-sitter if identities and the arm containing node."""
+    arms: dict[int, str] = {}
+    current = node
+    while current.parent is not None:
+        parent = current.parent
+        if parent.type == "if_statement":
+            field = None
+            for index, child in enumerate(parent.children):
+                if child == current:
+                    field = parent.field_name_for_child(index)
+                    break
+            if field in ("body", "consequence"):
+                arms[parent.id] = "body"
+            elif field == "alternative":
+                arms[parent.id] = "orelse"
+        current = parent
+    return arms
+
+
+def _ts_mutually_exclusive(left: Node, right: Node) -> bool:
+    left_arms = _ts_branch_arms(left)
+    right_arms = _ts_branch_arms(right)
+    return any(
+        branch in right_arms and right_arms[branch] != arm
+        for branch, arm in left_arms.items()
+    )
+
+
 def _result(uri: str, line: int, column: int, message: str, cve: str | None) -> dict:
     properties = {"cwe": GROUND_TRUTH_CWE}
     if cve:
@@ -132,25 +186,97 @@ def _java_identifiers(source: bytes, node: Node | None) -> set[str]:
     return {_text(source, n) for n in _iter_nodes(node) if n.type == "identifier"}
 
 
-def _java_filter_sanitized(source: bytes, node: Node) -> bool:
-    """Recognize RFC 4515 *filter* escaping, not DN escaping."""
-    for call in _iter_nodes(node):
-        if call.type != "method_invocation":
+def _java_local_filter_sanitizers(source: bytes, root: Node) -> set[str]:
+    """Prove local RFC 4515 encoders by the five required metacharacter escapes."""
+    methods: dict[str, list[Node]] = {}
+    for method in _iter_nodes(root):
+        if method.type != "method_declaration":
             continue
-        name = _java_call_name(source, call).lower().replace("_", "")
-        call_text = _text(source, call).lower()
-        if name in {
-            "escapeldapfilter",
-            "escapefilterchars",
-            "encodefiltervalue",
-            "filterencode",
-        }:
-            return True
-        if "escape" in name and "filter" in name and "dn" not in name:
-            return True
-        if "ldap_escape_filter" in call_text or "ldapescapefilter" in call_text:
+        methods.setdefault(_java_method_name(source, method), []).append(method)
+
+    required_pairs = (
+        (r"case '\\'", r"\\5c"),
+        ("case '*'", r"\\2a"),
+        ("case '('", r"\\28"),
+        ("case ')'", r"\\29"),
+        (r"case '\0'", r"\\00"),
+    )
+
+    def proves_filter_encoding(method: Node) -> bool:
+        groups = [
+            _text(source, node).lower()
+            for node in _iter_nodes(method)
+            if node.type in ("switch_rule", "switch_block_statement_group")
+        ]
+        return all(
+            any(case in group and encoded in group for group in groups)
+            for case, encoded in required_pairs
+        )
+
+    return {
+        name
+        for name, declarations in methods.items()
+        if name and all(proves_filter_encoding(method) for method in declarations)
+    }
+
+
+def _java_call_is_filter_sanitizer(
+    source: bytes, call: Node, local_sanitizers: set[str]
+) -> bool:
+    if call.type != "method_invocation":
+        return False
+    raw_name = _java_call_name(source, call)
+    name = raw_name.lower().replace("_", "")
+    owner = _text(source, call.child_by_field_name("object")).lower()
+
+    # A local helper is trusted only after its implementation proves all RFC 4515
+    # escapes. Name-only helpers are attacker-controlled code, not sanitizers.
+    if raw_name in local_sanitizers and owner in ("", "this"):
+        return True
+    source_text = source.decode("utf-8", "replace").lower()
+    spring_encoder_imported = (
+        "import org.springframework.ldap.support.ldapencoder;" in source_text
+    )
+    if (
+        name == "filterencode"
+        and (
+            owner == "org.springframework.ldap.support.ldapencoder"
+            or (owner == "ldapencoder" and spring_encoder_imported)
+        )
+    ):
+        return True
+    if any(token in owner for token in ("ldapfilter", "filterencoder")) and name in {
+        "escapefilterchars",
+        "escapeldapfilter",
+        "encodefiltervalue",
+        "filterencode",
+    }:
+        return True
+    return False
+
+
+def _java_filter_sanitized(
+    source: bytes, node: Node, local_sanitizers: set[str]
+) -> bool:
+    """Recognize proven RFC 4515 *filter* escaping, not DN escaping."""
+    for call in _iter_nodes(node):
+        if _java_call_is_filter_sanitizer(source, call, local_sanitizers):
             return True
     return False
+
+
+def _java_unsanitized_identifiers(
+    source: bytes, node: Node, local_sanitizers: set[str]
+) -> set[str]:
+    """Identifiers reaching an expression outside a proven sanitizer subtree."""
+    if _java_call_is_filter_sanitizer(source, node, local_sanitizers):
+        return set()
+    if node.type == "identifier":
+        return {_text(source, node)}
+    out: set[str] = set()
+    for child in node.named_children:
+        out.update(_java_unsanitized_identifiers(source, child, local_sanitizers))
+    return out
 
 
 def _java_looks_filter(source: bytes, node: Node) -> bool:
@@ -182,50 +308,153 @@ def _java_ldap_context(source: str) -> bool:
     )
 
 
-def _java_native_filter_arg(source: bytes, call: Node, ldap_context: bool) -> Node | None:
+def _java_field_ldap_receivers(source: bytes, method: Node) -> set[str]:
+    receivers: set[str] = set()
+    ldap_types = ("dircontext", "ldapcontext", "initialdircontext")
+    owner = method.parent
+    while owner is not None and owner.type not in (
+        "class_declaration",
+        "enum_declaration",
+        "record_declaration",
+    ):
+        owner = owner.parent
+    body = owner.child_by_field_name("body") if owner is not None else None
+    if body is None:
+        return receivers
+    for node in body.named_children:
+        if node.type != "field_declaration":
+            continue
+        type_text = _text(source, node.child_by_field_name("type")).lower()
+        if any(kind in type_text for kind in ldap_types):
+            for declarator in node.named_children:
+                if declarator.type == "variable_declarator":
+                    name = declarator.child_by_field_name("name")
+                    if name is not None:
+                        receivers.add(_text(source, name))
+    return receivers
+
+
+def _java_owner_id(node: Node) -> int:
+    owner = node.parent
+    while owner is not None:
+        if owner.type in (
+            "class_declaration",
+            "enum_declaration",
+            "record_declaration",
+        ):
+            return owner.id
+        owner = owner.parent
+    return 0
+
+
+def _java_scope_ldap_receivers(
+    source: bytes, method: Node, field_receivers: set[str]
+) -> set[str]:
+    receivers = set(field_receivers)
+    ldap_types = ("dircontext", "ldapcontext", "initialdircontext")
+    for node in (method, *_java_scope_nodes(method)):
+        if node.type in ("formal_parameter", "spread_parameter", "receiver_parameter"):
+            type_text = _text(source, node.child_by_field_name("type")).lower()
+            name = node.child_by_field_name("name")
+            if name is None:
+                continue
+            receiver_name = _text(source, name)
+            if any(kind in type_text for kind in ldap_types):
+                receivers.add(receiver_name)
+            else:
+                receivers.discard(receiver_name)
+        elif node.type == "local_variable_declaration":
+            type_text = _text(source, node.child_by_field_name("type")).lower()
+            is_ldap = any(kind in type_text for kind in ldap_types)
+            for declarator in node.named_children:
+                if declarator.type != "variable_declarator":
+                    continue
+                name = declarator.child_by_field_name("name")
+                if name is None:
+                    continue
+                receiver_name = _text(source, name)
+                if is_ldap:
+                    receivers.add(receiver_name)
+                else:
+                    receivers.discard(receiver_name)
+        elif node.type == "variable_declarator":
+            value = node.child_by_field_name("value")
+            name = node.child_by_field_name("name")
+            value_text = _text(source, value).lower()
+            if name is not None and "new " in value_text and any(kind in value_text for kind in ldap_types):
+                receivers.add(_text(source, name))
+    return receivers
+
+
+def _java_native_filter_arg(
+    source: bytes, call: Node, ldap_context: bool, ldap_receivers: set[str]
+) -> Node | None:
     if not ldap_context or _java_call_name(source, call) != "search":
         return None
     args = _java_args(call)
     if len(args) < 3:
         return None
-    receiver = _text(source, call.child_by_field_name("object")).lower()
-    # Avoid treating arbitrary application search engines as LDAP merely because a file
-    # happens to import an LDAP API. JNDI contexts conventionally carry one of these names.
-    if not any(token in receiver for token in ("ctx", "context", "ldap", "directory", "dir")):
+    receiver = call.child_by_field_name("object")
+    if receiver is None or not (_java_identifiers(source, receiver) & ldap_receivers):
         return None
     return args[1]
 
 
-def _java_wrapper_summaries(source: bytes, root: Node, ldap_context: bool) -> dict[str, set[int]]:
-    """Method name -> parameter indexes forwarded to a native JNDI filter argument."""
-    summaries: dict[str, set[int]] = {}
+def _java_wrapper_summaries(
+    source: bytes, root: Node, ldap_context: bool
+) -> dict[int, dict[tuple[str, int], int]]:
+    """Unambiguous name/arity -> parameter index forwarded to a JNDI filter."""
+    declarations: dict[int, dict[tuple[str, int], list[int | None]]] = {}
     methods = [n for n in _iter_nodes(root) if n.type in ("method_declaration", "constructor_declaration")]
     for method in methods:
         params = _java_params(source, method)
         if not params:
             continue
+        ldap_receivers = _java_scope_ldap_receivers(
+            source, method, _java_field_ldap_receivers(source, method)
+        )
+        forwarded: set[int] = set()
         for call in _java_scope_nodes(method):
             if call.type != "method_invocation":
                 continue
-            arg = _java_native_filter_arg(source, call, ldap_context)
+            arg = _java_native_filter_arg(source, call, ldap_context, ldap_receivers)
             if arg is None or arg.type != "identifier":
                 continue
             name = _text(source, arg)
             if name in params:
-                summaries.setdefault(_java_method_name(source, method), set()).add(params.index(name))
+                forwarded.add(params.index(name))
+        key = (_java_method_name(source, method), len(params))
+        owner_declarations = declarations.setdefault(_java_owner_id(method), {})
+        owner_declarations.setdefault(key, []).append(
+            next(iter(forwarded)) if len(forwarded) == 1 else None
+        )
+
+    summaries: dict[int, dict[tuple[str, int], int]] = {}
+    for owner, owner_declarations in declarations.items():
+        for key, indexes in owner_declarations.items():
+            index = next((value for value in indexes if value is not None), None)
+            if index is not None and None not in indexes and len(set(indexes)) == 1:
+                summaries.setdefault(owner, {})[key] = index
     return summaries
 
 
 def _java_sink_filter_arg(
-    source: bytes, call: Node, ldap_context: bool, wrappers: dict[str, set[int]]
+    source: bytes,
+    call: Node,
+    ldap_context: bool,
+    ldap_receivers: set[str],
+    wrappers: dict[tuple[str, int], int],
 ) -> Node | None:
-    native = _java_native_filter_arg(source, call, ldap_context)
+    native = _java_native_filter_arg(source, call, ldap_context, ldap_receivers)
     if native is not None:
         return native
     args = _java_args(call)
-    for index in wrappers.get(_java_call_name(source, call), set()):
-        if index < len(args):
-            return args[index]
+    receiver = _text(source, call.child_by_field_name("object"))
+    if receiver not in ("", "this"):
+        return None
+    index = wrappers.get((_java_call_name(source, call), len(args)))
+    if index is not None and index < len(args):
+        return args[index]
     return None
 
 
@@ -235,16 +464,23 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
     ldap_context = _java_ldap_context(source)
     if not ldap_context:
         return []
-    wrappers = _java_wrapper_summaries(src, root, ldap_context)
+    local_sanitizers = _java_local_filter_sanitizers(src, root)
+    wrappers_by_owner = _java_wrapper_summaries(src, root, ldap_context)
     results: list[dict] = []
     seen: set[tuple[int, int]] = set()
 
     methods = [n for n in _iter_nodes(root) if n.type in ("method_declaration", "constructor_declaration")]
     for method in methods:
-        tainted = set(_java_params(src, method))
+        wrappers = wrappers_by_owner.get(_java_owner_id(method), {})
+        ldap_receivers = _java_scope_ldap_receivers(
+            src, method, _java_field_ldap_receivers(src, method)
+        )
+        tainted = {
+            name for name in _java_params(src, method) if not _is_structural_parameter(name)
+        }
         tainted.discard("this")
         safe: set[str] = set()
-        active_candidates: dict[str, Node] = {}
+        active_candidates: dict[str, list[Node]] = {}
         nodes = list(_java_scope_nodes(method))
         # An assignment takes effect after its RHS has been evaluated.  Using its end
         # byte as the event position also keeps a search nested in that RHS on the old
@@ -270,8 +506,9 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
                 if value is None or name_node is None or name_node.type != "identifier":
                     continue
                 name = _text(src, name_node)
-                sanitized = _java_filter_sanitized(src, value)
-                value_tainted = bool((_java_identifiers(src, value) - safe) & tainted)
+                unsanitized = _java_unsanitized_identifiers(src, value, local_sanitizers)
+                value_tainted = bool((unsanitized - safe) & tainted)
+                sanitized = _java_filter_sanitized(src, value, local_sanitizers) and not value_tainted
                 if sanitized:
                     safe.add(name)
                     tainted.discard(name)
@@ -282,18 +519,35 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
                     tainted.discard(name)
                     safe.discard(name)
 
-                # Only the latest definition of a name can explain a later search.
-                active_candidates.pop(name, None)
+                # Sequential definitions replace prior state, while alternate arms
+                # both reach a sink after the branch and must both remain candidates.
+                alternatives = [
+                    candidate
+                    for candidate in active_candidates.get(name, [])
+                    if _ts_mutually_exclusive(candidate, value)
+                ]
+                active_candidates[name] = alternatives
                 if value_tainted and not sanitized and _java_looks_filter(src, value):
-                    active_candidates[name] = value
+                    active_candidates[name].append(value)
+                if not active_candidates[name]:
+                    active_candidates.pop(name)
                 continue
 
             call = node
-            arg = _java_sink_filter_arg(src, call, ldap_context, wrappers)
-            if arg is None or _java_filter_sanitized(src, arg):
+            arg = _java_sink_filter_arg(src, call, ldap_context, ldap_receivers, wrappers)
+            if arg is None:
+                continue
+            unsanitized = _java_unsanitized_identifiers(src, arg, local_sanitizers)
+            value_tainted = bool((unsanitized - safe) & tainted)
+            if _java_filter_sanitized(src, arg, local_sanitizers) and not value_tainted:
                 continue
             ids = _java_identifiers(src, arg)
-            candidates = [active_candidates[name] for name in ids if name in active_candidates]
+            candidates = [
+                candidate
+                for name in ids
+                for candidate in active_candidates.get(name, [])
+                if not _ts_mutually_exclusive(candidate, call)
+            ]
             if candidates:
                 for value in candidates:
                     key = (value.start_point[0], value.start_point[1])
@@ -310,7 +564,7 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
                         )
                     )
                 continue
-            if not ((ids - safe) & tainted) or not _java_looks_filter(src, arg):
+            if not value_tainted or not _java_looks_filter(src, arg):
                 continue
             key = (call.start_point[0], call.start_point[1])
             if key in seen:
@@ -341,6 +595,15 @@ def _py_name(func: ast.AST) -> str:
     return ""
 
 
+def _py_dotted(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _py_dotted(node.value)
+        return f"{prefix}.{node.attr}" if prefix else node.attr
+    return ""
+
+
 def _py_iter_scope(scope: ast.AST):
     for child in ast.iter_child_nodes(scope):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
@@ -362,38 +625,99 @@ def _py_params(scope: ast.AST) -> set[str]:
     return out
 
 
-def _py_is_filter_sanitizer_call(call: ast.Call) -> bool:
-    name = _py_name(call.func).lower().replace("_", "")
-    if name in {
-        "escapefilterchars",
-        "escapeldapfilter",
-        "encodefiltervalue",
-        "filterencode",
-    }:
+def _py_sanitizer_context(tree: ast.AST) -> tuple[dict[str, str], set[str]]:
+    """Resolve only known python-ldap/ldap3 filter encoders and their aliases."""
+    module_aliases: dict[str, str] = {}
+    imported_functions: set[str] = set()
+    safe_modules = ("ldap.filter", "ldap3.utils.conv")
+    safe_names = {"escape_filter_chars"}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "ldap" or alias.name == "ldap3" or alias.name.startswith(safe_modules):
+                    bound = alias.asname or alias.name.split(".")[0]
+                    module_aliases[bound] = alias.name if alias.asname else bound
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.startswith(safe_modules):
+                for alias in node.names:
+                    if alias.name in safe_names:
+                        imported_functions.add(alias.asname or alias.name)
+            elif node.module in ("ldap", "ldap3.utils"):
+                for alias in node.names:
+                    full = f"{node.module}.{alias.name}"
+                    if full in safe_modules:
+                        module_aliases[alias.asname or alias.name] = full
+    rebound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            rebound.add(node.name)
+        elif isinstance(node, ast.arg):
+            rebound.add(node.arg)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            rebound.update(_py_targets(node))
+    for name in rebound:
+        module_aliases.pop(name, None)
+        imported_functions.discard(name)
+    return module_aliases, imported_functions
+
+
+def _py_is_filter_sanitizer_call(
+    call: ast.Call, sanitizer_context: tuple[dict[str, str], set[str]]
+) -> bool:
+    module_aliases, imported_functions = sanitizer_context
+    dotted = _py_dotted(call.func)
+    if dotted in imported_functions:
         return True
-    return "escape" in name and "filter" in name and "dn" not in name
+    parts = dotted.split(".")
+    if parts and parts[0] in module_aliases:
+        parts[0] = module_aliases[parts[0]]
+    canonical = ".".join(parts)
+    return canonical in {
+        "ldap.filter.escape_filter_chars",
+        "ldap3.utils.conv.escape_filter_chars",
+    }
 
 
-def _py_filter_sanitized(node: ast.AST) -> bool:
+def _py_filter_sanitized(
+    node: ast.AST, sanitizer_context: tuple[dict[str, str], set[str]]
+) -> bool:
     return any(
-        _py_is_filter_sanitizer_call(call)
+        _py_is_filter_sanitizer_call(call, sanitizer_context)
         for call in ast.walk(node)
         if isinstance(call, ast.Call)
     )
 
 
-def _py_unsanitized_names(node: ast.AST, safe_helpers: set[str] | None = None) -> set[str]:
+def _py_local_helper_name(call: ast.Call) -> str:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if (
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id in ("self", "cls")
+    ):
+        return call.func.attr
+    return ""
+
+
+def _py_unsanitized_names(
+    node: ast.AST,
+    sanitizer_context: tuple[dict[str, str], set[str]],
+    safe_helpers: set[str] | None = None,
+) -> set[str]:
     """Names whose values reach an expression without filter encoding."""
     helpers = safe_helpers or set()
     if isinstance(node, ast.Call) and (
-        _py_is_filter_sanitizer_call(node) or _py_name(node.func) in helpers
+        _py_is_filter_sanitizer_call(node, sanitizer_context)
+        or _py_local_helper_name(node) in helpers
     ):
         return set()
     if isinstance(node, ast.Name):
         return {node.id}
     out: set[str] = set()
     for child in ast.iter_child_nodes(node):
-        out.update(_py_unsanitized_names(child, helpers))
+        out.update(_py_unsanitized_names(child, sanitizer_context, helpers))
     return out
 
 
@@ -419,53 +743,170 @@ def _py_ldap_context(tree: ast.AST, source: str) -> bool:
     return any(marker in source for marker in ("auth_ldap", "AUTH_LDAP", "ldap.SCOPE_", "ldap3.Connection"))
 
 
-def _py_sink_filter_arg(call: ast.Call, source: str, ldap_context: bool) -> ast.AST | None:
+def _py_ldap_receivers(scope: ast.AST, source: str) -> set[str]:
+    receivers: set[str] = set()
+    conventional = {"client", "con", "conn", "dc", "directory", "ldap"}
+    for node in (scope, *_py_iter_scope(scope)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            for arg in args:
+                annotation = ast.get_source_segment(source, arg.annotation) if arg.annotation else ""
+                if arg.arg.lower() in conventional or "ldap" in (annotation or "").lower():
+                    receivers.add(arg.arg)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            value = node.value
+            if value is None:
+                continue
+            value_name = _py_dotted(value.func) if isinstance(value, ast.Call) else ""
+            annotation = (
+                ast.get_source_segment(source, node.annotation)
+                if isinstance(node, ast.AnnAssign)
+                else ""
+            )
+            if value_name.startswith(("ldap.", "ldap3.")) or "ldap" in (annotation or "").lower():
+                receivers.update(_py_targets(node))
+    return receivers
+
+
+def _py_sink_filter_arg(
+    call: ast.Call,
+    source: str,
+    ldap_context: bool,
+    ldap_receivers: set[str],
+) -> ast.AST | None:
     if not ldap_context:
         return None
     name = _py_name(call.func)
+    if not isinstance(call.func, ast.Attribute) or name not in {
+        "search",
+        "search_s",
+        "search_ext",
+        "search_ext_s",
+    }:
+        return None
+    receiver = _py_dotted(call.func.value)
+    terminal = receiver.split(".")[-1].lower()
+    if (
+        receiver.split(".")[0] not in ldap_receivers
+        and terminal not in {"client", "con", "conn", "dc", "directory", "ldap"}
+        and "ldap" not in receiver.lower()
+    ):
+        return None
     for kw in call.keywords:
         if kw.arg in ("search_filter", "filterstr", "filter_str"):
             return kw.value
-    func_text = (ast.get_source_segment(source, call.func) or "").lower()
     if name == "search" and len(call.args) >= 2:
-        if any(part in func_text for part in ("conn", "ldap", "directory")):
-            return call.args[1]
+        return call.args[1]
     if name in ("search_s", "search_ext", "search_ext_s") and len(call.args) >= 3:
         return call.args[2]
     return None
 
 
-def _py_helper_summaries(tree: ast.AST, source: str) -> tuple[set[str], set[str]]:
-    safe: set[str] = set()
-    filter_builders: set[str] = set()
+def _py_targets(node: ast.Assign | ast.AnnAssign | ast.NamedExpr) -> list[str]:
+    targets: list[ast.AST]
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    else:
+        targets = [node.target]
+
+    def names(target: ast.AST) -> list[str]:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [name for element in target.elts for name in names(element)]
+        if isinstance(target, ast.Starred):
+            return names(target.value)
+        return []
+
+    return [name for target in targets for name in names(target)]
+
+
+def _py_target_bindings(
+    node: ast.Assign | ast.AnnAssign | ast.NamedExpr,
+) -> list[tuple[str, ast.AST]]:
+    """Pair unpacked targets with their corresponding RHS elements when knowable."""
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+
+    def bind(target: ast.AST, value: ast.AST) -> list[tuple[str, ast.AST]]:
+        if isinstance(target, ast.Name):
+            return [(target.id, value)]
+        if isinstance(target, ast.Starred):
+            return bind(target.value, value)
+        if (
+            isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, (ast.Tuple, ast.List))
+            and len(target.elts) == len(value.elts)
+            and not any(isinstance(element, ast.Starred) for element in target.elts)
+        ):
+            return [
+                binding
+                for target_element, value_element in zip(target.elts, value.elts)
+                for binding in bind(target_element, value_element)
+            ]
+        return [(name, value) for name in _py_targets_from_target(target)]
+
+    return [binding for target in targets for binding in bind(target, node.value)]
+
+
+def _py_targets_from_target(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [
+            name for element in target.elts for name in _py_targets_from_target(element)
+        ]
+    if isinstance(target, ast.Starred):
+        return _py_targets_from_target(target.value)
+    return []
+
+
+def _py_helper_summaries(
+    tree: ast.AST,
+    source: str,
+    sanitizer_context: tuple[dict[str, str], set[str]],
+) -> tuple[set[str], set[str]]:
+    analyses: dict[str, list[tuple[bool, bool]]] = {}
     parents = {
         child: parent
         for parent in ast.walk(tree)
         for child in ast.iter_child_nodes(parent)
     }
     for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
-        tainted = _py_params(fn)
+        tainted = {name for name in _py_params(fn) if not _is_structural_parameter(name)}
         sanitized_names: set[str] = set()
+        filter_names: set[str] = set()
         body_nodes = sorted(
             _py_iter_scope(fn),
             key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)),
         )
-        saw_filter_return = False
+        saw_return = False
+        all_returns_are_filters = True
         all_filter_returns_safe = True
         for node in body_nodes:
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
                 value = node.value
                 if value is None:
                     continue
-                targets = _py_targets(node)
-                if not targets:
+                bindings = _py_target_bindings(node)
+                if not bindings:
                     continue
-                unsanitized = _py_unsanitized_names(value)
-                value_tainted = bool(unsanitized & tainted)
-                carries_sanitized = _py_filter_sanitized(value) or bool(
-                    set(n.id for n in ast.walk(value) if isinstance(n, ast.Name)) & sanitized_names
-                )
-                for name in targets:
+                for name, bound_value in bindings:
+                    unsanitized = _py_unsanitized_names(
+                        bound_value, sanitizer_context
+                    )
+                    value_tainted = bool(
+                        (unsanitized - sanitized_names) & tainted
+                    )
+                    carries_sanitized = _py_filter_sanitized(
+                        bound_value, sanitizer_context
+                    ) or bool(
+                        {
+                            n.id
+                            for n in ast.walk(bound_value)
+                            if isinstance(n, ast.Name)
+                        }
+                        & sanitized_names
+                    )
                     if value_tainted:
                         tainted.add(name)
                         sanitized_names.discard(name)
@@ -475,35 +916,44 @@ def _py_helper_summaries(tree: ast.AST, source: str) -> tuple[set[str], set[str]
                         # proof and are therefore not trusted by this summary.
                         tainted.discard(name)
                         sanitized_names.add(name)
-                    elif isinstance(value, ast.Constant):
+                    elif isinstance(bound_value, ast.Constant):
                         tainted.discard(name)
                         sanitized_names.discard(name)
+                    if _py_looks_filter(bound_value, source):
+                        filter_names.add(name)
+                    elif isinstance(bound_value, ast.Constant):
+                        filter_names.discard(name)
                 continue
-            if not isinstance(node, ast.Return) or node.value is None or not _py_looks_filter(node.value, source):
+            if not isinstance(node, ast.Return) or node.value is None:
                 continue
-            saw_filter_return = True
-            filter_builders.add(fn.name)
+            saw_return = True
             returned_names = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
-            has_sanitized_value = _py_filter_sanitized(node.value) or bool(returned_names & sanitized_names)
-            all_filter_returns_safe &= has_sanitized_value and not (
-                _py_unsanitized_names(node.value) & tainted
+            is_filter = _py_looks_filter(node.value, source) or bool(returned_names & filter_names)
+            all_returns_are_filters &= is_filter
+            has_sanitized_value = _py_filter_sanitized(
+                node.value, sanitizer_context
+            ) or bool(returned_names & sanitized_names)
+            all_filter_returns_safe &= is_filter and has_sanitized_value and not (
+                (_py_unsanitized_names(node.value, sanitizer_context) - sanitized_names)
+                & tainted
             )
-        if saw_filter_return and all_filter_returns_safe:
-            safe.add(fn.name)
+        analyses.setdefault(fn.name, []).append(
+            (saw_return and all_returns_are_filters, saw_return and all_filter_returns_safe)
+        )
+
+    filter_builders = {
+        name for name, outcomes in analyses.items() if any(builder for builder, _ in outcomes)
+    }
+    safe = {
+        name
+        for name, outcomes in analyses.items()
+        if outcomes and all(builder and safe_return for builder, safe_return in outcomes)
+    }
     return safe, filter_builders
 
 
 def _py_call_is_safe_helper(node: ast.AST, safe_helpers: set[str]) -> bool:
-    return isinstance(node, ast.Call) and _py_name(node.func) in safe_helpers
-
-
-def _py_targets(node: ast.Assign | ast.AnnAssign | ast.NamedExpr) -> list[str]:
-    targets: list[ast.AST]
-    if isinstance(node, ast.Assign):
-        targets = node.targets
-    else:
-        targets = [node.target]
-    return [t.id for t in targets if isinstance(t, ast.Name)]
+    return isinstance(node, ast.Call) and _py_local_helper_name(node) in safe_helpers
 
 
 def _py_branch_arms(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> dict[int, str]:
@@ -540,7 +990,10 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
     ldap_context = _py_ldap_context(tree, source)
     if not ldap_context:
         return []
-    safe_helpers, filter_helpers = _py_helper_summaries(tree, source)
+    sanitizer_context = _py_sanitizer_context(tree)
+    safe_helpers, filter_helpers = _py_helper_summaries(
+        tree, source, sanitizer_context
+    )
     parents = {
         child: parent
         for parent in ast.walk(tree)
@@ -553,7 +1006,10 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
 
     for scope in scopes:
         nodes = list(_py_iter_scope(scope))
-        tainted = _py_params(scope)
+        ldap_receivers = _py_ldap_receivers(scope, source)
+        tainted = {
+            name for name in _py_params(scope) if not _is_structural_parameter(name)
+        }
         safe_names: set[str] = set()
         active_candidates: dict[str, list[ast.AST]] = {}
 
@@ -573,53 +1029,71 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
                 value = node.value
                 if value is None:
                     continue
-                targets = _py_targets(node)
-                if not targets:
+                bindings = _py_target_bindings(node)
+                if not bindings:
                     continue
-                helper_safe = _py_call_is_safe_helper(value, safe_helpers)
-                unsanitized = _py_unsanitized_names(value, safe_helpers)
-                value_tainted = bool((unsanitized - safe_names) & tainted)
-                sanitized = helper_safe or (_py_filter_sanitized(value) and not value_tainted)
-                for name in targets:
+                for name, bound_value in bindings:
+                    helper_safe = _py_call_is_safe_helper(
+                        bound_value, safe_helpers
+                    )
+                    unsanitized = _py_unsanitized_names(
+                        bound_value, sanitizer_context, safe_helpers
+                    )
+                    value_tainted = bool((unsanitized - safe_names) & tainted)
+                    sanitized = helper_safe or (
+                        _py_filter_sanitized(bound_value, sanitizer_context)
+                        and not value_tainted
+                    )
                     if sanitized:
                         safe_names.add(name)
                         tainted.discard(name)
                     elif value_tainted:
                         tainted.add(name)
                         safe_names.discard(name)
-                    elif isinstance(value, ast.Constant):
+                    elif isinstance(bound_value, ast.Constant):
                         tainted.discard(name)
                         safe_names.discard(name)
 
                     alternatives = [
                         candidate
                         for candidate in active_candidates.get(name, [])
-                        if _py_mutually_exclusive(candidate, value, parents)
+                        if _py_mutually_exclusive(candidate, bound_value, parents)
                     ]
                     active_candidates[name] = alternatives
                     if value_tainted and not sanitized and (
-                        _py_looks_filter(value, source)
-                        or (isinstance(value, ast.Call) and _py_name(value.func) in filter_helpers)
+                        _py_looks_filter(bound_value, source)
+                        or (
+                            isinstance(bound_value, ast.Call)
+                            and _py_name(bound_value.func) in filter_helpers
+                        )
                     ):
-                        active_candidates[name].append(value)
+                        active_candidates[name].append(bound_value)
                     if not active_candidates[name]:
                         active_candidates.pop(name)
                 continue
 
             call = node
-            arg = _py_sink_filter_arg(call, source, ldap_context)
+            arg = _py_sink_filter_arg(
+                call, source, ldap_context, ldap_receivers
+            )
             if arg is None:
                 continue
             helper_safe = _py_call_is_safe_helper(arg, safe_helpers)
-            unsanitized = _py_unsanitized_names(arg, safe_helpers)
+            unsanitized = _py_unsanitized_names(
+                arg, sanitizer_context, safe_helpers
+            )
             value_tainted = bool((unsanitized - safe_names) & tainted)
-            if helper_safe or (_py_filter_sanitized(arg) and not value_tainted):
+            if helper_safe or (
+                _py_filter_sanitized(arg, sanitizer_context)
+                and not value_tainted
+            ):
                 continue
             identifiers = {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
             candidates = [
                 candidate
                 for name in identifiers
                 for candidate in active_candidates.get(name, [])
+                if not _py_mutually_exclusive(candidate, call, parents)
             ]
             if candidates:
                 for value in candidates:
@@ -674,7 +1148,7 @@ def _php_scope_nodes(scope: Node):
 
 
 def _php_call_name(source: bytes, call: Node) -> str:
-    if call.type == "member_call_expression":
+    if call.type in ("member_call_expression", "scoped_call_expression"):
         return _text(source, call.child_by_field_name("name"))
     function = call.child_by_field_name("function")
     return _text(source, function)
@@ -706,19 +1180,131 @@ def _php_params(source: bytes, scope: Node) -> set[str]:
     return {_text(source, n) for n in _iter_nodes(params) if n.type == "variable_name"}
 
 
-def _php_filter_sanitized(source: bytes, node: Node) -> bool:
+def _php_ldap_receivers(source: bytes, root: Node) -> set[str]:
+    receivers: set[str] = set()
+    for node in _iter_nodes(root):
+        if node.type == "simple_parameter":
+            type_text = _text(source, node.child_by_field_name("type")).lower()
+            name = node.child_by_field_name("name")
+            if name is not None and "ldap" in type_text:
+                receivers.add(_text(source, name))
+        elif node.type == "property_declaration" and "ldap" in _text(source, node).lower():
+            receivers.update(_php_vars(source, node))
+        elif node.type == "assignment_expression":
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            if (
+                left is not None
+                and left.type == "variable_name"
+                and right is not None
+                and right.type == "object_creation_expression"
+                and "ldap" in _text(source, right).lower()
+            ):
+                receivers.add(_text(source, left))
+    return receivers
+
+
+def _php_local_classes(source: bytes, root: Node) -> set[str]:
+    return {
+        _text(source, node.child_by_field_name("name")).lower()
+        for node in _iter_nodes(root)
+        if node.type == "class_declaration"
+        and node.child_by_field_name("name") is not None
+    }
+
+
+def _php_receiver_is_ldap(
+    source: bytes, receiver: Node | None, ldap_receivers: set[str]
+) -> bool:
+    if receiver is None:
+        return False
+    if _php_vars(source, receiver) & ldap_receivers:
+        return True
+    receiver_text = _text(source, receiver).lower()
+    normalized = receiver_text.lstrip("$")
+    return normalized.startswith("ldap") or "->ldap" in receiver_text
+
+
+def _php_call_is_filter_sanitizer(
+    source: bytes,
+    call: Node,
+    ldap_receivers: set[str],
+    local_classes: set[str],
+) -> bool:
+    if call.type not in (
+        "function_call_expression",
+        "member_call_expression",
+        "scoped_call_expression",
+    ):
+        return False
+    raw_name = _php_call_name(source, call).lower()
+    name = raw_name.replace("_", "")
+    call_text = _text(source, call).lower()
+    has_filter_flag = "ldap_escape_filter" in call_text
+
+    if call.type == "function_call_expression":
+        return name == "ldapescape" and has_filter_flag
+    if call.type == "member_call_expression":
+        if not _php_receiver_is_ldap(
+            source, call.child_by_field_name("object"), ldap_receivers
+        ):
+            return False
+        if name in ("escape", "ldapescape"):
+            return has_filter_flag
+        return name in {
+            "escapefilterchars",
+            "escapeldapfilter",
+            "encodefiltervalue",
+            "filterencode",
+        }
+
+    owner = _text(source, call.child_by_field_name("scope")).lower()
+    if "ldap" not in owner:
+        return False
+    if owner.lstrip("\\").split("\\")[-1] in local_classes:
+        return False
+    return name == "escape" or name in {
+        "escapefilterchars",
+        "escapeldapfilter",
+        "encodefiltervalue",
+        "filterencode",
+    }
+
+
+def _php_filter_sanitized(
+    source: bytes,
+    node: Node,
+    ldap_receivers: set[str],
+    local_classes: set[str],
+) -> bool:
     for call in _iter_nodes(node):
-        if call.type not in ("function_call_expression", "member_call_expression", "scoped_call_expression"):
-            continue
-        name = _php_call_name(source, call).lower().replace("_", "")
-        call_text = _text(source, call)
-        if name in ("escapefilterchars", "escapeldapfilter", "encodefiltervalue", "filterencode"):
-            return True
-        if name in ("escape", "ldapescape") and "LDAP_ESCAPE_FILTER" in call_text:
-            return True
-        if "escape" in name and "filter" in name and "dn" not in name:
+        if _php_call_is_filter_sanitizer(
+            source, call, ldap_receivers, local_classes
+        ):
             return True
     return False
+
+
+def _php_unsanitized_vars(
+    source: bytes,
+    node: Node,
+    ldap_receivers: set[str],
+    local_classes: set[str],
+) -> set[str]:
+    if _php_call_is_filter_sanitizer(
+        source, node, ldap_receivers, local_classes
+    ):
+        return set()
+    if node.type == "variable_name":
+        return {_text(source, node)}
+    out: set[str] = set()
+    for child in node.named_children:
+        out.update(
+            _php_unsanitized_vars(
+                source, child, ldap_receivers, local_classes
+            )
+        )
+    return out
 
 
 def _php_looks_filter(source: bytes, node: Node) -> bool:
@@ -731,14 +1317,24 @@ def _php_looks_filter(source: bytes, node: Node) -> bool:
     return "(" in value and "=" in value
 
 
-def _php_sink_arg(source: bytes, call: Node, ldap_context: bool) -> Node | None:
+def _php_sink_arg(
+    source: bytes,
+    call: Node,
+    ldap_context: bool,
+    ldap_receivers: set[str],
+) -> Node | None:
     if not ldap_context:
         return None
     name = _php_call_name(source, call).lower()
     args = _php_args(call)
     if call.type == "member_call_expression" and name in ("simple_search", "search") and args:
-        obj = _text(source, call.child_by_field_name("object")).lower()
-        if "ldap" in obj:
+        if _php_receiver_is_ldap(
+            source, call.child_by_field_name("object"), ldap_receivers
+        ):
+            return args[0]
+    if call.type == "scoped_call_expression" and name == "search" and args:
+        owner = _text(source, call.child_by_field_name("scope")).lower()
+        if "ldap" in owner:
             return args[0]
     if call.type == "function_call_expression" and name in ("ldap_search", "ldap_list", "ldap_read"):
         if len(args) >= 3:
@@ -752,6 +1348,7 @@ def scan_php(source: str, uri: str, cve: str | None = None) -> list[dict]:
     ldap_context = "ldap" in source.lower()
     if not ldap_context:
         return []
+    local_classes = _php_local_classes(src, root)
     scopes = [root]
     scopes.extend(n for n in _iter_nodes(root) if n.type in _PHP_SCOPES)
     results: list[dict] = []
@@ -759,9 +1356,12 @@ def scan_php(source: str, uri: str, cve: str | None = None) -> list[dict]:
 
     for scope in scopes:
         nodes = list(_php_scope_nodes(scope))
-        tainted = _php_params(src, scope)
+        ldap_receivers = _php_ldap_receivers(src, scope)
+        tainted = {
+            name for name in _php_params(src, scope) if not _is_structural_parameter(name)
+        }
         safe_names: set[str] = set()
-        active_candidates: dict[str, Node] = {}
+        active_candidates: dict[str, list[Node]] = {}
         events = sorted(
             (
                 node.end_byte if node.type == "assignment_expression" else node.start_byte,
@@ -770,7 +1370,12 @@ def scan_php(source: str, uri: str, cve: str | None = None) -> list[dict]:
             )
             for index, node in enumerate(nodes)
             if node.type
-            in ("assignment_expression", "function_call_expression", "member_call_expression")
+            in (
+                "assignment_expression",
+                "function_call_expression",
+                "member_call_expression",
+                "scoped_call_expression",
+            )
         )
 
         for _, _, node in events:
@@ -780,8 +1385,13 @@ def scan_php(source: str, uri: str, cve: str | None = None) -> list[dict]:
                 if left is None or right is None or left.type != "variable_name":
                     continue
                 name = _text(src, left)
-                sanitized = _php_filter_sanitized(src, right)
-                value_tainted = bool((_php_vars(src, right) - safe_names) & tainted)
+                unsanitized = _php_unsanitized_vars(
+                    src, right, ldap_receivers, local_classes
+                )
+                value_tainted = bool((unsanitized - safe_names) & tainted)
+                sanitized = _php_filter_sanitized(
+                    src, right, ldap_receivers, local_classes
+                ) and not value_tainted
                 if sanitized:
                     safe_names.add(name)
                     tainted.discard(name)
@@ -792,17 +1402,37 @@ def scan_php(source: str, uri: str, cve: str | None = None) -> list[dict]:
                     tainted.discard(name)
                     safe_names.discard(name)
 
-                active_candidates.pop(name, None)
+                alternatives = [
+                    candidate
+                    for candidate in active_candidates.get(name, [])
+                    if _ts_mutually_exclusive(candidate, right)
+                ]
+                active_candidates[name] = alternatives
                 if value_tainted and not sanitized and _php_looks_filter(src, right):
-                    active_candidates[name] = right
+                    active_candidates[name].append(right)
+                if not active_candidates[name]:
+                    active_candidates.pop(name)
                 continue
 
             call = node
-            arg = _php_sink_arg(src, call, ldap_context)
-            if arg is None or _php_filter_sanitized(src, arg):
+            arg = _php_sink_arg(src, call, ldap_context, ldap_receivers)
+            if arg is None:
+                continue
+            unsanitized = _php_unsanitized_vars(
+                src, arg, ldap_receivers, local_classes
+            )
+            value_tainted = bool((unsanitized - safe_names) & tainted)
+            if _php_filter_sanitized(
+                src, arg, ldap_receivers, local_classes
+            ) and not value_tainted:
                 continue
             variables = _php_vars(src, arg)
-            candidates = [active_candidates[name] for name in variables if name in active_candidates]
+            candidates = [
+                candidate
+                for name in variables
+                for candidate in active_candidates.get(name, [])
+                if not _ts_mutually_exclusive(candidate, call)
+            ]
             if candidates:
                 for right in candidates:
                     key = (right.start_point[0], right.start_point[1])
@@ -819,7 +1449,7 @@ def scan_php(source: str, uri: str, cve: str | None = None) -> list[dict]:
                         )
                     )
                 continue
-            if not ((variables - safe_names) & tainted) or not _php_looks_filter(src, arg):
+            if not value_tainted or not _php_looks_filter(src, arg):
                 continue
             key = (call.start_point[0], call.start_point[1])
             if key in seen:

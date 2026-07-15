@@ -51,7 +51,7 @@ def test_language_fixtures_each_flag_only_the_unescaped_filter():
         (
             "import javax.naming.directory.*; class A { void f(DirContext ctx, String base, "
             "String username, SearchControls c) throws Exception { "
-            'ctx.search(base, "(uid=" + escapeLdapFilter(username) + ")", c); } }',
+            'ctx.search(base, "(uid=" + org.springframework.ldap.support.LdapEncoder.filterEncode(username) + ")", c); } }',
             0,
         ),
         # A sanitizer assignment after the search cannot retroactively protect it.
@@ -59,14 +59,14 @@ def test_language_fixtures_each_flag_only_the_unescaped_filter():
             "import javax.naming.directory.*; class A { void f(DirContext ctx, String base, "
             "String username, SearchControls c) throws Exception { "
             'ctx.search(base, "(uid=" + username + ")", c); '
-            "username = escapeLdapFilter(username); } }",
+            "username = org.springframework.ldap.support.LdapEncoder.filterEncode(username); } }",
             1,
         ),
         # The same reassignment is safe when it precedes the search.
         (
             "import javax.naming.directory.*; class A { void f(DirContext ctx, String base, "
             "String username, SearchControls c) throws Exception { "
-            "username = escapeLdapFilter(username); "
+            "username = org.springframework.ldap.support.LdapEncoder.filterEncode(username); "
             'ctx.search(base, "(uid=" + username + ")", c); } }',
             0,
         ),
@@ -98,6 +98,71 @@ def test_language_fixtures_each_flag_only_the_unescaped_filter():
 )
 def test_java_rule_variants(source, expected):
     assert len(scan_source(source, "A.java")) == expected
+
+
+def test_java_review_regressions_provenance_mixed_values_overloads_and_branches():
+    mixed = (
+        "import javax.naming.directory.*; class A { void f(DirContext dc, String base, "
+        "String username, SearchControls c) throws Exception { dc.search(base, "
+        '"(uid=" + org.springframework.ldap.support.LdapEncoder.filterEncode(username) + username + ")", c); } }'
+    )
+    typed_client = (
+        "import javax.naming.directory.*; class A { void f(DirContext client, String base, "
+        "String username, SearchControls c) throws Exception { "
+        'client.search(base, "(uid=" + username + ")", c); } }'
+    )
+    unrelated = (
+        "import javax.naming.directory.*; class A { void f(Index context, String username) { "
+        'context.search("(uid=" + username + ")", null, null); } }'
+    )
+    no_op_sanitizer = (
+        "import javax.naming.directory.*; class A { void f(DirContext dc, String base, "
+        "String username, SearchControls c) throws Exception { "
+        'dc.search(base, "(uid=" + escapeLdapFilter(username) + ")", c); } '
+        "String escapeLdapFilter(String value) { return value; } }"
+    )
+    overloads = (
+        "import javax.naming.directory.*; class A { "
+        "void f(DirContext dc,String b,String username,SearchControls c)throws Exception { "
+        'String filter = "(uid=" + username + ")"; lookup(dc,b,filter,c); lookup("constant", 1); } '
+        "void lookup(DirContext dc,String b,String filter,SearchControls c)throws Exception { "
+        "dc.search(b,filter,c); } void lookup(String query,int limit) {} }"
+    )
+    branches = (
+        "import javax.naming.directory.*; class A { void f(DirContext dc,String b,String username,"
+        "SearchControls c,boolean configured)throws Exception { String filter; if(configured) { "
+        'filter = "(uid=" + username + ")"; } else { filter = "(uid=" + '
+        'org.springframework.ldap.support.LdapEncoder.filterEncode(username) + ")"; } dc.search(b,filter,c); } }'
+    )
+    safe_branch_sink = (
+        "import javax.naming.directory.*; class A { void f(DirContext dc,String b,String username,"
+        "SearchControls c,boolean configured)throws Exception { String filter; if(configured) { "
+        'filter = "(uid=" + username + ")"; } else { filter = "(uid=" + '
+        "org.springframework.ldap.support.LdapEncoder.filterEncode(username) + "
+        '")"; dc.search(b,filter,c); } } }'
+    )
+    unrelated_wrapper_receiver = (
+        "import javax.naming.directory.*; class A { "
+        "void f(Index index,String username){ index.lookup(\"a\",\"b\",\"(uid=\"+username+\")\",\"d\"); } "
+        "void lookup(DirContext dc,String b,String filter,SearchControls c)throws Exception { "
+        "dc.search(b,filter,c); } }"
+    )
+    token_only_sanitizer = (
+        "import javax.naming.directory.*; class A { void f(DirContext dc,String b,String username,"
+        "SearchControls c)throws Exception { dc.search(b,\"(uid=\"+escapeLdapFilter(username)+\")\",c); } "
+        'String escapeLdapFilter(String value){ String tokens="case \\\\ \\\\5c case * \\\\2a '
+        'case ( \\\\28 case ) \\\\29 case \\\\0 \\\\00"; return value; } }'
+    )
+
+    assert len(scan_source(mixed, "A.java")) == 1
+    assert len(scan_source(typed_client, "A.java")) == 1
+    assert scan_source(unrelated, "A.java") == []
+    assert len(scan_source(no_op_sanitizer, "A.java")) == 1
+    assert len(scan_source(overloads, "A.java")) == 1
+    assert len(scan_source(branches, "A.java")) == 1
+    assert scan_source(safe_branch_sink, "A.java") == []
+    assert scan_source(unrelated_wrapper_receiver, "A.java") == []
+    assert len(scan_source(token_only_sanitizer, "A.java")) == 1
 
 
 @pytest.mark.parametrize(
@@ -194,6 +259,93 @@ def test_python_if_else_filter_definitions_both_reach_the_merged_sink():
     assert _lines(scan_source(source, "a.py")) == [4, 6]
 
 
+def test_python_review_regressions_helpers_unpacking_provenance_and_sanitizers():
+    mixed = (
+        "import ldap3\ndef f(conn, base, username):\n"
+        "    return conn.search(base, f'(uid={ldap3.utils.conv.escape_filter_chars(username)}{username})')"
+    )
+    helper_variable = (
+        "import ldap3\ndef build_filter(username):\n"
+        "    filter_str = f'(uid={username})'\n    return filter_str\n"
+        "def f(conn, base, username):\n    return conn.search(base, build_filter(username))"
+    )
+    unpacked = (
+        "import ldap3\ndef f(conn, base, supplied):\n"
+        "    username, other = supplied, 'x'\n"
+        "    return conn.search(base, f'(uid={username})')"
+    )
+    colliding_helpers = (
+        "import ldap3\nclass Safe:\n"
+        "    def build_filter(self, username):\n"
+        "        return f'(uid={ldap3.utils.conv.escape_filter_chars(username)})'\n"
+        "class Unsafe:\n"
+        "    def build_filter(self, username):\n        return f'(uid={username})'\n"
+        "    def run(self, conn, base, username):\n"
+        "        return conn.search(base, self.build_filter(username))"
+    )
+    local_no_op = (
+        "import ldap3\ndef escape_filter_chars(value): return value\n"
+        "def f(conn, base, username):\n"
+        "    return conn.search(base, f'(uid={escape_filter_chars(username)})')"
+    )
+    imported_alias = (
+        "from ldap3.utils.conv import escape_filter_chars as encode\n"
+        "def f(conn, base, username):\n"
+        "    return conn.search(base, f'(uid={encode(username)})')"
+    )
+    unrelated = (
+        "import ldap3\ndef f(index, username):\n"
+        "    return index.query(search_filter=f'(uid={username})')"
+    )
+    safely_unpacked = (
+        "import ldap3\ndef f(conn, base, supplied):\n"
+        "    username, other = 'fixed', supplied\n"
+        "    return conn.search(base, f'(uid={username})')"
+    )
+    unrelated_helper_collision = (
+        "import ldap3\ndef build_filter(value): return value + 'x'\n"
+        "class Unsafe:\n"
+        "    def build_filter(self, username): return f'(uid={username})'\n"
+        "    def run(self, conn, base, username):\n"
+        "        return conn.search(base, self.build_filter(username))"
+    )
+    shadowed_import = (
+        "from ldap3.utils.conv import escape_filter_chars\n"
+        "def f(conn, base, username):\n"
+        "    def escape_filter_chars(value): return value\n"
+        "    return conn.search(base, f'(uid={escape_filter_chars(username)})')"
+    )
+    safe_branch_sink = (
+        "import ldap3\ndef f(conn, base, username, configured):\n"
+        "    if configured:\n        filter_str = f'(uid={username})'\n"
+        "    else:\n"
+        "        filter_str = f'(uid={ldap3.utils.conv.escape_filter_chars(username)})'\n"
+        "        return conn.search(base, filter_str)"
+    )
+    generic_connection = (
+        "import ldap3\ndef f(connection, base, username):\n"
+        "    return connection.search(base, f'(uid={username})')"
+    )
+    ldap_client = (
+        "import ldap3\ndef f(client, base, username):\n"
+        "    return client.search(base, f'(uid={username})')"
+    )
+
+    assert len(scan_source(mixed, "a.py")) == 1
+    assert len(scan_source(helper_variable, "a.py")) == 1
+    assert len(scan_source(unpacked, "a.py")) == 1
+    assert len(scan_source(colliding_helpers, "a.py")) == 1
+    assert len(scan_source(local_no_op, "a.py")) == 1
+    assert scan_source(imported_alias, "a.py") == []
+    assert scan_source(unrelated, "a.py") == []
+    assert scan_source(safely_unpacked, "a.py") == []
+    assert len(scan_source(unrelated_helper_collision, "a.py")) == 1
+    assert len(scan_source(shadowed_import, "a.py")) == 1
+    assert scan_source(safe_branch_sink, "a.py") == []
+    assert scan_source(generic_connection, "a.py") == []
+    assert len(scan_source(ldap_client, "a.py")) == 1
+
+
 @pytest.mark.parametrize(
     "source,expected",
     [
@@ -244,6 +396,60 @@ def test_python_if_else_filter_definitions_both_reach_the_merged_sink():
 )
 def test_php_rule_variants(source, expected):
     assert len(scan_source(source, "a.php")) == expected
+
+
+def test_php_review_regressions_provenance_mixed_values_flags_and_branches():
+    mixed = (
+        "<?php function f($ldap,$username){ $ldap->search('(uid=' . "
+        "$ldap->escape($username,null,LDAP_ESCAPE_FILTER) . $username . ')'); } ?>"
+    )
+    typed_client = (
+        "<?php function f(LdapInterface $client,$username){ "
+        "$client->search('(uid=' . $username . ')'); } ?>"
+    )
+    static_sink = (
+        "<?php function f($username){ Ldap::search('(uid=' . $username . ')'); } ?>"
+    )
+    lowercase_flag = (
+        "<?php function f($ldap,$username){ $ldap->search('(uid=' . "
+        "$ldap->escape($username,null,ldap_escape_filter) . ')'); } ?>"
+    )
+    local_no_op = (
+        "<?php function escape_filter_chars($value){ return $value; } "
+        "function f($ldap,$username){ $ldap->search('(uid=' . "
+        "escape_filter_chars($username) . ')'); } ?>"
+    )
+    branches = (
+        "<?php function f($ldap,$username,$configured){ if($configured){ "
+        "$filter = '(uid=' . $username . ')'; } else { $filter = '(uid=' . "
+        "$ldap->escape($username,null,LDAP_ESCAPE_FILTER) . ')'; } "
+        "$ldap->search($filter); } ?>"
+    )
+    safe_branch_sink = (
+        "<?php function f($ldap,$username,$configured){ if($configured){ "
+        "$filter = '(uid=' . $username . ')'; } else { $filter = '(uid=' . "
+        "$ldap->escape($username,null,LDAP_ESCAPE_FILTER) . ')'; "
+        "$ldap->search($filter); } } ?>"
+    )
+    local_static_no_op = (
+        "<?php class Ldap { static function escape($value){ return $value; } "
+        "static function search($filter){} } function f($username){ "
+        "Ldap::search('(uid=' . Ldap::escape($username) . ')'); } ?>"
+    )
+    misleading_receiver = (
+        "<?php function f($notLdapIndex,$username){ "
+        "$notLdapIndex->search('(uid=' . $username . ')'); } ?>"
+    )
+
+    assert len(scan_source(mixed, "a.php")) == 1
+    assert len(scan_source(typed_client, "a.php")) == 1
+    assert len(scan_source(static_sink, "a.php")) == 1
+    assert scan_source(lowercase_flag, "a.php") == []
+    assert len(scan_source(local_no_op, "a.php")) == 1
+    assert len(scan_source(branches, "a.php")) == 1
+    assert scan_source(safe_branch_sink, "a.php") == []
+    assert len(scan_source(local_static_no_op, "a.php")) == 1
+    assert scan_source(misleading_receiver, "a.php") == []
 
 
 def test_sarif_carries_cwe_and_cve_only_as_analyzer_metadata():

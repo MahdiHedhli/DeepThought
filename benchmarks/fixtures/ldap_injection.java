@@ -25,6 +25,17 @@ final class LdapInjectionFixture {
     }
 
     private static String escapeLdapFilter(String value) {
-        return value.replace("*", "\\2a");
+        var encoded = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            switch (value.charAt(i)) {
+                case '\\' -> encoded.append("\\5c");
+                case '*' -> encoded.append("\\2a");
+                case '(' -> encoded.append("\\28");
+                case ')' -> encoded.append("\\29");
+                case '\0' -> encoded.append("\\00");
+                default -> encoded.append(value.charAt(i));
+            }
+        }
+        return encoded.toString();
     }
 }
