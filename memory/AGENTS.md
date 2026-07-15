@@ -32,10 +32,16 @@ python memory/mem.py init
 ## What to record (durable facts only)
 
 Write a note when you learn something that is **not derivable from the code or git history**
-and will matter next session. Four categories (the `type` frontmatter field):
+and will matter next session. Categories (the `type` frontmatter field):
 
 - `user` — who the user is (role, expertise, preferences).
-- `feedback` — how to work: corrections and confirmed approaches, **with the why**.
+- `feedback` — **operator preferences / directives**: how the user wants you to work
+  (corrections, confirmed approaches), **with the why**.
+- `lesson` — **knowledge distilled from doing the work**: domain/technique insights you
+  earned by building and measuring (e.g. "which fixes make a CVE rediscoverable", "the
+  recurring detector bugs"). Kept SEPARATE from `feedback` so preferences and hard-won
+  lessons don't blur together. **A learning that ends up only in a commit message belongs
+  here.**
 - `project` — ongoing work, goals, constraints, decisions, current state.
 - `reference` — pointers to external resources (URLs, dashboards, tickets).
 
