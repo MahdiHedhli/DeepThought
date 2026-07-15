@@ -95,6 +95,15 @@ def test_snapshot_mean_and_lookup():
     assert s.mean == 0.9  # (0.8 + 1.0)/2
 
 
+def test_headline_means_use_exact_class_rates_before_rounding():
+    heldout = [
+        HeldOutResult(bug_class="pp", detector="DT-PP", rediscovered=2, missed=1),
+        HeldOutResult(bug_class="ssrf", detector="DT-SSRF", rediscovered=3, missed=1),
+    ]
+    assert Benchmark(heldout=heldout).mean_generalization() == 0.708
+    assert Snapshot.from_heldout("v2", heldout).mean == 0.708
+
+
 def test_snapshot_from_heldout():
     h = [HeldOutResult(bug_class="pp", detector="DT-PP", rediscovered=3, missed=1)]
     s = Snapshot.from_heldout("v1", h)

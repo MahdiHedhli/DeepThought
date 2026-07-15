@@ -176,7 +176,13 @@ class Benchmark(BaseModel):
         # it is not (a partial held-out set must not masquerade as the full headline).
         if not self.heldout:
             return 0.0
-        return round(sum(h.generalization for h in self.heldout) / len(self.heldout), 3)
+        exact_rates = [
+            Fraction(h.rediscovered, h.rediscovered + h.missed)
+            if h.rediscovered + h.missed
+            else Fraction(0)
+            for h in self.heldout
+        ]
+        return round(float(sum(exact_rates, Fraction(0)) / len(exact_rates)), 3)
 
     def unmeasured_classes(self) -> list[str]:
         """Built bug classes (from rounds) that have NO held-out result yet — the
@@ -274,7 +280,10 @@ class Snapshot(BaseModel):
     def mean(self) -> float:
         if not self.rates:
             return 0.0
-        return round(sum(r.generalization for r in self.rates) / len(self.rates), 3)
+        return round(
+            float(sum((rate.exact for rate in self.rates), Fraction(0)) / len(self.rates)),
+            3,
+        )
 
     def rate_for(self, bug_class: str) -> Optional[float]:
         for r in self.rates:

@@ -44,7 +44,7 @@ constitution, the gates, the sandbox, or the disclosure boundary.
 
 - **Deterministic.** Static and taint detection emitting SARIF. Runs in CI, no
   target code executes. Prototype pollution, SSRF, XXE, path traversal,
-  deserialization, ReDoS, command injection, SQL injection, LDAP injection.
+  deserialization, ReDoS, command injection, SQL injection, LDAP injection, open redirect.
 - **Sandbox.** Fuzzing plus a sanitizer, executed only in the signed-off sandbox.
   Heap overflow, use-after-free, and any class whose proof is a crash.
 
@@ -134,7 +134,7 @@ Each build round appends one section here using this template:
   (`requests`/`aiohttp` + same-domain). **Seed swapped** from urllib3 CVE-2025-50181
   (authoritatively CWE-601, not SSRF).
 - **Held-out generalization:** **3/4 (75%)** — dify seed + gradio + pydantic-ai +
-  lmdeploy rediscovered; langchain missed (logged `v2-2026-07-05`; skill mean 70.9%).
+  lmdeploy rediscovered; langchain missed (logged `v2-2026-07-05`; skill mean 70.8%).
 - **Notes.** Two SSRF-fix shapes handled: **sink substitution** (the raw sink replaced
   by a safe wrapper like `ssrf_proxy.get`/`safe_download`, recognized by a safe-wrapper
   name so it is never a sink) and **guard added** (a validation of the URL/host —
@@ -302,3 +302,32 @@ Each build round appends one section here using this template:
   A raw intermediate assigned on one conditional arm and a safe or constant value assigned on
   another can be lost before a filter is constructed after the merge. That shape is documented
   rather than counted as covered; it does not occur in this measured cohort.
+
+### Open redirect (CWE-601)
+
+- **When to use:** hunting Python web application code that redirects to a request-derived URL,
+  host, URI, or `next` parameter without proving that it remains on the intended origin.
+- **Detection:** intraprocedural Python AST flow (`benchmarks/openredirect_detector.py`). The
+  rule follows query, form, and JSON request values plus assignment expressions into Flask,
+  Django, Starlette, and Tornado redirect sinks, merges taint through compound statements,
+  and keeps imported redirect/validator aliases bound to their lexical scope. It reports the
+  request-derived construction line that reaches the sink.
+- **Guards:** a validator must dominate the exact redirect value on the executing branch.
+  Proven same-origin validators and imported aliases are recognized. A fixed literal path
+  segment such as `/user/` before interpolation is internal; a bare slash, multiple leading
+  slashes, or slash-backslash prefix is not enough because attacker input can form an
+  authority-like URL.
+- **Rule id:** `DT-OPEN-REDIRECT`, emitting SARIF 2.1.0 into the shipped DISCOVER ingest.
+  Verification is deterministic vulnerable/patched discrimination plus NEW PROJECT → MAP →
+  DISCOVER → `check`; no target code executes.
+- **Cohort:** seed Archivy **CVE-2022-0697**; held-out Spirit **CVE-2022-0869**,
+  Django Grappelli **CVE-2021-46898**, and Jupyter Notebook **CVE-2020-26215**, all
+  pinned to real vulnerable/patched trees. urllib3 **CVE-2025-50181** is dropped because
+  its CWE-601 fix is library-internal redirect bookkeeping, not a changed application sink.
+- **Held-out generalization:** **3/3 (100%)**, with **1 patched-file flag**. Jupyter retains
+  an unrelated `self.redirect(url)` site after patching; line-precise seed-probe
+  discrimination remains true and the patched context is reported honestly.
+- **Honest ceiling:** the rule is intraprocedural. It does not summarize arbitrary custom
+  redirect wrappers or validators across modules, and its branch-state merge is not a full
+  interprocedural control-flow proof. Those shapes are not represented as covered by the
+  measured cohort.

@@ -1,0 +1,68 @@
+{
+  "bug_class": "open_redirect",
+  "cwe": "CWE-601",
+  "detector": "DT-OPEN-REDIRECT",
+  "tier": "deterministic",
+  "language": "python",
+  "reproducibility": "real repositories at pinned SHAs; line-precise; pin-or-drop",
+  "seed": {
+    "cve": "CVE-2022-0697",
+    "package": "archivy",
+    "repo": "https://github.com/archivy/archivy",
+    "vuln_ref": "fa389e7d59f91980693965830839d6de1f1db45f",
+    "patched_ref": "2d8cb29853190d42572b36deb61127e68d6be574",
+    "target_paths": ["archivy/routes.py"],
+    "sink_probe": "return redirect(next_url or \"/\")",
+    "sink": "Flask redirects to the request next parameter after login without an origin check",
+    "patched_shape": "the exact next_url is redirected only in a branch dominated by is_safe_redirect_url",
+    "cwe": "CWE-601",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2022-0869",
+      "package": "spirit",
+      "repo": "https://github.com/nitely/spirit",
+      "vuln_ref": "8b48d18e44f1dbb4b0f0a0a975d0dc14b88f0f41",
+      "patched_ref": "8f32f89654d6c30d56e0dd167059d32146fb32ef",
+      "target_paths": ["spirit/user/auth/views.py"],
+      "sink_probe": "return redirect(request.GET.get('next', request.user.st.get_absolute_url()))",
+      "sink": "a Django redirect consumes the next query parameter directly",
+      "patched_shape": "unsafe redirect calls are replaced with the same-origin safe_redirect wrapper",
+      "cwe": "CWE-601",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2021-46898",
+      "package": "django-grappelli",
+      "repo": "https://github.com/sehmaschine/django-grappelli",
+      "vuln_ref": "55f88d661c28598d059cf81dbfd38dacb945662f",
+      "patched_ref": "4ca94bcda0fa2720594506853d85e00c8212968f",
+      "target_paths": ["grappelli/views/switch.py"],
+      "sink_probe": "return redirect(request.GET.get(\"redirect\"))",
+      "sink": "Django redirects to a request parameter after only a startswith slash check",
+      "patched_shape": "url_has_allowed_host_and_scheme validates a saved redirect_url before every redirect",
+      "cwe": "CWE-601",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2020-26215",
+      "package": "notebook",
+      "repo": "https://github.com/jupyter/notebook",
+      "vuln_ref": "d8308e13803ba1c6e92f129381e615af6c6e00d3",
+      "patched_ref": "3cec4bbe21756de9f0c4bccf18cf61d840314d74",
+      "target_paths": ["notebook/base/handlers.py"],
+      "sink_probe": "self.redirect(self.request.uri.rstrip('/'))",
+      "sink": "Tornado redirects a request URI after trimming only trailing slashes, preserving a protocol-relative authority",
+      "patched_shape": "the path receives exactly one leading slash before the query suffix is reattached",
+      "cwe": "CWE-601",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2025-50181",
+      "package": "urllib3",
+      "status": "dropped",
+      "drop_reason": "authoritative CWE-601, but the fix changes library-internal redirect bookkeeping rather than an application redirect sink; a user-code rule cannot discriminate it"
+    }
+  ]
+}

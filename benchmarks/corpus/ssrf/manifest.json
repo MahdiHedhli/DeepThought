@@ -11,7 +11,7 @@
     "heldout_rediscovered": ["CVE-2024-4325", "CVE-2026-25580", "CVE-2026-33626"],
     "heldout_missed": ["CVE-2023-46229"],
     "snapshot": "v2-2026-07-05",
-    "skill_mean_after": "70.9% (prototype_pollution 2/3 + ssrf 3/4)",
+    "skill_mean_after": "70.8% (prototype_pollution 2/3 + ssrf 3/4)",
     "measured_on": "real target files at pinned vuln/patched SHAs (line-precise: a FLAGGED line's own text contains the sink probe in vuln, not in patched)",
     "miss_note": "langchain CVE-2023-46229 patches via prevent_outside (a same-domain bool flag), not a validation call, so its sink still flags in the patched tree -> documented miss / future improvement-loop fixture."
   },
