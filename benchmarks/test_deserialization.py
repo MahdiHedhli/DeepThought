@@ -61,6 +61,15 @@ def test_fixtures_discriminate_unsafe_from_guarded_sinks():
         ("function d(payload){return YAML.safeLoad(payload)}", 0),
         ("const s=require('node-serialize');function d(x){return s.unserialize(x)}", 1),
         ("function d(x){return arbitrary.deserialize(x)}", 0),
+        # Execution-like member names require real global/Node module provenance.
+        ("function d(obj,x){return obj.eval(x)}", 0),
+        ("function d(obj,x){return obj.runInContext(x)}", 0),
+        ("function d(x){return eval(x)}", 1),
+        ("function d(x){return globalThis.eval(x)}", 1),
+        (
+            "const vm=require('node:vm');function d(x,context){return vm.runInContext(x,context)}",
+            1,
+        ),
     ],
 )
 def test_javascript_rule_variants(source, expected):
@@ -185,6 +194,12 @@ class A { Object read(Object in) { XStream x = new XStream();
             "import java.io.ObjectInputStream;class A{Object read(ObjectInputStream in,Object f)"
             " throws Exception{in.setObjectInputFilter(f);return in.readObject();}}",
             0,
+        ),
+        # A null filter explicitly installs no hardening.
+        (
+            "import java.io.ObjectInputStream;class A{Object read(ObjectInputStream in)"
+            " throws Exception{in.setObjectInputFilter(null);return in.readObject();}}",
+            1,
         ),
     ],
 )

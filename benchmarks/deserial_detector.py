@@ -288,14 +288,24 @@ def _js_sink_kind(
     node: Node, source: bytes, module_bindings: dict[str, str]
 ) -> str | None:
     if node.type == "new_expression":
-        _receiver, name = _js_callee_parts(source, node)
-        return "new Function" if name.split(".")[-1] == "Function" else None
+        receiver, name = _js_callee_parts(source, node)
+        if name.split(".")[-1] != "Function":
+            return None
+        if receiver and receiver.split(".", 1)[0] not in {"global", "globalThis", "window"}:
+            return None
+        return "new Function"
     if node.type != "call_expression":
         return None
     receiver, name = _js_callee_parts(source, node)
-    if name in _JS_CODE_SINKS:
-        return name
     receiver_root = receiver.split(".", 1)[0]
+    if name in {"eval", "Function"} and (
+        not receiver or receiver_root in {"global", "globalThis", "window"}
+    ):
+        return name
+    if name in _JS_VM_SINKS:
+        binding = module_bindings.get(receiver_root if receiver else name, "")
+        if binding in {"vm", "node:vm"}:
+            return name
     module = module_bindings.get(receiver_root, "")
     if name == "load" and (
         receiver.split(".")[-1].lower() in {"yaml", "jsyaml"}
@@ -720,8 +730,11 @@ def _java_receiver_hardened_before(
             return True
         if kind == "object-input":
             obj, name = _java_invocation_parts(source, call)
-            if obj == receiver and name == "setObjectInputFilter" and _java_args(call):
-                return True
+            args = _java_args(call)
+            if obj == receiver and name == "setObjectInputFilter" and args:
+                argument = re.sub(r"[\s()]", "", _javatext(source, args[0]))
+                if argument != "null":
+                    return True
     return False
 
 
