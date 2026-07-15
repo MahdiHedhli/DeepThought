@@ -225,6 +225,19 @@ def test_python_if_else_filter_definitions_both_reach_the_merged_sink():
             "return ldap_search($conn,$base,$filter); } ?>",
             1,
         ),
+        # Direct sinks use the state at the call site: a later sanitizer cannot
+        # retroactively protect them, and a later re-taint cannot make them unsafe.
+        (
+            "<?php function f($ldap,$username){ $ldap->simple_search('(uid=' . $username . ')'); "
+            "$username = $ldap->escape($username,null,LDAP_ESCAPE_FILTER); } ?>",
+            1,
+        ),
+        (
+            "<?php function f($ldap,$username,$other){ "
+            "$username = $ldap->escape($username,null,LDAP_ESCAPE_FILTER); "
+            "$ldap->simple_search('(uid=' . $username . ')'); $username = $other; } ?>",
+            0,
+        ),
         ("<?php function f($index,$username){ return $index->search('(uid=' . $username . ')'); } ?>", 0),
         ("<?php // $ldap->simple_search('(uid=' . $username . ')'); ?>", 0),
     ],

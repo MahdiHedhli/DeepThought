@@ -758,68 +758,66 @@ def scan_php(source: str, uri: str, cve: str | None = None) -> list[dict]:
     seen: set[tuple[int, int]] = set()
 
     for scope in scopes:
-        nodes = sorted(_php_scope_nodes(scope), key=lambda n: (n.start_byte, n.end_byte))
+        nodes = list(_php_scope_nodes(scope))
         tainted = _php_params(src, scope)
         safe_names: set[str] = set()
-        sink_calls = [
-            n
-            for n in nodes
-            if n.type in ("function_call_expression", "member_call_expression")
-            and _php_sink_arg(src, n, ldap_context) is not None
-        ]
-        reported_names: set[str] = set()
-
-        for node in nodes:
-            if node.type != "assignment_expression":
-                continue
-            left = node.child_by_field_name("left")
-            right = node.child_by_field_name("right")
-            if left is None or right is None or left.type != "variable_name":
-                continue
-            name = _text(src, left)
-            sanitized = _php_filter_sanitized(src, right)
-            value_tainted = bool((_php_vars(src, right) - safe_names) & tainted)
-            if sanitized:
-                safe_names.add(name)
-                tainted.discard(name)
-            elif value_tainted:
-                tainted.add(name)
-                safe_names.discard(name)
-            elif right.type in ("string", "integer", "float", "boolean", "null"):
-                tainted.discard(name)
-                safe_names.discard(name)
-
-            if not value_tainted or sanitized or not _php_looks_filter(src, right):
-                continue
-            reaches = any(
-                call.start_byte > node.start_byte
-                and name in _php_vars(src, _php_sink_arg(src, call, ldap_context))
-                for call in sink_calls
+        active_candidates: dict[str, Node] = {}
+        events = sorted(
+            (
+                node.end_byte if node.type == "assignment_expression" else node.start_byte,
+                index,
+                node,
             )
-            if not reaches:
-                continue
-            key = (right.start_point[0], right.start_point[1])
-            if key in seen:
-                continue
-            seen.add(key)
-            reported_names.add(name)
-            results.append(
-                _result(
-                    uri,
-                    right.start_point[0] + 1,
-                    right.start_point[1] + 1,
-                    "LDAP injection (CWE-90): unescaped input constructs a filter used by an LDAP search",
-                    cve,
-                )
-            )
+            for index, node in enumerate(nodes)
+            if node.type
+            in ("assignment_expression", "function_call_expression", "member_call_expression")
+        )
 
-        for call in sink_calls:
+        for _, _, node in events:
+            if node.type == "assignment_expression":
+                left = node.child_by_field_name("left")
+                right = node.child_by_field_name("right")
+                if left is None or right is None or left.type != "variable_name":
+                    continue
+                name = _text(src, left)
+                sanitized = _php_filter_sanitized(src, right)
+                value_tainted = bool((_php_vars(src, right) - safe_names) & tainted)
+                if sanitized:
+                    safe_names.add(name)
+                    tainted.discard(name)
+                elif value_tainted:
+                    tainted.add(name)
+                    safe_names.discard(name)
+                elif right.type in ("string", "integer", "float", "boolean", "null"):
+                    tainted.discard(name)
+                    safe_names.discard(name)
+
+                active_candidates.pop(name, None)
+                if value_tainted and not sanitized and _php_looks_filter(src, right):
+                    active_candidates[name] = right
+                continue
+
+            call = node
             arg = _php_sink_arg(src, call, ldap_context)
-            assert arg is not None
-            if _php_filter_sanitized(src, arg):
+            if arg is None or _php_filter_sanitized(src, arg):
                 continue
             variables = _php_vars(src, arg)
-            if variables & reported_names:
+            candidates = [active_candidates[name] for name in variables if name in active_candidates]
+            if candidates:
+                for right in candidates:
+                    key = (right.start_point[0], right.start_point[1])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    results.append(
+                        _result(
+                            uri,
+                            right.start_point[0] + 1,
+                            right.start_point[1] + 1,
+                            "LDAP injection (CWE-90): unescaped input constructs a filter used by an LDAP search",
+                            cve,
+                        )
+                    )
                 continue
             if not ((variables - safe_names) & tainted) or not _php_looks_filter(src, arg):
                 continue
