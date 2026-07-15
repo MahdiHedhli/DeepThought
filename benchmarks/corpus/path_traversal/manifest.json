@@ -1,0 +1,79 @@
+{
+  "bug_class": "path_traversal",
+  "cwe": "CWE-22",
+  "detector": "DT-PATH-TRAVERSAL",
+  "tier": "deterministic",
+  "language": "js+python",
+  "reproducibility": "real repo + pinned vuln/patched SHAs; line-precise; pin-or-drop.",
+  "seed_swap": {
+    "original_seed": "CVE-2024-12718 (CPython tarfile)",
+    "reason": "CPython-internal filter-logic bug, not user-code Tar-Slip; a user-code rule cannot rediscover it. Swapped for a genuine user-code Zip-Slip.",
+    "replaced_with": "CVE-2020-12265 (decompress)"
+  },
+  "seed": {
+    "cve": "CVE-2020-12265",
+    "package": "decompress",
+    "language": "javascript",
+    "repo": "https://github.com/kevva/decompress",
+    "vuln_ref": "74a462a139cc2561b6695e696266c8dc31562d3d",
+    "patched_ref": "967146e70f48be32ed1a69daa3941d681944d513",
+    "target_paths": [
+      "index.js"
+    ],
+    "sink_probe": "path.join(output, x.path)",
+    "sink": "const dest = path.join(output, x.path) then fsP.writeFile(dest, x.data)/fsP.link/fsP.symlink \u2014 archive member path x.path joined to output and written with no containment (also arbitrary write through a symlink; CWE-22 + CWE-59)",
+    "patched_shape": "realpath both the destination dir and output (Promise.all([fsP.realpath(path.dirname(dest)), fsP.realpath(output)])) and throw unless realDestinationDir.indexOf(realOutputDir) === 0 \u2014 realpath containment that also defeats symlink escape",
+    "cwe": "CWE-22",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2018-1002204",
+      "package": "adm-zip",
+      "language": "javascript",
+      "repo": "https://github.com/cthackers/adm-zip",
+      "vuln_ref": "e116bc18df51e4e50c493cede82ae7696954b511",
+      "patched_ref": "62f64004fefb894c523a7143e8a88ebe6c84df25",
+      "target_paths": [
+        "adm-zip.js"
+      ],
+      "sink_probe": "writeFileTo(pth.resolve(targetPath, entryName)",
+      "sink": "Utils.writeFileTo(pth.resolve(targetPath, entryName), content, overwrite) in extractAllTo/extractAllToAsync \u2014 the ZIP entry name is joined to targetPath via pth.resolve and written with no containment check (Zip-Slip). Same pattern at the extractEntryTo write of `target`.",
+      "patched_shape": "add `if(!pth.resolve(targetPath, entryName).startsWith(targetPath)) throw Utils.Errors.INVALID_FILENAME` (and `if(!target.startsWith(targetPath))`) before each write \u2014 resolve+startsWith containment guard",
+      "cwe": "CWE-22",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2024-23334",
+      "package": "aiohttp",
+      "language": "python",
+      "repo": "https://github.com/aio-libs/aiohttp",
+      "vuln_ref": "33ccdfb0a12690af5bb49bda2319ec0907fa7827",
+      "patched_ref": "1c335944d6a8b1298baf179b7c0b3069f10c514b",
+      "target_paths": [
+        "aiohttp/web_urldispatcher.py"
+      ],
+      "sink_probe": "self._directory.joinpath(filename).resolve()",
+      "sink": "filepath = self._directory.joinpath(filename).resolve() in PathResource._handle \u2014 the user-supplied URL path segment `filename` is joined to the static root and served; the relative_to() containment only runs when not self._follow_symlinks, so with follow_symlinks=True there is no containment (serve-file-by-user-path traversal)",
+      "patched_shape": "always contain: normalized_path = Path(os.path.normpath(unresolved_path)); normalized_path.relative_to(self._directory) before resolve on the follow_symlinks branch too (os.path.normpath + Path.relative_to containment on every path)",
+      "cwe": "CWE-22",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2019-14751",
+      "package": "nltk",
+      "language": "python",
+      "repo": "https://github.com/nltk/nltk",
+      "vuln_ref": "2554ff48feed878ba7e830ada9825196f3eaa86a",
+      "patched_ref": "f59d7ed8df2e0e957f7f247fe218032abdbe9a10",
+      "target_paths": [
+        "nltk/downloader.py"
+      ],
+      "sink_probe": "os.path.join(root, *filename.split('/'))",
+      "sink": "filepath = os.path.join(root, *filename.split('/')) then open(filepath, 'wb') in _unzip_iter \u2014 each ZIP member name from zf.namelist() is joined to root and opened for write with no containment (Zip-Slip in the NLTK downloader)",
+      "patched_shape": "delete the manual per-member extraction loop and replace it with zf.extractall(root), which uses zipfile's member-name sanitization (safe-extract) instead of the raw join+open",
+      "cwe": "CWE-22",
+      "status": "pinned"
+    }
+  ]
+}
