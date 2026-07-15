@@ -32,7 +32,7 @@ _VALIDATORS = {
     "is_same_origin",
     "same_origin",
 }
-_REQUEST_CONTAINERS = {"args", "GET", "POST", "values", "form", "query_params"}
+_REQUEST_CONTAINERS = {"args", "GET", "POST", "values", "form", "query_params", "json"}
 _REQUEST_URL_ATTRS = {"referrer", "url", "uri"}
 _PRESERVING_TRANSFORMS = {
     "get",
@@ -166,6 +166,13 @@ def _request_source(node: ast.AST) -> bool:
         callee = _dotted(node.func)
         if callee in {"request.get_full_path", "self.request.get_full_path"}:
             return False
+        if callee in {
+            "request.get_json",
+            "self.request.get_json",
+            "request.json",
+            "self.request.json",
+        }:
+            return True
         if _name(node.func) in {"get_argument", "get_query_argument"}:
             return _root_name(node.func) in {"self", "request"}
         if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
@@ -214,6 +221,8 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
             state.env[name] = value_flow
             state.validated.discard(name)
         return value_flow
+    if isinstance(node, ast.Await):
+        return _flow(node.value, state)
     if isinstance(node, ast.Constant):
         return Flow.UNTAINTED
     if isinstance(node, ast.BoolOp):
@@ -368,20 +377,40 @@ def _merge_states(target: State, branches: list[State]) -> None:
     target.validated = set.intersection(*(branch.validated for branch in branches))
 
 
-def _imports(source_tree: ast.Module) -> tuple[set[str], set[str]]:
-    redirect_aliases: set[str] = set()
-    validator_aliases: set[str] = set(_VALIDATORS)
-    for node in source_tree.body:
-        if not isinstance(node, ast.ImportFrom):
-            continue
+class _ScopeImportCollector(ast.NodeVisitor):
+    """Collect imports in one lexical scope without leaking through definitions."""
+
+    def __init__(self) -> None:
+        self.redirect_aliases: set[str] = set()
+        self.validator_aliases: set[str] = set()
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
         module = node.module or ""
         for alias in node.names:
             local = alias.asname or alias.name
             if module in _REDIRECT_MODULES and alias.name in _REDIRECT_NAMES:
-                redirect_aliases.add(local)
+                self.redirect_aliases.add(local)
             if alias.name in _VALIDATORS:
-                validator_aliases.add(local)
-    return redirect_aliases, validator_aliases
+                self.validator_aliases.add(local)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: N802
+        return
+
+
+def _imports(statements: list[ast.stmt]) -> tuple[set[str], set[str]]:
+    collector = _ScopeImportCollector()
+    for statement in statements:
+        collector.visit(statement)
+    return collector.redirect_aliases, collector.validator_aliases
 
 
 class _Scanner:
@@ -554,7 +583,16 @@ class _Scanner:
             for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
             if arg.arg not in {"self", "cls", "request"}
         }
-        self._scan_block(node.body, State(env, set()), web_handler)
+        local_redirects, local_validators = _imports(node.body)
+        prior_redirects = self.redirect_aliases
+        prior_validators = self.validator_aliases
+        self.redirect_aliases = prior_redirects | local_redirects
+        self.validator_aliases = prior_validators | local_validators
+        try:
+            self._scan_block(node.body, State(env, set()), web_handler)
+        finally:
+            self.redirect_aliases = prior_redirects
+            self.validator_aliases = prior_validators
 
 
 def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
@@ -562,7 +600,8 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
         tree = ast.parse(source)
     except SyntaxError:
         return []
-    redirect_aliases, validator_aliases = _imports(tree)
+    redirect_aliases, imported_validators = _imports(tree.body)
+    validator_aliases = set(_VALIDATORS) | imported_validators
     scanner = _Scanner(redirect_aliases, validator_aliases, uri, cve)
 
     # Module-level redirects are rare but valid. Each nested function is then scanned

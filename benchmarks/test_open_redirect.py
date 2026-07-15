@@ -38,6 +38,27 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             "def f(request): return redirect(request.GET.get('next','/'))",
             1,
         ),
+        # Live review: JSON request bodies are request-controlled redirect sources,
+        # including async framework accessors.
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect(request.json.get('next'))",
+            1,
+        ),
+        (
+            "from starlette.responses import RedirectResponse\n"
+            "async def f(request):\n payload=await request.json()\n"
+            " return RedirectResponse(payload.get('next'))",
+            1,
+        ),
+        # A function-local redirect alias applies only to that lexical scope; it
+        # must not bless a same-named call in a sibling function.
+        (
+            "def f(request):\n from flask import redirect as go\n"
+            " return go(request.args.get('next'))\n"
+            "def sibling(request): return go(request.args.get('next'))",
+            1,
+        ),
         (
             "from django.shortcuts import redirect\n"
             "def f(request):\n target=request.GET.get('next')\n target.startswith('/')\n return redirect(target)",

@@ -308,9 +308,10 @@ Each build round appends one section here using this template:
 - **When to use:** hunting Python web application code that redirects to a request-derived URL,
   host, URI, or `next` parameter without proving that it remains on the intended origin.
 - **Detection:** intraprocedural Python AST flow (`benchmarks/openredirect_detector.py`). The
-  rule follows request values and assignment expressions into Flask, Django, and Tornado
-  redirect sinks, merges taint through compound statements, and reports the request-derived
-  construction line that reaches the sink.
+  rule follows query, form, and JSON request values plus assignment expressions into Flask,
+  Django, Starlette, and Tornado redirect sinks, merges taint through compound statements,
+  and keeps imported redirect/validator aliases bound to their lexical scope. It reports the
+  request-derived construction line that reaches the sink.
 - **Guards:** a validator must dominate the exact redirect value on the executing branch.
   Proven same-origin validators and imported aliases are recognized. A fixed literal path
   segment such as `/user/` before interpolation is internal; a bare slash, multiple leading
