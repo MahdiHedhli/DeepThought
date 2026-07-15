@@ -124,3 +124,8 @@ construction across Java, Python, and PHP. The manifest at
 The held-out score is **3/3** with **0 patched-file flags**. The rule distinguishes
 RFC 4515 search-filter escaping from DN escaping and keeps sanitizer state bound to the
 exact value and source position that reaches the directory search.
+
+The honest ceiling is path-sensitive control flow: source-order state is not a complete
+CFG/dominance proof, so a raw intermediate assigned on one conditional arm and a safe or
+constant value assigned on another can be lost before a filter is built after the merge.
+That shape is documented rather than represented as covered by the measured 3/3 cohort.

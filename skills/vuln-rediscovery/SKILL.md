@@ -298,3 +298,7 @@ Each build round appends one section here using this template:
 - **Held-out generalization:** **3/3 (100%)**, with **0 patched-file flags**. Each fix visibly
   adds filter-context escaping to the value that reaches the sink; this result does not claim
   that DN escaping or unrelated sanitized values protect filter construction.
+- **Honest ceiling:** source-order state is not a complete path-sensitive CFG/dominance proof.
+  A raw intermediate assigned on one conditional arm and a safe or constant value assigned on
+  another can be lost before a filter is constructed after the merge. That shape is documented
+  rather than counted as covered; it does not occur in this measured cohort.
