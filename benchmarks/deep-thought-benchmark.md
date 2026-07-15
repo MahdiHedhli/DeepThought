@@ -133,18 +133,20 @@ own text must contain the sink probe in the vulnerable tree and not in the patch
 | XXE (611) | `DT-XXE-PARSER` (Java+Python) | tika CVE-2025-66516 | **1/3** | dom4j/JDOM2: fix is additive/reorder, signal persists |
 | OS command injection (78) | `DT-CMDI-EXEC` (JS+Python) | node-glob CVE-2025-64756 | **3/4** | one command-hook sink persists after patch |
 | Path traversal (22) | `DT-PATH-TRAVERSAL` (JS+Python) | decompress CVE-2020-12265 | **2/3** | aiohttp needs branch-sensitive containment reasoning |
+| Unsafe deserialization (502) | `DT-DESERIAL` (JS+Python+Java) | serialize-to-js CVE-2017-5954 | **3/3** | receiver-bound Java hardening and import-provenanced dynamic sinks |
 
 The generalization log (`benchmarks/data/generalization-log.json`) versions the score
 under a **regression bar** — no merged change may lower any class's rate. Discipline held:
 CVEs with no authoritative NVD record are **dropped-with-reason**, seeds whose authoritative
 CWE doesn't match the class are **swapped-with-reason**, and misses are documented as
 improvement-loop fixtures — the numbers are the honest measurement, never gamed. The
+six-class mean is **69.5%** after deserialization's 3/3 held-out result. The
 sandbox tier (heap-overflow / UAF) executes target code and runs only behind the Article
 III sign-off (`benchmarks/corpus/SIGNOFF-sandbox-tier.md`).
 
 ```bash
 # reproduce a class on the real pinned trees (network); default runs skip these
-DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_prototype_pollution.py benchmarks/test_ssrf.py benchmarks/test_xxe.py
+DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_deserialization.py
 ```
 
 ## Run it

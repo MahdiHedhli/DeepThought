@@ -20,7 +20,7 @@ patterns, so the skill exercises every Deep Thought engine and both tiers.
 | 5 | CVE-2025-50181 | urllib3 | SSRF (CWE-918) | Taint, redirect/source to request sink | DISCOVER taint | deterministic | Python |
 | 6 | CVE-2025-66516 | Apache Tika | XXE (CWE-611) | Static config rule, insecure XML parser | DISCOVER static | deterministic | Java |
 | 7 | CVE-2024-12718 | CPython tarfile | Path traversal (CWE-22) | Static + variant analysis | SIBLING HUNT | deterministic | Python |
-| 8 | CVE-2025-55182 | React / Next.js (RSC Flight) | Insecure deserialization to RCE (CWE-502) | Semantic, untrusted data to exec sink | DISCOVER taint | deterministic | JS |
+| 8 | CVE-2017-5954 | serialize-to-js | Insecure deserialization to RCE (CWE-502) | Static AST, untrusted data to execution/object sink | DISCOVER static | deterministic | JS |
 | 9 | CVE-2025-3933 | Hugging Face Transformers | ReDoS (CWE-1333) | Regex-complexity + input fuzz | DISCOVER static + fuzz | deterministic | Python |
 | 10 | CVE-2025-64756 | glob CLI | OS command injection (CWE-78) | Taint, untrusted value to shell exec | DISCOVER taint | deterministic | JS |
 
@@ -35,7 +35,7 @@ CVEs. It is the SIBLING HUNT exemplar: one root pattern, several CVEs.
 - **SSRF (5).** Taint from a request-target source to an outbound-request sink where the host is not allowlisted, including the redirect path. Verify against a local sink, never a real external host.
 - **XXE (6).** Detect an XML parser constructed without external-entity and DTD processing disabled. Verify by parsing a benign entity that resolves to a local marker file in the sandbox.
 - **Path traversal (7).** Detect an archive member or path joined to a destination without normalization and containment. Verify by staging a crafted member and confirming it would escape, without extracting.
-- **Deserialization (8).** Detect untrusted serialized input flowing to an execution or object-construction sink. Verify by confirming attacker-controlled data reaches the sink, boxed, with a benign marker rather than a payload.
+- **Deserialization (8).** Detect untrusted serialized input flowing to a dynamic execution or object-construction sink, with import/receiver provenance and receiver-bound hardening. Verify by static vulnerable/patched discrimination and the DISCOVER pipeline; no target code executes.
 - **ReDoS (9).** Detect a regex with nested or overlapping quantifiers reachable from untrusted input, using a complexity checker. Verify by measuring superlinear match time on a crafted input under a wall bound.
 - **Command injection (10).** Taint from an untrusted value to a shell execution sink, especially `shell: true` or string-built commands. Verify with a benign marker command in the sandbox, never a real payload.
 
@@ -81,7 +81,7 @@ counting only entries pinned to real ground truth.
 - **Path traversal:** the tarfile-filter-bypass cluster (CVE-2025-4138, CVE-2025-4330, CVE-2025-4435) and CVE-2007-4559 as the anchor.
 - **SSRF:** LangChain CVE-2023-46229, Apache HTTP Server CVE-2024-40898.
 - **XXE:** pin three or more public CVEs of the class at build time (e.g. Java/XML-parser XXE advisories), each with vuln/patched SHAs in the manifest — not chosen ad hoc at run time.
-- **Deserialization:** pin three or more public CVEs of the class at build time (e.g. JS/Java unsafe-deserialization advisories), each with vuln/patched SHAs in the manifest — not chosen ad hoc at run time.
+- **Deserialization:** serialize-to-js CVE-2017-5954 is the verified seed; held-out Superset CVE-2018-8021, suricata-update CVE-2018-1000167, and Struts CVE-2017-9805 are pinned in the manifest. The React RSC seed was swapped because its property-traversal mechanism did not match this unsafe-deserialization sink class.
 
 ## Acceptance
 
