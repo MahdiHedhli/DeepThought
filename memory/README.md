@@ -25,14 +25,18 @@ memory/
 ## Quick start
 
 ```bash
-python memory/mem.py init                    # create memory/vault/ from the template
-python memory/mem.py backup                  # snapshot before writing (do this each session)
-python memory/mem.py recall "the topic"      # recall relevant notes (at session start)
-python memory/mem.py add --type project \
-    --name a-decision --description "one line" --body "the fact, with [[links]]"
-python memory/mem.py list                    # every note + its description
-python memory/mem.py restore                 # revert to the newest backup (corruption recovery)
+python memory/mem.py init                          # create memory/vault/ from the template
+python memory/mem.py backup                        # snapshot before writing (do this each session)
+python memory/mem.py recall --class methodology    # scoped recall: the always-load core
+python memory/mem.py recall --class ssrf --tag python   # only the relevant attack + surface slice
+python memory/mem.py add --type lesson --class ssrf --tags "web,python,taint" \
+    --name a-lesson --description "one line" --body "the fact, with [[links]]"
+python memory/mem.py list                          # every note + its description
+python memory/mem.py restore                        # revert to the newest backup (corruption recovery)
 ```
+
+**Note types:** `user`, `feedback` (operator preferences), `lesson` (knowledge distilled from
+the work — also carries `class` + `tags` for scoped recall), `project`, `reference`.
 
 **Durability:** every write is atomic (temp-file + `os.replace`), the vault auto-snapshots
 before mutation, and `backup`/`restore` give rotating, gitignored history — so a failed write
