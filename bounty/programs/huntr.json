@@ -1,0 +1,26 @@
+{
+  "program": "huntr (open-source security)",
+  "platform": "huntr",
+  "url": "https://huntr.com",
+  "policy_url": "https://huntr.com/policies (VERIFY exact scope, eligibility, and disclosure rules here before any scan)",
+  "tier": "S",
+  "languages": ["js", "python", "java", "go", "ruby", "php", "..."],
+  "in_scope": [
+    "TODO: verify from huntr's policy which open-source packages/repos are eligible (generally: public OSS with real users; a maintained upstream); pin the exact repo + default-branch commit per target before scanning"
+  ],
+  "out_of_scope": [
+    "TODO: verify — e.g. archived/unmaintained repos, forks, non-OSS, or anything the policy excludes"
+  ],
+  "rules": {
+    "automated_scanning_allowed": "TODO verify — static analysis of source is fine; confirm huntr's stance and any triage requirements",
+    "rate_limit": "N/A for Tier S (source only, no live requests)",
+    "forbidden_methods": ["no live-target interaction under Tier S", "no DoS", "no auto-submission"],
+    "disclosure_timeline": "TODO verify huntr's coordinated-disclosure timeline",
+    "safe_harbor": "TODO verify"
+  },
+  "disclosure_format": "TODO verify huntr's report template (repro + impact + affected version + fix suggestion); Deep Thought DRAFTS, a human submits",
+  "scope_verified": false,
+  "verified_by": "",
+  "verified_at": "",
+  "notes": "SEED record. Tier S (static analysis of in-scope OSS). Nothing here is authoritative until scope_verified=true after a human confirms scope + rules against policy_url. huntr is the cleanest fit for the existing JS/Python/Java detectors: point them at the CURRENT tree of an eligible package -> triage a real hit -> DISCLOSURE draft -> human submits. See ../STRATEGY.md and ../AUTHORIZATION.md."
+}

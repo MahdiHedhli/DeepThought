@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Bounty program authorization record",
+  "type": "object",
+  "required": ["program", "platform", "tier", "policy_url", "scope_verified"],
+  "additionalProperties": false,
+  "properties": {
+    "program": {"type": "string", "description": "program / project name"},
+    "platform": {"type": "string", "description": "e.g. huntr, Immunefi, Patchstack, HackerOne"},
+    "url": {"type": "string"},
+    "policy_url": {"type": "string", "description": "the program's OWN scope/rules policy — the source of truth"},
+    "tier": {"enum": ["S", "L"], "description": "S = static source only (default); L = live interaction (hard-stop gated)"},
+    "languages": {"type": "array", "items": {"type": "string"}},
+    "in_scope": {
+      "type": "array",
+      "description": "Tier S: repos/packages. Tier L: hosts/apps. Copied from the program policy.",
+      "items": {"type": "string"}
+    },
+    "out_of_scope": {"type": "array", "items": {"type": "string"}},
+    "rules": {
+      "type": "object",
+      "description": "binding constraints copied from the program policy",
+      "properties": {
+        "automated_scanning_allowed": {"type": ["boolean", "string"]},
+        "rate_limit": {"type": "string"},
+        "forbidden_methods": {"type": "array", "items": {"type": "string"}},
+        "disclosure_timeline": {"type": "string"},
+        "safe_harbor": {"type": ["boolean", "string"]}
+      }
+    },
+    "disclosure_format": {"type": "string", "description": "how the program wants reports"},
+    "scope_verified": {"type": "boolean", "description": "true only after a human confirms scope+rules against policy_url"},
+    "verified_by": {"type": "string"},
+    "verified_at": {"type": "string"},
+    "notes": {"type": "string"}
+  }
+}
