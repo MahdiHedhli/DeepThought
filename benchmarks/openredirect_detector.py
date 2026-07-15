@@ -882,6 +882,11 @@ class _Scanner:
         }
         local_redirects, local_validators, local_modules = _imports(node.body)
         local_bindings = _scope_bindings(node.body) | {arg.arg for arg in parameters}
+        # A same-scope assignment can replace a direct-import alias. Conservatively
+        # stop treating that name as a framework sink/validator anywhere in the
+        # function rather than letting a later lambda bless or fabricate a finding.
+        local_redirects -= local_bindings
+        local_validators -= local_bindings
         prior_redirects = self.redirect_aliases
         prior_validators = self.validator_aliases
         prior_modules = self.module_aliases

@@ -60,6 +60,19 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             1,
         ),
         (
+            "from flask import redirect,request\n"
+            "def f():\n from app import is_safe_redirect_url as check\n"
+            " check=lambda value: True\n target=request.args.get('next')\n"
+            " if check(target): return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import request\n"
+            "def f():\n from flask import redirect\n redirect=lambda url: url\n"
+            " return redirect(request.args.get('next'))",
+            0,
+        ),
+        (
             "from django.shortcuts import redirect\n"
             "def f(request):\n target=request.GET.get('next')\n target.startswith('/')\n return redirect(target)",
             1,
