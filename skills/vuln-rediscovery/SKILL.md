@@ -195,3 +195,31 @@ Each build round appends one section here using this template:
   the sink (dropped: systeminformation — sanitize-only, sink persists; shell-quote —
   library-internal). **Known miss:** aws-cdk's patched tree keeps a `bash -c` exec for the
   explicit command-hooks case, so the signal persists — a future improvement-loop fixture.
+
+### Path traversal (CWE-22)
+
+- **When to use:** hunting JS or Python code that joins an archive member, request path,
+  upload name, or other untrusted path component to a trusted destination before a file
+  operation. The dangerous shape is a dynamic `path.join` / `path.resolve`,
+  `os.path.join`, or `Path.joinpath` without containment.
+- **Detection:** static AST (`benchmarks/pathtrav_detector.py`). The JavaScript backend
+  uses tree-sitter and follows `path` import aliases; the Python backend uses `ast`. A
+  sink is suppressed only by a containment idiom in its own scope. `startsWith` and
+  `realpath` checks are bound to the path produced by the sink so an unrelated URL-prefix
+  check or nested helper cannot bless it.
+- **Rule id:** `DT-PATH-TRAVERSAL`, emitting SARIF 2.1.0 into the shipped DISCOVER ingest.
+- **Verification:** deterministic static discrimination and the real NEW PROJECT → MAP →
+  DISCOVER → `check` pipeline. No archive extraction or target code execution.
+- **OSV / disclosure shape:** CWE-22; a known CVE is an informational alias only, never
+  authoritative finding lifecycle evidence.
+- **Fixtures:** seed decompress **CVE-2020-12265**; held-out adm-zip
+  CVE-2018-1002204, aiohttp CVE-2024-23334, and NLTK CVE-2019-14751. The original
+  CPython tarfile-filter seed was swapped because it is a library-internal filter bug,
+  not user-code path-join misuse.
+- **Held-out generalization:** **2/3 (67%)** — adm-zip and NLTK rediscovered on pinned
+  real trees; aiohttp is the honest miss.
+- **Notes:** aiohttp's vulnerable and patched functions both contain `relative_to`; the
+  security difference is branch-sensitive (`follow_symlinks=True` gained normalization
+  and containment). A scope-level static rule cannot distinguish that polarity without
+  path-sensitive control-flow analysis. Patched-file context contains 11 unrelated path
+  flags, reported honestly as false-positive context rather than hidden.

@@ -131,6 +131,8 @@ own text must contain the sink probe in the vulnerable tree and not in the patch
 | Prototype pollution (1321) | `DT-PP-MERGE` (JS) | js-yaml CVE-2025-64718 | **2/3** | min-document miss: `hasOwnProperty`-polarity guard |
 | SSRF (918) | `DT-SSRF-TAINT` (Python) | dify CVE-2025-0184 | **3/4** | seed swapped from mis-classed urllib3 (CWE-601) |
 | XXE (611) | `DT-XXE-PARSER` (Java+Python) | tika CVE-2025-66516 | **1/3** | dom4j/JDOM2: fix is additive/reorder, signal persists |
+| OS command injection (78) | `DT-CMDI-EXEC` (JS+Python) | node-glob CVE-2025-64756 | **3/4** | one command-hook sink persists after patch |
+| Path traversal (22) | `DT-PATH-TRAVERSAL` (JS+Python) | decompress CVE-2020-12265 | **2/3** | aiohttp needs branch-sensitive containment reasoning |
 
 The generalization log (`benchmarks/data/generalization-log.json`) versions the score
 under a **regression bar** — no merged change may lower any class's rate. Discipline held:

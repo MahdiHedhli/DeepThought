@@ -32,8 +32,10 @@ def test_fixtures_discriminate_vulnerable_from_contained_paths():
         ("a.js", "function f(root,e,url){if(!url.startsWith('/'))throw Error();return path.join(root,e.name)}", 1),
         ("a.js", "function f(root,e){function helper(x){return realpath(x)}return path.join(root,e.name)}", 1),
         ("a.js", "function f(root){return path.join(root,'fixed.txt')}", 0),
+        ("a.js", "function f(root){return path.join(root,`fixed.txt`)}", 0),
         ("a.py", "import os\ndef f(root,name): return os.path.join(root,name)", 1),
         ("a.py", "from pathlib import Path\ndef f(root,name):\n p=Path(root).joinpath(name)\n p.relative_to(Path(root))\n return p", 0),
+        ("a.py", "import os\ndef outer(root,name):\n def inner():\n  return relative_to\n return os.path.join(root,name)", 1),
         ("a.py", "import os\ndef f(root): return os.path.join(root,'fixed.txt')", 0),
     ],
 )
