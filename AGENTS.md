@@ -11,9 +11,13 @@ No MCP required.
 
 - **At session start:** back up (`python3 memory/mem.py backup`), read `memory/vault/MEMORY.md`,
   then recall **scoped** so you don't load the whole notebook —
-  `python3 memory/mem.py recall --class methodology` (the always-load core) plus
+  `python3 memory/mem.py recall --class methodology` (the always-load core), plus
   `python3 memory/mem.py recall --class <attack> --tag <surface>` for the work at hand
-  (e.g. `--class ssrf --tag python`).
+  (e.g. `--class ssrf --tag python`), plus `python3 memory/mem.py recall --harness <you>`
+  (`codex`/`cursor`/…) for your harness's known quirks.
+- **Harness-specific knowledge:** stable SETUP steps for your harness live in THIS file (or
+  `CLAUDE.md` for Claude Code) — one shared protocol, thin per-harness pointers, no forked
+  copies. A LEARNED harness quirk goes in a memory note with a `--harness <you>` tag.
 - **To record a durable fact:** `python3 memory/mem.py add --type <user|feedback|lesson|project|reference> --name <slug> --description "<one line>" --body "<fact, with [[links]]>"`.
   A `lesson` (knowledge earned by doing the work — a learning that would otherwise live only in
   a commit message) also takes `--class <attack-class|methodology|sandbox|toolchain>` and

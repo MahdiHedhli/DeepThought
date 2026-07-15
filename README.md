@@ -140,8 +140,11 @@ vault — **no MCP, no external service**:
   notes) and `memory/backups/`. Open `memory/vault/` as an Obsidian vault to read it.
 - **Classified for scoped recall.** Notes are typed `user | feedback | lesson | project |
   reference`. A `lesson` (knowledge distilled from doing the work) also carries `class` (the
-  attack class / CWE, or `methodology`/`sandbox`/`toolchain`) and `tags` (surface/platform/
-  language), so an agent pulls **only** what it needs instead of the whole notebook.
+  attack class / CWE, or `methodology`/`sandbox`/`toolchain`), `tags` (surface/platform/
+  language), and an optional `harness` (`codex`/`claude`/… for a harness-specific quirk), so an
+  agent pulls **only** what it needs — `recall --class <attack> --tag <surface> --harness <you>` —
+  instead of the whole notebook. (Stable per-harness *setup* stays in the thin `CLAUDE.md` /
+  `AGENTS.md` pointers, not in memory.)
 - **Durable.** Every write is atomic (temp-file + `os.replace`); the vault auto-snapshots before
   mutation; `backup`/`restore` give rotating, gitignored history — a failed write or corruption
   never loses memory.
