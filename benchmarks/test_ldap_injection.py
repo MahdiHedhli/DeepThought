@@ -436,6 +436,18 @@ def test_php_review_regressions_provenance_mixed_values_flags_and_branches():
         "static function search($filter){} } function f($username){ "
         "Ldap::search('(uid=' . Ldap::escape($username) . ')'); } ?>"
     )
+    static_filter_escape = (
+        "<?php function f($username){ Ldap::search('(uid=' . "
+        "Ldap::escape($username,null,LDAP_ESCAPE_FILTER) . ')'); } ?>"
+    )
+    static_dn_escape = (
+        "<?php function f($username){ Ldap::search('(uid=' . "
+        "Ldap::escape($username,null,LDAP_ESCAPE_DN) . ')'); } ?>"
+    )
+    static_unqualified_escape = (
+        "<?php function f($username){ Ldap::search('(uid=' . "
+        "Ldap::escape($username) . ')'); } ?>"
+    )
     misleading_receiver = (
         "<?php function f($notLdapIndex,$username){ "
         "$notLdapIndex->search('(uid=' . $username . ')'); } ?>"
@@ -449,6 +461,9 @@ def test_php_review_regressions_provenance_mixed_values_flags_and_branches():
     assert len(scan_source(branches, "a.php")) == 1
     assert scan_source(safe_branch_sink, "a.php") == []
     assert len(scan_source(local_static_no_op, "a.php")) == 1
+    assert scan_source(static_filter_escape, "a.php") == []
+    assert len(scan_source(static_dn_escape, "a.php")) == 1
+    assert len(scan_source(static_unqualified_escape, "a.php")) == 1
     assert scan_source(misleading_receiver, "a.php") == []
 
 

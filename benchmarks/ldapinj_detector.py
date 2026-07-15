@@ -1263,7 +1263,7 @@ def _php_call_is_filter_sanitizer(
         return False
     if owner.lstrip("\\").split("\\")[-1] in local_classes:
         return False
-    return name == "escape" or name in {
+    return (name == "escape" and has_filter_flag) or name in {
         "escapefilterchars",
         "escapeldapfilter",
         "encodefiltervalue",
