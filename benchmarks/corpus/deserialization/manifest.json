@@ -1,0 +1,92 @@
+{
+  "bug_class": "deserialization",
+  "cwe": "CWE-502",
+  "detector": "DT-DESERIAL",
+  "tier": "deterministic",
+  "language": "javascript+python+java",
+  "reproducibility": "real repositories at pinned vulnerable and patched SHAs; line-precise; pin-or-drop",
+  "seed_swap": {
+    "original_seed": "CVE-2025-55182 (React RSC Flight)",
+    "reason": "The original mechanism is property traversal to a callable with a hasOwnProperty fix, not the unsafe deserialization sink shape this detector measures.",
+    "replaced_with": "CVE-2017-5954 (serialize-to-js dynamic new Function)"
+  },
+  "seed": {
+    "cve": "CVE-2017-5954",
+    "package": "serialize-to-js",
+    "repo": "https://github.com/commenthol/serialize-to-js",
+    "vuln_ref": "a1e8140ed1a07013f644b5b76025f4eaab7fb9d8",
+    "patched_ref": "1cd433960e5b9db4c0b537afb28366198a319429",
+    "target_paths": [
+      "lib/deserialize.js"
+    ],
+    "sink_probe": "new Function('return ' + str)",
+    "sink": "deserialize(str) compiles attacker-controlled serialized text with new Function and immediately invokes it",
+    "patched_shape": "the default path sanitizes str before the retained new Function sink and changes the constructed strict-mode source",
+    "cwe": "CWE-502",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2018-8021",
+      "package": "Apache Superset",
+      "repo": "https://github.com/apache/superset",
+      "vuln_ref": "4b11f45f72dc3d1957d6db4e0147fcd6cb6c59af",
+      "patched_ref": "2c72a7ae4fc0a8bac1f037a79efa90e1c5549710",
+      "target_paths": [
+        "superset/views/core.py"
+      ],
+      "sink_probe": "pickle.load(f)",
+      "sink": "an uploaded dashboard file is passed directly to pickle.load",
+      "patched_shape": "pickle import and loading are replaced by JSON decoding with an object hook",
+      "cwe": "CWE-502",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2018-1000167",
+      "package": "suricata-update",
+      "repo": "https://github.com/OISF/suricata-update",
+      "vuln_ref": "8b47847bde22a4e29513ecf168c83bc7074600d8",
+      "patched_ref": "76270e73128ca1299b4e33e7e2a74ac3d963a97a",
+      "target_paths": [
+        "suricata/update/sources.py"
+      ],
+      "sink_probe": "yaml.load(open(self.filename, \"rb\"))",
+      "sink": "a downloaded source index is parsed with PyYAML's unsafe default loader",
+      "patched_shape": "both yaml.load calls become yaml.safe_load",
+      "cwe": "CWE-502",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2017-9805",
+      "package": "Apache Struts",
+      "repo": "https://github.com/apache/struts",
+      "vuln_ref": "ff6148795ac52e6de5b80c01e7a1a0cc4da61857",
+      "patched_ref": "19494718865f2fb7da5ea363de3822f87fbda264",
+      "target_paths": [
+        "plugins/rest/src/main/java/org/apache/struts2/rest/handler/XStreamHandler.java"
+      ],
+      "sink_probe": "xstream.fromXML(in, target)",
+      "sink": "untrusted REST XML is deserialized by an unrestricted XStream instance",
+      "patched_shape": "the sink persists, but the called one-argument XStream factory first installs NoTypePermission.NONE and then explicit allowlists; an unsafe deprecated zero-argument overload remains",
+      "cwe": "CWE-502",
+      "status": "pinned"
+    }
+  ],
+  "dropped": [
+    {
+      "cve": "CVE-2013-4660",
+      "package": "js-yaml",
+      "drop_reason": "authoritative weakness is CWE-20, not CWE-502"
+    },
+    {
+      "cve": "CVE-2020-7729",
+      "package": "grunt",
+      "drop_reason": "authoritative weakness is CWE-1188, not CWE-502"
+    },
+    {
+      "cve": "CVE-2020-7660",
+      "package": "serialize-javascript",
+      "drop_reason": "library-internal serializer escaping bug; the consumer execution sink is not in the changed target and a user-code misuse rule cannot discriminate it"
+    }
+  ]
+}

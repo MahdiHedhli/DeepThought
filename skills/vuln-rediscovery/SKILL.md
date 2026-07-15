@@ -223,3 +223,30 @@ Each build round appends one section here using this template:
   and containment). A scope-level static rule cannot distinguish that polarity without
   path-sensitive control-flow analysis. Patched-file context contains 11 unrelated path
   flags, reported honestly as false-positive context rather than hidden.
+
+### Deserialization (CWE-502)
+
+- **When to use:** hunting JavaScript, Python, or Java application code that passes
+  untrusted serialized input to a code-generation, unsafe object-loader, or unrestricted
+  object-graph sink.
+- **Detection:** static AST (`benchmarks/deserial_detector.py`). JavaScript covers the
+  global `Function`/`eval`, Node `vm.runIn*`, and known deserializer imports; execution-like
+  member names require global or imported-module provenance. Python covers import-bound
+  `pickle`/`dill`/`joblib` loads and unsafe PyYAML loaders. Java covers provenanced
+  `ObjectInputStream.readObject` and XStream `fromXML` receivers.
+- **Guards:** Java filters and XStream permissions must dominate and bind to the exact sink
+  receiver; `setObjectInputFilter(null)` is not hardening. XStream wrapper summaries bind
+  to method arity. JavaScript sanitizers and Python safe loaders require trusted import
+  provenance, so a same-named local helper or unrelated guarded receiver cannot bless a sink.
+- **Rule id:** `DT-DESERIAL`, emitting SARIF 2.1.0 into the shipped DISCOVER
+  ingest. Verification is deterministic vulnerable/patched discrimination plus NEW PROJECT
+  → MAP → DISCOVER → `check`; no target code executes.
+- **Cohort:** seed serialize-to-js **CVE-2017-5954**; held-out Superset
+  **CVE-2018-8021**, suricata-update **CVE-2018-1000167**, and Struts
+  **CVE-2017-9805**, all pinned to real vulnerable/patched trees. The React RSC seed was
+  swapped because its property-traversal mechanism was off-shape. Dropped CVE-2013-4660
+  (authoritative CWE-20), CVE-2020-7729 (authoritative CWE-1188), and CVE-2020-7660
+  (library-internal serializer escaping; no changed consumer sink).
+- **Held-out generalization:** **3/3 (100%)**, with **0 patched-file flags**. The ceiling
+  reflects visible sink removal/replacement for the Python cases and receiver-bound XStream
+  hardening for Struts; it does not claim coverage of library-internal serialization bugs.
