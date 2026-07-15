@@ -58,6 +58,44 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             " return redirect('/')",
             0,
         ),
+        # Review P2: validation under a composite ``not`` applies to fall-through,
+        # never to the rejecting branch.
+        (
+            "from flask import redirect,request\nfrom app import is_safe_redirect_url\n"
+            "def f():\n target=request.args.get('next')\n"
+            " if not (target and is_safe_redirect_url(target)):\n  return redirect('/')\n"
+            " return redirect(target)",
+            0,
+        ),
+        (
+            "from flask import redirect,request\nfrom app import is_safe_redirect_url\n"
+            "def f():\n target=request.args.get('next')\n"
+            " if not (target and is_safe_redirect_url(target)):\n  return redirect(target)\n"
+            " return redirect(target)",
+            1,
+        ),
+        # Boolean implication: OR cannot establish a positive guard; AND cannot
+        # establish a negative guard on fall-through.
+        (
+            "from flask import redirect,request\nfrom app import is_safe_redirect_url\n"
+            "def f(debug):\n target=request.args.get('next')\n"
+            " if is_safe_redirect_url(target) or debug: return redirect(target)",
+            1,
+        ),
+        (
+            "from flask import redirect,request\nfrom app import is_safe_redirect_url\n"
+            "def f(debug):\n target=request.args.get('next')\n"
+            " if not is_safe_redirect_url(target) and debug: return redirect('/')\n"
+            " return redirect(target)",
+            1,
+        ),
+        # An imported validator alias has the same semantics as its original name.
+        (
+            "from flask import redirect,request\nfrom app import is_safe_redirect_url as check\n"
+            "def f():\n target=request.args.get('next')\n"
+            " if check(target): return redirect(target)\n return redirect('/')",
+            0,
+        ),
         (
             "from flask import redirect,request\nfrom app import is_safe_redirect_url\n"
             "def f():\n target=request.args.get('next')\n other=request.args.get('other')\n"
@@ -87,6 +125,19 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             " target=request.args.get('next')\n return redirect(target)",
             1,
         ),
+        # Branch assignments merge conservatively at a later sink.
+        (
+            "from flask import redirect,request\n"
+            "def f(flag):\n target='/'\n"
+            " if flag: target=request.args.get('next')\n return redirect(target)",
+            1,
+        ),
+        # String formatting preserves request taint.
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('{}'.format(request.args.get('next')))",
+            1,
+        ),
         ("from flask import redirect\ndef f(): return redirect('/fixed')", 0),
         ("from flask import redirect,url_for\ndef f(): return redirect(url_for('index'))", 0),
         (
@@ -111,6 +162,19 @@ def test_fixture_discriminates_one_vulnerable_redirect():
             " def get(self):\n  path,*rest=self.request.uri.partition('?')\n"
             "  path='/' + path.strip('/')\n  new_uri=''.join([path,*rest])\n  self.redirect(new_uri)",
             0,
+        ),
+        # Prefixing a raw value with one slash can still produce // or ///. The
+        # Jupyter patched shape is safe because strip('/') removes that ambiguity.
+        (
+            "from flask import redirect,request\n"
+            "def f(): return redirect('/' + request.args.get('next'))",
+            1,
+        ),
+        # Nested views are separate scopes, not blind spots or guard donors.
+        (
+            "from flask import redirect,request\n"
+            "def outer():\n def view(): return redirect(request.args.get('next'))\n return view",
+            1,
         ),
         (
             "from flask import redirect,request\ndef f():\n"

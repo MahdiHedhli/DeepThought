@@ -101,8 +101,16 @@ def _root_name(node: ast.AST | None) -> str:
     return cur.id if isinstance(cur, ast.Name) else ""
 
 
-def _literal_slash(node: ast.AST) -> bool:
-    return isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith("/")
+def _literal_string(node: ast.AST) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _strips_leading_slashes(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        return False
+    if node.func.attr not in {"strip", "lstrip"} or len(node.args) != 1:
+        return False
+    return _literal_string(node.args[0]) == "/"
 
 
 def _request_source(node: ast.AST) -> bool:
@@ -173,9 +181,13 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
         left = _flow(node.left, state)
         right = _flow(node.right, state)
         if isinstance(node.op, ast.Add):
-            # A single-leading-slash base cannot be reinterpreted as an authority.
-            if _literal_slash(node.left) and right is Flow.TAINTED:
-                return Flow.INTERNAL
+            prefix = _literal_string(node.left)
+            if prefix and prefix.startswith("/") and right is Flow.TAINTED:
+                # A non-root path prefix stays internal. A bare slash is safe only
+                # when attacker-controlled leading slashes were removed first;
+                # otherwise '/' + '//evil.example' is still protocol-relative.
+                if prefix != "/" or _strips_leading_slashes(node.right):
+                    return Flow.INTERNAL
             if left is Flow.INTERNAL:
                 return Flow.INTERNAL
         return _join_values([left, right])
@@ -209,6 +221,10 @@ def _flow(node: ast.AST | None, state: State) -> Flow:
                 if values and values[0] is Flow.INTERNAL:
                     return Flow.INTERNAL
                 return _join_values(values)
+            if callee == "format":
+                return _join_values(
+                    [receiver, *[_flow(arg, state) for arg in node.args], *[_flow(kw.value, state) for kw in node.keywords]]
+                )
             if callee in _PRESERVING_TRANSFORMS:
                 return receiver
         return _join_values([_flow(arg, state) for arg in node.args])
@@ -234,30 +250,31 @@ def _call_arg_name(call: ast.Call) -> str | None:
     return candidate.id if isinstance(candidate, ast.Name) else None
 
 
-def _positive_validations(test: ast.AST) -> set[str]:
-    names: set[str] = set()
-    for node in ast.walk(test):
-        if not isinstance(node, ast.Call) or _name(node.func) not in _VALIDATORS:
-            continue
-        parent_is_not = any(
-            isinstance(parent, ast.UnaryOp) and isinstance(parent.op, ast.Not) and parent.operand is node
-            for parent in ast.walk(test)
-        )
-        if not parent_is_not and (name := _call_arg_name(node)):
-            names.add(name)
-    return names
+def _validation_guarantees(test: ast.AST, validators: set[str]) -> tuple[set[str], set[str]]:
+    """Return variables guaranteed validated when *test* is true and false.
 
-
-def _negative_validations(test: ast.AST) -> set[str]:
-    names: set[str] = set()
-    for node in ast.walk(test):
-        if not isinstance(node, ast.UnaryOp) or not isinstance(node.op, ast.Not):
-            continue
-        call = node.operand
-        if isinstance(call, ast.Call) and _name(call.func) in _VALIDATORS:
-            if name := _call_arg_name(call):
-                names.add(name)
-    return names
+    Boolean implication matters: every operand of ``and`` is true on the true
+    branch, while every operand of ``or`` is false on the false branch. The other
+    polarities require an intersection because only one operand determines the result.
+    """
+    if isinstance(test, ast.Call) and _name(test.func) in validators:
+        name = _call_arg_name(test)
+        return ({name} if name else set(), set())
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        when_true, when_false = _validation_guarantees(test.operand, validators)
+        return when_false, when_true
+    if isinstance(test, ast.BoolOp) and test.values:
+        guarantees = [_validation_guarantees(value, validators) for value in test.values]
+        if isinstance(test.op, ast.And):
+            when_true = set().union(*(true for true, _false in guarantees))
+            false_sets = [false for _true, false in guarantees]
+            when_false = set.intersection(*false_sets) if false_sets else set()
+            return when_true, when_false
+        true_sets = [true for true, _false in guarantees]
+        when_true = set.intersection(*true_sets) if true_sets else set()
+        when_false = set().union(*(false for _true, false in guarantees))
+        return when_true, when_false
+    return set(), set()
 
 
 def _block_always_exits(statements: list[ast.stmt]) -> bool:
@@ -267,6 +284,18 @@ def _block_always_exits(statements: list[ast.stmt]) -> bool:
     if isinstance(last, (ast.Return, ast.Raise)):
         return True
     return isinstance(last, ast.If) and _block_always_exits(last.body) and _block_always_exits(last.orelse)
+
+
+def _merge_states(target: State, branches: list[State]) -> None:
+    if not branches:
+        return
+    names = set().union(*(branch.env for branch in branches))
+    merged: dict[str, Flow] = {}
+    for name in names:
+        values = [branch.env.get(name, Flow.UNTAINTED) for branch in branches]
+        merged[name] = _join_values(values)
+    target.env = merged
+    target.validated = set.intersection(*(branch.validated for branch in branches))
 
 
 def _imports(source_tree: ast.Module) -> tuple[set[str], set[str]]:
@@ -346,14 +375,24 @@ class _Scanner:
                 continue
             if isinstance(stmt, ast.If):
                 self._scan_expr(stmt.test, state, web_handler)
-                positive = self._validator_names(_positive_validations(stmt.test))
-                negative = self._validator_names(_negative_validations(stmt.test))
+                positive, negative = _validation_guarantees(stmt.test, self.validator_aliases)
                 body_state = state.branch()
                 body_state.validated.update(positive)
                 self._scan_block(stmt.body, body_state, web_handler)
-                self._scan_block(stmt.orelse, state.branch(), web_handler)
-                if negative and _block_always_exits(stmt.body):
-                    state.validated.update(negative)
+                false_state = state.branch()
+                false_state.validated.update(negative)
+                else_state = false_state.branch()
+                self._scan_block(stmt.orelse, else_state, web_handler)
+
+                continuing: list[State] = []
+                if not _block_always_exits(stmt.body):
+                    continuing.append(body_state)
+                if stmt.orelse:
+                    if not _block_always_exits(stmt.orelse):
+                        continuing.append(else_state)
+                else:
+                    continuing.append(false_state)
+                _merge_states(state, continuing)
                 continue
             if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
                 self._scan_expr(stmt.iter if hasattr(stmt, "iter") else stmt.test, state, web_handler)
@@ -382,11 +421,6 @@ class _Scanner:
                 if isinstance(value, ast.AST):
                     self._scan_expr(value, state, web_handler)
 
-    def _validator_names(self, names: set[str]) -> set[str]:
-        # _positive/_negative only emit calls whose original name is in _VALIDATORS.
-        # Import aliases are handled below by a second exact AST pass in scan_function.
-        return names
-
     def scan_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, web_handler: bool) -> None:
         env = {
             arg.arg: Flow.TAINTED
@@ -404,17 +438,21 @@ def scan_source(source: str, uri: str, cve: str | None = None) -> list[dict]:
     redirect_aliases, validator_aliases = _imports(tree)
     scanner = _Scanner(redirect_aliases, validator_aliases, uri, cve)
 
-    # Module-level redirects are rare but valid.
+    # Module-level redirects are rare but valid. Each nested function is then scanned
+    # independently so its validation state cannot leak into its parent or siblings.
     scanner._scan_block(tree.body, State({}, set()), False)
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            scanner.scan_function(node, False)
-        elif isinstance(node, ast.ClassDef):
-            base_names = {_name(base) for base in node.bases}
-            web_handler = bool(base_names & _WEB_HANDLER_BASES)
-            for member in node.body:
-                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    scanner.scan_function(member, web_handler)
+
+    def scan_definitions(statements: list[ast.stmt], web_handler: bool) -> None:
+        for node in statements:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scanner.scan_function(node, web_handler)
+                scan_definitions(node.body, web_handler)
+            elif isinstance(node, ast.ClassDef):
+                base_names = {_name(base) for base in node.bases}
+                class_is_web = bool(base_names & _WEB_HANDLER_BASES)
+                scan_definitions(node.body, class_is_web)
+
+    scan_definitions(tree.body, False)
     return scanner.results
 
 
