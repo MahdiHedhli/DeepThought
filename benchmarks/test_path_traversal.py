@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import socket
@@ -11,7 +12,13 @@ import pytest
 
 pytest.importorskip("tree_sitter_javascript")
 
-from pathtrav_detector import GROUND_TRUTH_CWE, RULE_ID, scan_file, scan_source  # noqa: E402
+from pathtrav_detector import (  # noqa: E402
+    GROUND_TRUTH_CWE,
+    RULE_ID,
+    _python_node_bounds,
+    scan_file,
+    scan_source,
+)
 
 FIX_JS = Path(__file__).parent / "fixtures" / "path_traversal.js"
 FIX_PY = Path(__file__).parent / "fixtures" / "path_traversal.py"
@@ -41,6 +48,11 @@ def test_fixtures_discriminate_vulnerable_from_contained_paths():
 )
 def test_rule_variants(uri, source, expected):
     assert len(scan_source(source, uri)) == expected
+
+
+def test_python_bounds_preserve_a_zero_end_column():
+    node = ast.Pass(lineno=2, col_offset=4, end_lineno=3, end_col_offset=0)
+    assert _python_node_bounds(node, [0, 10, 20]) == (14, 20)
 
 
 def test_full_pipeline_rediscovers_the_seed_shape(tmp_path):

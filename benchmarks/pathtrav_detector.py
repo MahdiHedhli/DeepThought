@@ -243,6 +243,18 @@ def _py_call_name(call: ast.Call) -> str:
     return f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
 
 
+def _python_node_bounds(node: ast.AST, line_offsets: list[int]) -> tuple[int, int]:
+    """Return byte bounds without treating a valid zero end column as missing."""
+    start = line_offsets[node.lineno - 1] + node.col_offset
+    end_line = getattr(node, "end_lineno", None)
+    if end_line is None:
+        end_line = node.lineno
+    end_col = getattr(node, "end_col_offset", None)
+    if end_col is None:
+        end_col = node.col_offset
+    return start, line_offsets[end_line - 1] + end_col
+
+
 def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
     try:
         tree = ast.parse(source)
@@ -257,13 +269,6 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
         line_offsets.append(offset)
         offset += len(line.encode("utf-8"))
 
-    def bounds(node: ast.AST) -> tuple[int, int]:
-        start = line_offsets[node.lineno - 1] + node.col_offset
-        end_line = getattr(node, "end_lineno", node.lineno) or node.lineno
-        end_col = getattr(node, "end_col_offset", node.col_offset) or node.col_offset
-        end = line_offsets[end_line - 1] + end_col
-        return start, end
-
     def scope_text(node: ast.AST) -> str:
         best = None
         for f in funcs:
@@ -271,12 +276,16 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
                 if best is None or f.lineno > best.lineno:
                     best = f
         scope: ast.AST = best or tree
-        scope_start, scope_end = (bounds(scope) if best is not None else (0, len(source.encode("utf-8"))))
+        scope_start, scope_end = (
+            _python_node_bounds(scope, line_offsets)
+            if best is not None
+            else (0, len(source.encode("utf-8")))
+        )
         data = bytearray(source.encode("utf-8")[scope_start:scope_end])
         for nested in funcs:
             if nested is best:
                 continue
-            nested_start, nested_end = bounds(nested)
+            nested_start, nested_end = _python_node_bounds(nested, line_offsets)
             if scope_start <= nested_start and nested_end <= scope_end:
                 data[nested_start - scope_start:nested_end - scope_start] = b" " * (nested_end - nested_start)
         return bytes(data).decode("utf-8", "replace")
