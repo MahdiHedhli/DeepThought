@@ -112,6 +112,7 @@ class's rate may drop). Measured to date:
 | 4 | Path traversal (22) | `DT-PATH-TRAVERSAL` | JS + Python | decompress → adm-zip, aiohttp, NLTK | **2/3** |
 | 5 | Unsafe deserialization (502) | `DT-DESERIAL` | JS + Python + Java | serialize-to-js → Superset, suricata-update, Struts | **3/3** |
 | 7 | OS command injection (78) | `DT-CMDI-EXEC` | JS + Python | node-glob → cyclonedx, dulwich, ansys, aws-cdk | **3/4** |
+| 11 | SQL injection (89) | `DT-SQLI-QUERY` | Python + PHP + Velocity | Arches → OpenCart, Cacti, XWiki | **2/3** |
 
 Every number is honest: unresolvable CVEs are **dropped-with-reason** (never counted as
 missed), **mis-classed corpus seeds are caught and swapped** by the verify-at-build
@@ -120,15 +121,17 @@ was a prototype-pollution-flavored mechanism), held-out sets are **re-curated to
 user-code-misuse** where the raw corpus was dominated by library-internal CVEs a user-code
 rule can't discriminate, and misses are documented as improvement-loop fixtures rather than
 hidden. The curve moves both ways honestly — 66.7% → 70.9% → 58.3% (XXE dip) → 62.5%
-(command injection) → 63.3% (path traversal) → **69.5%** (deserialization) — under
-a regression bar (`benchmarks/data/generalization-log.json`).
+(command injection) → 63.3% (path traversal) → 69.5% (deserialization) → **69.1%**
+(SQL injection) under a regression bar
+(`benchmarks/data/generalization-log.json`).
 See [`benchmarks/deep-thought-benchmark.md`](benchmarks/deep-thought-benchmark.md) and the
-[corpus](benchmarks/rediscovery-corpus.md). Six of the original ten classes are measured;
-ReDoS and the sandbox-tier memory-safety classes remain unbuilt.
+[corpus](benchmarks/rediscovery-corpus.md). Six of the original ten classes plus one Round 3
+broad-surface class are measured; ReDoS and the sandbox-tier memory-safety classes remain
+unbuilt.
 
 ```bash
 # reproduce a class's held-out generalization on the real pinned trees (network)
-DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_deserialization.py
+DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_sqli.py
 ```
 
 ## Agent memory — portable, self-contained, multi-agent

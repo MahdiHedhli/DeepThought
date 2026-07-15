@@ -134,19 +134,20 @@ own text must contain the sink probe in the vulnerable tree and not in the patch
 | OS command injection (78) | `DT-CMDI-EXEC` (JS+Python) | node-glob CVE-2025-64756 | **3/4** | one command-hook sink persists after patch |
 | Path traversal (22) | `DT-PATH-TRAVERSAL` (JS+Python) | decompress CVE-2020-12265 | **2/3** | aiohttp needs branch-sensitive containment reasoning |
 | Unsafe deserialization (502) | `DT-DESERIAL` (JS+Python+Java) | serialize-to-js CVE-2017-5954 | **3/3** | receiver-bound Java hardening and import-provenanced dynamic sinks |
+| SQL injection (89) | `DT-SQLI-QUERY` (Python+PHP+Velocity) | Arches CVE-2022-41892 | **2/3** | XWiki fix reorders a framework check while the dynamic ORDER BY signal persists; 48 patched-file flags reported |
 
 The generalization log (`benchmarks/data/generalization-log.json`) versions the score
 under a **regression bar** — no merged change may lower any class's rate. Discipline held:
 CVEs with no authoritative NVD record are **dropped-with-reason**, seeds whose authoritative
 CWE doesn't match the class are **swapped-with-reason**, and misses are documented as
 improvement-loop fixtures — the numbers are the honest measurement, never gamed. The
-six-class mean is **69.5%** after deserialization's 3/3 held-out result. The
+seven-class mean is **69.1%** after SQL injection's honest 2/3 held-out result. The
 sandbox tier (heap-overflow / UAF) executes target code and runs only behind the Article
 III sign-off (`benchmarks/corpus/SIGNOFF-sandbox-tier.md`).
 
 ```bash
 # reproduce a class on the real pinned trees (network); default runs skip these
-DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_deserialization.py
+DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_sqli.py
 ```
 
 ## Run it

@@ -89,3 +89,20 @@ A class is done when its detector discriminates vulnerable from patched on the
 seed fixture, rediscovers the seed through the real pipeline, and clears a held-out
 generalization bar on CVEs it never saw. Fixture pass alone is not acceptance. A
 detector that only matches its seed is overfit and does not ship.
+
+## Round 3 broad-surface extension: SQL injection
+
+The Round 3 SQL-injection class extends the corpus beyond the original ten seeds into
+Python DB-API, PHP database wrappers, and Velocity/HQL templates. The manifest at
+`benchmarks/corpus/sql_injection/manifest.json` is the executable source of truth:
+
+| Role | CVE / package | Vulnerable SHA | Patched SHA | Result |
+| --- | --- | --- | --- | --- |
+| seed | CVE-2022-41892 / Arches | `75ce8f7cb9c08caf608569797a40ca9be585b182` | `7ed53e23a616edf3301d95814d9d64de5e3072a9` | pipeline rediscovered |
+| held-out | CVE-2024-21514 / OpenCart | `ff0e1e21182aff8ab1ddab2420b904bbcadefc3f` | `46bd5f5a8056ff9aad0aa7d71729c4cf593d67e2` | rediscovered; patched target removed and verified fail-closed |
+| held-out | CVE-2024-31445 / Cacti | `f946fa537d19678f938ddbd784a10e3290d275cf` | `fd93c6e47651958b77c3bbe6a01fff695f81e886` | rediscovered |
+| held-out | CVE-2025-32429 / XWiki Platform | `cf6c843dee0aa8a02d38d5a3bfc710132877603d` | `f502b5d5fd36284a50890ad26d168b7d8dc80bd3` | honest miss; sink line persists |
+
+The held-out score is **2/3** with 48 patched-file flags. A deleted target is never
+inferred from a generic fetch failure: `patched_absent_paths` requires an exact manifest
+declaration, independent commit verification, and an exact raw-path 404.

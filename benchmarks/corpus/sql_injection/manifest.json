@@ -1,0 +1,77 @@
+{
+  "bug_class": "sql_injection",
+  "cwe": "CWE-89",
+  "detector": "DT-SQLI-QUERY",
+  "tier": "deterministic",
+  "language": "python+php+velocity",
+  "reproducibility": "real repo + pinned vulnerable/patched SHAs; line-precise; pin-or-drop; explicitly verified deleted patched targets",
+  "seed": {
+    "cve": "CVE-2022-41892",
+    "package": "Arches",
+    "language": "python",
+    "repo": "https://github.com/archesproject/arches",
+    "vuln_ref": "75ce8f7cb9c08caf608569797a40ca9be585b182",
+    "patched_ref": "7ed53e23a616edf3301d95814d9d64de5e3072a9",
+    "target_paths": [
+      "arches/app/views/concept.py"
+    ],
+    "sink_probe": "cursor.execute(sql)",
+    "sink": "paged_dropdown takes query from request.GET, interpolates it into a SQL template with str.format, then calls cursor.execute(sql) without bound parameters",
+    "patched_shape": "the query uses DB-API named placeholders and passes language/query values in a separate mapping argument to cursor.execute",
+    "cwe": "CWE-89",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2024-21514",
+      "package": "OpenCart",
+      "language": "php",
+      "repo": "https://github.com/opencart/opencart",
+      "vuln_ref": "ff0e1e21182aff8ab1ddab2420b904bbcadefc3f",
+      "patched_ref": "46bd5f5a8056ff9aad0aa7d71729c4cf593d67e2",
+      "target_paths": [
+        "upload/catalog/model/extension/payment/divido.php"
+      ],
+      "patched_absent_paths": [
+        "upload/catalog/model/extension/payment/divido.php"
+      ],
+      "sink_probe": "return $this->db->query(\"SELECT * FROM `\" . DB_PREFIX . \"divido_lookup` WHERE `order_id` = \" . $order_id);",
+      "sink": "getLookupByOrderId concatenates its order_id parameter directly into a SELECT passed to the OpenCart database query method",
+      "patched_shape": "the patched commit removes the Divido payment extension, including this exact target file; corpus_measure verifies the commit exists and the raw path returns 404",
+      "cwe": "CWE-89",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2024-31445",
+      "package": "Cacti",
+      "language": "php",
+      "repo": "https://github.com/Cacti/cacti",
+      "vuln_ref": "f946fa537d19678f938ddbd784a10e3290d275cf",
+      "patched_ref": "fd93c6e47651958b77c3bbe6a01fff695f81e886",
+      "target_paths": [
+        "lib/api_automation.php"
+      ],
+      "sink_probe": "$sql_having .= ($i == 0 ? '':' OR ') . '`' . implode('`.`', explode('.', $column['field_name'])) . '`' . ' LIKE \"%' . $filter . '%\"';",
+      "sink": "build_graph_object_sql_having appends its filter parameter directly into a returned HAVING fragment",
+      "patched_shape": "the filter value is wrapped by db_qstr('%' . $filter . '%') at the fragment-construction line",
+      "cwe": "CWE-89",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2025-32429",
+      "package": "XWiki Platform",
+      "language": "velocity",
+      "repo": "https://github.com/xwiki/xwiki-platform",
+      "vuln_ref": "cf6c843dee0aa8a02d38d5a3bfc710132877603d",
+      "patched_ref": "f502b5d5fd36284a50890ad26d168b7d8dc80bd3",
+      "target_paths": [
+        "xwiki-platform-core/xwiki-platform-web/xwiki-platform-web-templates/src/main/resources/templates/getdeleteddocuments.vm"
+      ],
+      "sink_probe": "#set ($orderQueryPart = \"order by ${order} ${orderDirection}\")",
+      "sink": "the request sort value is interpolated into an HQL ORDER BY fragment used by services.query.hql",
+      "patched_shape": "the fragment persists unchanged; the custom checkOrderBySafe call is reordered after the doc.location rewrite, a framework-specific control-flow fix expected to remain an honest static miss",
+      "cwe": "CWE-89",
+      "status": "pinned"
+    }
+  ]
+}
