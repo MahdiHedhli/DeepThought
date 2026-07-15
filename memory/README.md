@@ -26,11 +26,17 @@ memory/
 
 ```bash
 python memory/mem.py init                    # create memory/vault/ from the template
+python memory/mem.py backup                  # snapshot before writing (do this each session)
 python memory/mem.py recall "the topic"      # recall relevant notes (at session start)
 python memory/mem.py add --type project \
     --name a-decision --description "one line" --body "the fact, with [[links]]"
 python memory/mem.py list                    # every note + its description
+python memory/mem.py restore                 # revert to the newest backup (corruption recovery)
 ```
+
+**Durability:** every write is atomic (temp-file + `os.replace`), the vault auto-snapshots
+before mutation, and `backup`/`restore` give rotating, gitignored history — so a failed write
+or corruption never loses your memory.
 
 See [`AGENTS.md`](AGENTS.md) for the full protocol (what to record, format, the
 don't-duplicate rule, and optional git/Obsidian versioning).

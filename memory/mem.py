@@ -15,24 +15,40 @@ Usage:
   python memory/mem.py index                        # rebuild MEMORY.md from the notes
   python memory/mem.py recall [query]               # print notes matching a query (or the index)
   python memory/mem.py list                         # list every note + its description
+  python memory/mem.py backup                       # snapshot the vault (rotating, gitignored)
+  python memory/mem.py restore [timestamp]          # revert to the newest (or a named) backup
 
 Notes are plain markdown with YAML-ish frontmatter (name, description, type). One fact per
-file. See memory/AGENTS.md for the read/write protocol every agent follows.
+file. Writes are atomic and the vault is auto-snapshotted before mutation, so a failed write
+cannot corrupt memory. See memory/AGENTS.md for the read/write protocol every agent follows.
 """
 from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent          # memory/
 VAULT = ROOT / "vault"                           # gitignored data
 TEMPLATE = ROOT / "template"
+BACKUPS = ROOT / "backups"                        # gitignored rotating snapshots
 INDEX = "MEMORY.md"
 TYPES = ("user", "feedback", "project", "reference")
+KEEP_BACKUPS = 20                                 # default rotation depth
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file + os.replace so a crash/failed write can never leave a
+    half-written (corrupt) note — the old file survives intact until the swap is atomic."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _fm(text: str) -> dict:
@@ -52,14 +68,47 @@ def _notes() -> list[Path]:
     return sorted(p for p in VAULT.glob("*.md") if p.name != INDEX)
 
 
+def _make_backup(keep: int = KEEP_BACKUPS) -> Path | None:
+    """Snapshot the whole vault to a timestamped, rotating backup dir. Copy-then-swap and a
+    rotation of the newest `keep` snapshots means a corrupted or truncated vault can always be
+    restored from the last good copy. Backups live in memory/backups/ (gitignored)."""
+    if not VAULT.exists() or not _notes():
+        return None
+    BACKUPS.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    dest = BACKUPS / stamp
+    n = 0
+    while dest.exists():
+        n += 1
+        dest = BACKUPS / f"{stamp}-{n}"
+    tmp = BACKUPS / (dest.name + ".partial")
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(VAULT, tmp, ignore=shutil.ignore_patterns(".*", "*.tmp-*"))
+    os.replace(tmp, dest)  # atomic promote — a half-copied snapshot never looks complete
+    snaps = sorted(d for d in BACKUPS.iterdir() if d.is_dir())
+    for old in snaps[:-keep] if keep > 0 else []:
+        shutil.rmtree(old, ignore_errors=True)
+    return dest
+
+
+def _autobackup_if_stale(max_age_s: int = 300) -> None:
+    """Snapshot before a write if the newest backup is missing or older than max_age_s — so
+    'back up before each run' holds even when the caller forgets to run `backup` explicitly."""
+    newest = 0.0
+    if BACKUPS.exists():
+        ages = [d.stat().st_mtime for d in BACKUPS.iterdir() if d.is_dir()]
+        newest = max(ages) if ages else 0.0
+    if time.time() - newest > max_age_s:
+        _make_backup()
+
+
 def cmd_init() -> int:
     if VAULT.exists():
         print(f"vault already exists: {VAULT}")
         return 0
     VAULT.mkdir(parents=True, exist_ok=True)
     tpl_index = TEMPLATE / INDEX
-    (VAULT / INDEX).write_text(tpl_index.read_text() if tpl_index.exists() else "# Memory index\n",
-                               encoding="utf-8")
+    _atomic_write(VAULT / INDEX, tpl_index.read_text() if tpl_index.exists() else "# Memory index\n")
     print(f"initialized vault: {VAULT}")
     return 0
 
@@ -80,7 +129,8 @@ def cmd_add(args) -> int:
     )
     path = VAULT / f"{slug}.md"
     existed = path.exists()
-    path.write_text(note, encoding="utf-8")
+    _autobackup_if_stale()   # a fresh snapshot exists before we mutate the vault
+    _atomic_write(path, note)
     cmd_index(quiet=True)
     print(f"{'updated' if existed else 'wrote'} {path.relative_to(ROOT.parent)} + reindexed")
     return 0
@@ -108,7 +158,7 @@ def cmd_index(quiet: bool = False) -> int:
     for t in TYPES:
         if by_type.get(t):
             lines += [f"## {titles[t]}", *sorted(by_type[t]), ""]
-    (VAULT / INDEX).write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    _atomic_write(VAULT / INDEX, "\n".join(lines).rstrip() + "\n")
     if not quiet:
         print(f"indexed {sum(len(v) for v in by_type.values())} notes -> {VAULT / INDEX}")
     return 0
@@ -143,6 +193,37 @@ def cmd_list(_args) -> int:
     return 0
 
 
+def cmd_backup(args) -> int:
+    dest = _make_backup(args.keep or KEEP_BACKUPS)
+    if dest is None:
+        print("nothing to back up (no vault/notes)")
+        return 0
+    print(f"backed up {len(_notes())} notes -> {dest.relative_to(ROOT.parent)}")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    snaps = sorted(d for d in BACKUPS.iterdir() if d.is_dir()) if BACKUPS.exists() else []
+    if not snaps:
+        print("no backups to restore from", file=sys.stderr)
+        return 1
+    src = (BACKUPS / args.which) if args.which else snaps[-1]
+    if not src.is_dir():
+        print(f"no such backup: {src.name} (have: {[d.name for d in snaps[-5:]]})", file=sys.stderr)
+        return 1
+    _make_backup()  # snapshot the current (possibly corrupt) state before overwriting it
+    tmp = VAULT.with_name("vault.restoring")
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(src, tmp)
+    if VAULT.exists():
+        shutil.rmtree(VAULT.with_name("vault.old"), ignore_errors=True)
+        os.replace(VAULT, VAULT.with_name("vault.old"))
+    os.replace(tmp, VAULT)
+    shutil.rmtree(VAULT.with_name("vault.old"), ignore_errors=True)
+    print(f"restored vault from backup {src.name}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="DeepThought portable agent memory")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -158,10 +239,15 @@ def main() -> int:
     r = sub.add_parser("recall")
     r.add_argument("query", nargs="?", default="")
     sub.add_parser("list")
+    b = sub.add_parser("backup")
+    b.add_argument("--keep", type=int, default=0, help=f"snapshots to retain (default {KEEP_BACKUPS})")
+    rs = sub.add_parser("restore")
+    rs.add_argument("which", nargs="?", default="", help="backup dir name; default = newest")
     args = ap.parse_args()
     return {"init": lambda: cmd_init(), "add": lambda: cmd_add(args),
             "index": lambda: cmd_index(), "recall": lambda: cmd_recall(args),
-            "list": lambda: cmd_list(args)}[args.cmd]()
+            "list": lambda: cmd_list(args), "backup": lambda: cmd_backup(args),
+            "restore": lambda: cmd_restore(args)}[args.cmd]()
 
 
 if __name__ == "__main__":
