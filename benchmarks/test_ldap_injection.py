@@ -467,6 +467,76 @@ def test_php_review_regressions_provenance_mixed_values_flags_and_branches():
     assert scan_source(misleading_receiver, "a.php") == []
 
 
+@pytest.mark.parametrize(
+    "source,uri,expected",
+    [
+        (
+            "import javax.naming.directory.*; class A { String fixed(){return \"x\";} "
+            "void f(DirContext dc,String b,String username,SearchControls c)throws Exception { "
+            'username=fixed(); dc.search(b,"(uid="+username+")",c); } }',
+            "A.java",
+            0,
+        ),
+        (
+            "import javax.naming.directory.*; class A { void f(DirContext dc,String b,"
+            "String user_filter,SearchControls c)throws Exception { "
+            'dc.search(b,"(uid="+user_filter+")",c); } }',
+            "A.java",
+            1,
+        ),
+        (
+            "import javax.naming.directory.*; class A { void f(DirContext dc,String b,"
+            "String username,SearchControls c,EvilLdapFilter ldapFilter)throws Exception { "
+            'dc.search(b,"(uid="+ldapFilter.escapeFilterChars(username)+")",c); } }',
+            "A.java",
+            1,
+        ),
+        (
+            "import javax.naming.directory.*; import org.springframework.ldap.support.LdapEncoder; "
+            "class A { void f(DirContext dc,String b,String username,SearchControls c)"
+            'throws Exception { dc.search(b,"(uid="+LdapEncoder.filterEncode(username)+")",c); } }',
+            "A.java",
+            0,
+        ),
+        (
+            "import ldap3\ndef fixed(): return 'x'\n"
+            "def f(conn,base,username):\n    username=fixed()\n"
+            "    return conn.search(base,f'(uid={username})')",
+            "a.py",
+            0,
+        ),
+        (
+            "import ldap3\ndef f(conn,base,user_filter):\n"
+            "    return conn.search(base,f'(uid={user_filter})')",
+            "a.py",
+            1,
+        ),
+        (
+            "from ldap3.utils.conv import escape_filter_chars\n"
+            "def unrelated(escape_filter_chars): return escape_filter_chars\n"
+            "def f(conn,base,username):\n"
+            "    return conn.search(base,f'(uid={escape_filter_chars(username)})')",
+            "a.py",
+            0,
+        ),
+        (
+            "<?php function fixed(){return 'x';} function f($ldap,$username){ "
+            "$username=fixed(); $ldap->search('(uid='.$username.')'); } ?>",
+            "a.php",
+            0,
+        ),
+        (
+            "<?php function f($ldap,$user_filter){ "
+            "$ldap->search('(uid='.$user_filter.')'); } ?>",
+            "a.php",
+            1,
+        ),
+    ],
+)
+def test_live_review_regressions(source, uri, expected):
+    assert len(scan_source(source, uri)) == expected
+
+
 def test_sarif_carries_cwe_and_cve_only_as_analyzer_metadata():
     sarif = scan_file(FIXTURE_JAVA, uri=FIXTURE_JAVA.name, cve=SEED_CVE)
     assert sarif["version"] == "2.1.0"

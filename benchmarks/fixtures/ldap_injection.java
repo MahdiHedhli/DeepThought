@@ -4,14 +4,16 @@ import javax.naming.directory.SearchControls;
 import javax.naming.directory.SearchResult;
 
 final class LdapInjectionFixture {
-    SearchResult vulnerable(DirContext ctx, String userBase, String userFilter, String username)
+    private final String userFilter = "(uid={0})";
+
+    SearchResult vulnerable(DirContext ctx, String userBase, String username)
             throws NamingException {
         var controls = new SearchControls();
         var filter = userFilter.replace("{0}", username);
         return getSingleResult(ctx, userBase, filter, controls);
     }
 
-    SearchResult patched(DirContext ctx, String userBase, String userFilter, String username)
+    SearchResult patched(DirContext ctx, String userBase, String username)
             throws NamingException {
         var controls = new SearchControls();
         var filter = userFilter.replace("{0}", escapeLdapFilter(username));

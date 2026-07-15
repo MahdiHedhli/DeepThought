@@ -84,7 +84,6 @@ def _is_structural_parameter(name: str) -> bool:
         "searchstring",
         "template",
         "userbase",
-        "userfilter",
     }
 
 
@@ -221,7 +220,10 @@ def _java_local_filter_sanitizers(source: bytes, root: Node) -> set[str]:
 
 
 def _java_call_is_filter_sanitizer(
-    source: bytes, call: Node, local_sanitizers: set[str]
+    source: bytes,
+    call: Node,
+    local_sanitizers: set[str],
+    spring_encoder_imported: bool,
 ) -> bool:
     if call.type != "method_invocation":
         return False
@@ -233,10 +235,6 @@ def _java_call_is_filter_sanitizer(
     # escapes. Name-only helpers are attacker-controlled code, not sanitizers.
     if raw_name in local_sanitizers and owner in ("", "this"):
         return True
-    source_text = source.decode("utf-8", "replace").lower()
-    spring_encoder_imported = (
-        "import org.springframework.ldap.support.ldapencoder;" in source_text
-    )
     if (
         name == "filterencode"
         and (
@@ -245,37 +243,44 @@ def _java_call_is_filter_sanitizer(
         )
     ):
         return True
-    if any(token in owner for token in ("ldapfilter", "filterencoder")) and name in {
-        "escapefilterchars",
-        "escapeldapfilter",
-        "encodefiltervalue",
-        "filterencode",
-    }:
-        return True
     return False
 
 
 def _java_filter_sanitized(
-    source: bytes, node: Node, local_sanitizers: set[str]
+    source: bytes,
+    node: Node,
+    local_sanitizers: set[str],
+    spring_encoder_imported: bool,
 ) -> bool:
     """Recognize proven RFC 4515 *filter* escaping, not DN escaping."""
     for call in _iter_nodes(node):
-        if _java_call_is_filter_sanitizer(source, call, local_sanitizers):
+        if _java_call_is_filter_sanitizer(
+            source, call, local_sanitizers, spring_encoder_imported
+        ):
             return True
     return False
 
 
 def _java_unsanitized_identifiers(
-    source: bytes, node: Node, local_sanitizers: set[str]
+    source: bytes,
+    node: Node,
+    local_sanitizers: set[str],
+    spring_encoder_imported: bool,
 ) -> set[str]:
     """Identifiers reaching an expression outside a proven sanitizer subtree."""
-    if _java_call_is_filter_sanitizer(source, node, local_sanitizers):
+    if _java_call_is_filter_sanitizer(
+        source, node, local_sanitizers, spring_encoder_imported
+    ):
         return set()
     if node.type == "identifier":
         return {_text(source, node)}
     out: set[str] = set()
     for child in node.named_children:
-        out.update(_java_unsanitized_identifiers(source, child, local_sanitizers))
+        out.update(
+            _java_unsanitized_identifiers(
+                source, child, local_sanitizers, spring_encoder_imported
+            )
+        )
     return out
 
 
@@ -465,6 +470,9 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
     if not ldap_context:
         return []
     local_sanitizers = _java_local_filter_sanitizers(src, root)
+    spring_encoder_imported = (
+        b"import org.springframework.ldap.support.ldapencoder;" in src.lower()
+    )
     wrappers_by_owner = _java_wrapper_summaries(src, root, ldap_context)
     results: list[dict] = []
     seen: set[tuple[int, int]] = set()
@@ -506,16 +514,20 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
                 if value is None or name_node is None or name_node.type != "identifier":
                     continue
                 name = _text(src, name_node)
-                unsanitized = _java_unsanitized_identifiers(src, value, local_sanitizers)
+                unsanitized = _java_unsanitized_identifiers(
+                    src, value, local_sanitizers, spring_encoder_imported
+                )
                 value_tainted = bool((unsanitized - safe) & tainted)
-                sanitized = _java_filter_sanitized(src, value, local_sanitizers) and not value_tainted
+                sanitized = _java_filter_sanitized(
+                    src, value, local_sanitizers, spring_encoder_imported
+                ) and not value_tainted
                 if sanitized:
                     safe.add(name)
                     tainted.discard(name)
                 elif value_tainted:
                     tainted.add(name)
                     safe.discard(name)
-                elif value.type in ("string_literal", "decimal_integer_literal", "true", "false", "null_literal"):
+                else:
                     tainted.discard(name)
                     safe.discard(name)
 
@@ -537,9 +549,13 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
             arg = _java_sink_filter_arg(src, call, ldap_context, ldap_receivers, wrappers)
             if arg is None:
                 continue
-            unsanitized = _java_unsanitized_identifiers(src, arg, local_sanitizers)
+            unsanitized = _java_unsanitized_identifiers(
+                src, arg, local_sanitizers, spring_encoder_imported
+            )
             value_tainted = bool((unsanitized - safe) & tainted)
-            if _java_filter_sanitized(src, arg, local_sanitizers) and not value_tainted:
+            if _java_filter_sanitized(
+                src, arg, local_sanitizers, spring_encoder_imported
+            ) and not value_tainted:
                 continue
             ids = _java_identifiers(src, arg)
             candidates = [
@@ -625,14 +641,36 @@ def _py_params(scope: ast.AST) -> set[str]:
     return out
 
 
-def _py_sanitizer_context(tree: ast.AST) -> tuple[dict[str, str], set[str]]:
-    """Resolve only known python-ldap/ldap3 filter encoders and their aliases."""
-    module_aliases: dict[str, str] = {}
-    imported_functions: set[str] = set()
+def _py_scope_bindings(scope: ast.AST) -> set[str]:
+    """Names rebound in one lexical scope, excluding nested-scope bodies."""
+    rebound = set(_py_params(scope))
+
+    def visit(parent: ast.AST) -> None:
+        for child in ast.iter_child_nodes(parent):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                rebound.add(child.name)
+                continue
+            if isinstance(child, ast.Lambda):
+                continue
+            if isinstance(child, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                rebound.update(_py_targets(child))
+            visit(child)
+
+    visit(scope)
+    return rebound
+
+
+def _py_sanitizer_context(
+    scope: ast.AST,
+    inherited: tuple[dict[str, str], set[str]] | None = None,
+) -> tuple[dict[str, str], set[str]]:
+    """Resolve known filter encoders and shadowing in one lexical scope."""
+    module_aliases = dict(inherited[0]) if inherited else {}
+    imported_functions = set(inherited[1]) if inherited else set()
     safe_modules = ("ldap.filter", "ldap3.utils.conv")
     safe_names = {"escape_filter_chars"}
 
-    for node in ast.walk(tree):
+    for node in _py_iter_scope(scope):
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "ldap" or alias.name == "ldap3" or alias.name.startswith(safe_modules):
@@ -648,18 +686,28 @@ def _py_sanitizer_context(tree: ast.AST) -> tuple[dict[str, str], set[str]]:
                     full = f"{node.module}.{alias.name}"
                     if full in safe_modules:
                         module_aliases[alias.asname or alias.name] = full
-    rebound: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            rebound.add(node.name)
-        elif isinstance(node, ast.arg):
-            rebound.add(node.arg)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
-            rebound.update(_py_targets(node))
-    for name in rebound:
+    for name in _py_scope_bindings(scope):
         module_aliases.pop(name, None)
         imported_functions.discard(name)
     return module_aliases, imported_functions
+
+
+def _py_context_for_scope(
+    scope: ast.AST,
+    base_context: tuple[dict[str, str], set[str]],
+    parents: dict[ast.AST, ast.AST],
+) -> tuple[dict[str, str], set[str]]:
+    functions: list[ast.AST] = []
+    current: ast.AST | None = scope
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.append(current)
+        current = parents.get(current)
+
+    context = base_context
+    for function in reversed(functions):
+        context = _py_sanitizer_context(function, context)
+    return context
 
 
 def _py_is_filter_sanitizer_call(
@@ -863,7 +911,7 @@ def _py_targets_from_target(target: ast.AST) -> list[str]:
 def _py_helper_summaries(
     tree: ast.AST,
     source: str,
-    sanitizer_context: tuple[dict[str, str], set[str]],
+    base_sanitizer_context: tuple[dict[str, str], set[str]],
 ) -> tuple[set[str], set[str]]:
     analyses: dict[str, list[tuple[bool, bool]]] = {}
     parents = {
@@ -872,6 +920,9 @@ def _py_helper_summaries(
         for child in ast.iter_child_nodes(parent)
     }
     for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        sanitizer_context = _py_context_for_scope(
+            fn, base_sanitizer_context, parents
+        )
         tainted = {name for name in _py_params(fn) if not _is_structural_parameter(name)}
         sanitized_names: set[str] = set()
         filter_names: set[str] = set()
@@ -916,12 +967,12 @@ def _py_helper_summaries(
                         # proof and are therefore not trusted by this summary.
                         tainted.discard(name)
                         sanitized_names.add(name)
-                    elif isinstance(bound_value, ast.Constant):
+                    else:
                         tainted.discard(name)
                         sanitized_names.discard(name)
                     if _py_looks_filter(bound_value, source):
                         filter_names.add(name)
-                    elif isinstance(bound_value, ast.Constant):
+                    else:
                         filter_names.discard(name)
                 continue
             if not isinstance(node, ast.Return) or node.value is None:
@@ -990,9 +1041,9 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
     ldap_context = _py_ldap_context(tree, source)
     if not ldap_context:
         return []
-    sanitizer_context = _py_sanitizer_context(tree)
+    base_sanitizer_context = _py_sanitizer_context(tree)
     safe_helpers, filter_helpers = _py_helper_summaries(
-        tree, source, sanitizer_context
+        tree, source, base_sanitizer_context
     )
     parents = {
         child: parent
@@ -1006,6 +1057,9 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
 
     for scope in scopes:
         nodes = list(_py_iter_scope(scope))
+        sanitizer_context = _py_context_for_scope(
+            scope, base_sanitizer_context, parents
+        )
         ldap_receivers = _py_ldap_receivers(scope, source)
         tainted = {
             name for name in _py_params(scope) if not _is_structural_parameter(name)
@@ -1050,7 +1104,7 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
                     elif value_tainted:
                         tainted.add(name)
                         safe_names.discard(name)
-                    elif isinstance(bound_value, ast.Constant):
+                    else:
                         tainted.discard(name)
                         safe_names.discard(name)
 
@@ -1398,7 +1452,7 @@ def scan_php(source: str, uri: str, cve: str | None = None) -> list[dict]:
                 elif value_tainted:
                     tainted.add(name)
                     safe_names.discard(name)
-                elif right.type in ("string", "integer", "float", "boolean", "null"):
+                else:
                     tainted.discard(name)
                     safe_names.discard(name)
 
