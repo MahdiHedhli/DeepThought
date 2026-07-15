@@ -1,6 +1,6 @@
 # Deep Thought
 
-**The governed spine of an autonomous security-research platform.**
+**An autonomous vulnerability research harness for discovering deeply improbable security problems.**
 
 Deep Thought runs typed agent sessions that discover, map, verify, and prepare
 disclosure for vulnerabilities, keeping every result in a durable,
