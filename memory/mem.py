@@ -38,7 +38,9 @@ VAULT = ROOT / "vault"                           # gitignored data
 TEMPLATE = ROOT / "template"
 BACKUPS = ROOT / "backups"                        # gitignored rotating snapshots
 INDEX = "MEMORY.md"
-TYPES = ("user", "feedback", "project", "reference")
+# lesson = knowledge distilled from doing the work (kept separate from feedback, which is
+# operator preferences/directives about HOW to work).
+TYPES = ("user", "feedback", "lesson", "project", "reference")
 KEEP_BACKUPS = 20                                 # default rotation depth
 
 
@@ -153,7 +155,8 @@ def cmd_index(quiet: bool = False) -> int:
     lines = ["# Memory index", "",
              "_DeepThought portable agent memory. One fact per note; this index is generated "
              "by `python memory/mem.py index`. See [AGENTS.md](../AGENTS.md) for the protocol._", ""]
-    titles = {"user": "Who the user is", "feedback": "How to work (feedback)",
+    titles = {"user": "Who the user is", "feedback": "How to work (operator preferences)",
+              "lesson": "Distilled lessons (learned from the work)",
               "project": "Project state & decisions", "reference": "References"}
     for t in TYPES:
         if by_type.get(t):
