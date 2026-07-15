@@ -82,6 +82,7 @@ counting only entries pinned to real ground truth.
 - **SSRF:** LangChain CVE-2023-46229, Apache HTTP Server CVE-2024-40898.
 - **XXE:** pin three or more public CVEs of the class at build time (e.g. Java/XML-parser XXE advisories), each with vuln/patched SHAs in the manifest — not chosen ad hoc at run time.
 - **Deserialization:** serialize-to-js CVE-2017-5954 is the verified seed; held-out Superset CVE-2018-8021, suricata-update CVE-2018-1000167, and Struts CVE-2017-9805 are pinned in the manifest. The React RSC seed was swapped because its property-traversal mechanism did not match this unsafe-deserialization sink class.
+- **LDAP injection:** Yamcs CVE-2026-42568 is the verified seed; held-out mitmproxy CVE-2026-40606, Apache Airflow CVE-2026-46745, and Joomla CVE-2017-14596 are pinned in the manifest.
 
 ## Acceptance
 
@@ -106,3 +107,20 @@ Python DB-API, PHP database wrappers, and Velocity/HQL templates. The manifest a
 The held-out score is **2/3** with 48 patched-file flags. A deleted target is never
 inferred from a generic fetch failure: `patched_absent_paths` requires an exact manifest
 declaration, independent commit verification, and an exact raw-path 404.
+
+## Round 3 broad-surface extension: LDAP injection
+
+The Round 3 LDAP-injection class extends the corpus into directory-service filter
+construction across Java, Python, and PHP. The manifest at
+`benchmarks/corpus/ldap_injection/manifest.json` is the executable source of truth:
+
+| Role | CVE / package | Vulnerable SHA | Patched SHA | Result |
+| --- | --- | --- | --- | --- |
+| seed | CVE-2026-42568 / Yamcs | `e90099fba98e96214217c195b6a5b87b5f46e51c` | `c79cd966be6c28b8ce2916775426de6ec0cc4d03` | pipeline rediscovered |
+| held-out | CVE-2026-40606 / mitmproxy | `cc58fc9f38e5865c4fa1eb07d7cc598eca1ebd4d` | `71c9234057922bc29b9734ec408d712113d294d2` | rediscovered |
+| held-out | CVE-2026-46745 / Apache Airflow | `d3ea3ef0bccb23786e5b69a5534806ed6ed67c5e` | `3f7756bea71a7c7988511ec0557314ffb15fbe5e` | rediscovered |
+| held-out | CVE-2017-14596 / Joomla | `220802a6f6d2ab431ab938057220a5f51f3184dd` | `590fd61dfacabe0f776880864667631ff8ec9014` | rediscovered |
+
+The held-out score is **3/3** with **0 patched-file flags**. The rule distinguishes
+RFC 4515 search-filter escaping from DN escaping and keeps sanitizer state bound to the
+exact value and source position that reaches the directory search.

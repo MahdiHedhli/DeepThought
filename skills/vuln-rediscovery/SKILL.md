@@ -44,7 +44,7 @@ constitution, the gates, the sandbox, or the disclosure boundary.
 
 - **Deterministic.** Static and taint detection emitting SARIF. Runs in CI, no
   target code executes. Prototype pollution, SSRF, XXE, path traversal,
-  deserialization, ReDoS, command injection, SQL injection.
+  deserialization, ReDoS, command injection, SQL injection, LDAP injection.
 - **Sandbox.** Fuzzing plus a sanitizer, executed only in the signed-off sandbox.
   Heap overflow, use-after-free, and any class whose proof is a crash.
 
@@ -276,3 +276,25 @@ Each build round appends one section here using this template:
   first real-tree pass found only 1/3 because a later constant PHP append stole attribution
   from the tainted construction; binding reports to the unsafe construction site fixed that
   generic defect and moved the honest result to 2/3.
+
+### LDAP injection (CWE-90)
+
+- **When to use:** hunting Java, Python, or PHP application code that incorporates
+  untrusted values into LDAP search filters.
+- **Detection:** static AST (`benchmarks/ldapinj_detector.py`). Java follows filter values
+  through direct `DirContext.search` calls and local wrapper methods. Python binds helper
+  summaries to the exact sanitized value and recognizes provenanced `ldap`/`ldap3` searches.
+  PHP covers `ldap_search` and LDAP wrapper sinks such as `simple_search`. All three analyzers
+  update taint and escaping state in source order, so a later sanitizer cannot retroactively
+  protect an earlier sink.
+- **Guards:** safe filter values require RFC 4515 filter escaping. DN escaping is deliberately
+  not equivalent: it encodes a different LDAP grammar and cannot guard a search filter.
+- **Rule id:** `DT-LDAP-FILTER`, emitting SARIF 2.1.0 into the shipped DISCOVER ingest.
+  Verification is deterministic vulnerable/patched discrimination plus NEW PROJECT → MAP →
+  DISCOVER → `check`; no target code executes.
+- **Cohort:** seed Yamcs **CVE-2026-42568**; held-out mitmproxy **CVE-2026-40606**,
+  Apache Airflow **CVE-2026-46745**, and Joomla **CVE-2017-14596**, all pinned to real
+  vulnerable/patched trees.
+- **Held-out generalization:** **3/3 (100%)**, with **0 patched-file flags**. Each fix visibly
+  adds filter-context escaping to the value that reaches the sink; this result does not claim
+  that DN escaping or unrelated sanitized values protect filter construction.
