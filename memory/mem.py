@@ -70,6 +70,13 @@ def _notes() -> list[Path]:
     return sorted(p for p in VAULT.glob("*.md") if p.name != INDEX)
 
 
+def _note_meta(fm: dict) -> tuple[str, list[str]]:
+    """(class, tags) from a note's frontmatter — for scoped recall by attack class / surface."""
+    klass = fm.get("class", "").strip()
+    tags = [t.strip().lower() for t in fm.get("tags", "").strip("[]").split(",") if t.strip()]
+    return klass, tags
+
+
 def _make_backup(keep: int = KEEP_BACKUPS) -> Path | None:
     """Snapshot the whole vault to a timestamped, rotating backup dir. Copy-then-swap and a
     rotation of the newest `keep` snapshots means a corrupted or truncated vault can always be
@@ -125,9 +132,16 @@ def cmd_add(args) -> int:
     if args.body_file:
         body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text(encoding="utf-8")
     date = args.date or datetime.date.today().isoformat()
+    meta = [f"  type: {args.type}"]
+    if getattr(args, "klass", ""):
+        meta.append(f"  class: {args.klass}")          # the attack class / CWE this lesson is about
+    tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
+    if tags:
+        meta.append(f"  tags: [{', '.join(tags)}]")     # surface/platform/language for scoped recall
+    meta.append(f"  updated: {date}")
     note = (
         f"---\nname: {slug}\ndescription: {args.description}\n"
-        f"metadata:\n  type: {args.type}\n  updated: {date}\n---\n\n{body.rstrip()}\n"
+        f"metadata:\n" + "\n".join(meta) + f"\n---\n\n{body.rstrip()}\n"
     )
     path = VAULT / f"{slug}.md"
     existed = path.exists()
@@ -151,7 +165,9 @@ def cmd_index(quiet: bool = False) -> int:
             mt = re.search(r"type:\s*(\w+)", p.read_text(encoding="utf-8"))
             t = mt.group(1) if mt and mt.group(1) in TYPES else "reference"
         desc = fm.get("description", "")
-        by_type.setdefault(t, []).append(f"- [{fm.get('name', p.stem)}]({p.name}) — {desc}")
+        klass, _tags = _note_meta(fm)
+        label = f"`{klass}` " if klass else ""
+        by_type.setdefault(t, []).append(f"- [{fm.get('name', p.stem)}]({p.name}) {label}— {desc}")
     lines = ["# Memory index", "",
              "_DeepThought portable agent memory. One fact per note; this index is generated "
              "by `python memory/mem.py index`. See [AGENTS.md](../AGENTS.md) for the protocol._", ""]
@@ -168,21 +184,34 @@ def cmd_index(quiet: bool = False) -> int:
 
 
 def cmd_recall(args) -> int:
+    """Print notes, optionally SCOPED so an agent loads only what's relevant instead of the
+    whole vault: --class <attack-class> and/or --tag <surface/platform/language>, and/or a
+    free-text query. With no filters and no query, prints the index."""
     if not VAULT.exists():
         print("no vault; run: python memory/mem.py init", file=sys.stderr)
         return 1
+    cls = (getattr(args, "klass", "") or "").strip().lower()
+    tag = (getattr(args, "tag", "") or "").strip().lower()
     q = (args.query or "").lower()
-    if not q:
+    if not (cls or tag or q):
         print((VAULT / INDEX).read_text(encoding="utf-8") if (VAULT / INDEX).exists() else "(empty)")
         return 0
     hits = 0
     for p in _notes():
         text = p.read_text(encoding="utf-8")
-        if q in text.lower() or q in p.stem.lower():
-            print(f"\n===== {p.name} =====\n{text.rstrip()}")
-            hits += 1
+        klass, tags = _note_meta(_fm(text))
+        if cls and klass.lower() != cls:
+            continue
+        if tag and tag not in tags:
+            continue
+        if q and q not in text.lower() and q not in p.stem.lower():
+            continue
+        print(f"\n===== {p.name} =====\n{text.rstrip()}")
+        hits += 1
     if not hits:
-        print(f"no notes match {args.query!r}")
+        scope = " ".join(x for x in (f"class={cls}" if cls else "", f"tag={tag}" if tag else "",
+                                     f"query={args.query!r}" if q else "") if x)
+        print(f"no notes match {scope}")
     return 0
 
 
@@ -235,12 +264,16 @@ def main() -> int:
     a.add_argument("--type", required=True)
     a.add_argument("--name", required=True)
     a.add_argument("--description", required=True)
+    a.add_argument("--class", dest="klass", default="", help="attack class / CWE this lesson is about")
+    a.add_argument("--tags", default="", help="comma list: surface/platform/language (e.g. web,python,taint)")
     a.add_argument("--body", default="")
     a.add_argument("--body-file", default="")
     a.add_argument("--date", default="")
     sub.add_parser("index")
     r = sub.add_parser("recall")
     r.add_argument("query", nargs="?", default="")
+    r.add_argument("--class", dest="klass", default="", help="only notes of this attack class")
+    r.add_argument("--tag", default="", help="only notes carrying this surface/platform/language tag")
     sub.add_parser("list")
     b = sub.add_parser("backup")
     b.add_argument("--keep", type=int, default=0, help=f"snapshots to retain (default {KEEP_BACKUPS})")
