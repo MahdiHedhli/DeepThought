@@ -229,36 +229,6 @@ def _java_sink_filter_arg(
     return None
 
 
-def _java_bound_name(source: bytes, value: Node) -> str | None:
-    parent = value.parent
-    while parent is not None and parent.type not in _JAVA_NESTED_SCOPES:
-        if parent.type == "variable_declarator":
-            name = parent.child_by_field_name("name")
-            return _text(source, name) if name is not None else None
-        if parent.type == "assignment_expression":
-            left = parent.child_by_field_name("left")
-            return _text(source, left) if left is not None and left.type == "identifier" else None
-        parent = parent.parent
-    return None
-
-
-def _java_reaches_sink(
-    source: bytes,
-    method: Node,
-    value: Node,
-    bound_name: str,
-    ldap_context: bool,
-    wrappers: dict[str, set[int]],
-) -> bool:
-    for call in _java_scope_nodes(method):
-        if call.type != "method_invocation" or call.start_byte <= value.start_byte:
-            continue
-        arg = _java_sink_filter_arg(source, call, ldap_context, wrappers)
-        if arg is not None and bound_name in _java_identifiers(source, arg):
-            return True
-    return False
-
-
 def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
     src = source.encode("utf-8")
     root = _JAVA_PARSER.parse(src).root_node
@@ -274,56 +244,71 @@ def scan_java(source: str, uri: str, cve: str | None = None) -> list[dict]:
         tainted = set(_java_params(src, method))
         tainted.discard("this")
         safe: set[str] = set()
-        reported_names: set[str] = set()
-        nodes = sorted(_java_scope_nodes(method), key=lambda n: (n.start_byte, n.end_byte))
-
-        for node in nodes:
-            if node.type not in ("variable_declarator", "assignment_expression"):
-                continue
-            value = node.child_by_field_name("value") or node.child_by_field_name("right")
-            name_node = node.child_by_field_name("name") or node.child_by_field_name("left")
-            if value is None or name_node is None or name_node.type != "identifier":
-                continue
-            name = _text(src, name_node)
-            sanitized = _java_filter_sanitized(src, value)
-            value_tainted = bool((_java_identifiers(src, value) - safe) & tainted)
-            if sanitized:
-                safe.add(name)
-                tainted.discard(name)
-            elif value_tainted:
-                tainted.add(name)
-                safe.discard(name)
-            elif value.type in ("string_literal", "decimal_integer_literal", "true", "false", "null_literal"):
-                tainted.discard(name)
-                safe.discard(name)
-
-            if not value_tainted or sanitized or not _java_looks_filter(src, value):
-                continue
-            if not _java_reaches_sink(src, method, value, name, ldap_context, wrappers):
-                continue
-            key = (value.start_point[0], value.start_point[1])
-            if key in seen:
-                continue
-            seen.add(key)
-            reported_names.add(name)
-            results.append(
-                _result(
-                    uri,
-                    value.start_point[0] + 1,
-                    value.start_point[1] + 1,
-                    "LDAP injection (CWE-90): unescaped input constructs a filter used by an LDAP search",
-                    cve,
-                )
+        active_candidates: dict[str, Node] = {}
+        nodes = list(_java_scope_nodes(method))
+        # An assignment takes effect after its RHS has been evaluated.  Using its end
+        # byte as the event position also keeps a search nested in that RHS on the old
+        # state, while ordinary definitions still precede later statements.
+        events = sorted(
+            (
+                (
+                    node.end_byte
+                    if node.type in ("variable_declarator", "assignment_expression")
+                    else node.start_byte
+                ),
+                index,
+                node,
             )
+            for index, node in enumerate(nodes)
+            if node.type in ("variable_declarator", "assignment_expression", "method_invocation")
+        )
 
-        for call in nodes:
-            if call.type != "method_invocation":
+        for _, _, node in events:
+            if node.type in ("variable_declarator", "assignment_expression"):
+                value = node.child_by_field_name("value") or node.child_by_field_name("right")
+                name_node = node.child_by_field_name("name") or node.child_by_field_name("left")
+                if value is None or name_node is None or name_node.type != "identifier":
+                    continue
+                name = _text(src, name_node)
+                sanitized = _java_filter_sanitized(src, value)
+                value_tainted = bool((_java_identifiers(src, value) - safe) & tainted)
+                if sanitized:
+                    safe.add(name)
+                    tainted.discard(name)
+                elif value_tainted:
+                    tainted.add(name)
+                    safe.discard(name)
+                elif value.type in ("string_literal", "decimal_integer_literal", "true", "false", "null_literal"):
+                    tainted.discard(name)
+                    safe.discard(name)
+
+                # Only the latest definition of a name can explain a later search.
+                active_candidates.pop(name, None)
+                if value_tainted and not sanitized and _java_looks_filter(src, value):
+                    active_candidates[name] = value
                 continue
+
+            call = node
             arg = _java_sink_filter_arg(src, call, ldap_context, wrappers)
             if arg is None or _java_filter_sanitized(src, arg):
                 continue
             ids = _java_identifiers(src, arg)
-            if ids & reported_names:
+            candidates = [active_candidates[name] for name in ids if name in active_candidates]
+            if candidates:
+                for value in candidates:
+                    key = (value.start_point[0], value.start_point[1])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    results.append(
+                        _result(
+                            uri,
+                            value.start_point[0] + 1,
+                            value.start_point[1] + 1,
+                            "LDAP injection (CWE-90): unescaped input constructs a filter used by an LDAP search",
+                            cve,
+                        )
+                    )
                 continue
             if not ((ids - safe) & tainted) or not _java_looks_filter(src, arg):
                 continue
@@ -377,19 +362,39 @@ def _py_params(scope: ast.AST) -> set[str]:
     return out
 
 
+def _py_is_filter_sanitizer_call(call: ast.Call) -> bool:
+    name = _py_name(call.func).lower().replace("_", "")
+    if name in {
+        "escapefilterchars",
+        "escapeldapfilter",
+        "encodefiltervalue",
+        "filterencode",
+    }:
+        return True
+    return "escape" in name and "filter" in name and "dn" not in name
+
+
 def _py_filter_sanitized(node: ast.AST) -> bool:
-    for call in (n for n in ast.walk(node) if isinstance(n, ast.Call)):
-        name = _py_name(call.func).lower().replace("_", "")
-        if name in {
-            "escapefilterchars",
-            "escapeldapfilter",
-            "encodefiltervalue",
-            "filterencode",
-        }:
-            return True
-        if "escape" in name and "filter" in name and "dn" not in name:
-            return True
-    return False
+    return any(
+        _py_is_filter_sanitizer_call(call)
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+    )
+
+
+def _py_unsanitized_names(node: ast.AST, safe_helpers: set[str] | None = None) -> set[str]:
+    """Names whose values reach an expression without filter encoding."""
+    helpers = safe_helpers or set()
+    if isinstance(node, ast.Call) and (
+        _py_is_filter_sanitizer_call(node) or _py_name(node.func) in helpers
+    ):
+        return set()
+    if isinstance(node, ast.Name):
+        return {node.id}
+    out: set[str] = set()
+    for child in ast.iter_child_nodes(node):
+        out.update(_py_unsanitized_names(child, helpers))
+    return out
 
 
 def _py_looks_filter(node: ast.AST, source: str) -> bool:
@@ -430,15 +435,62 @@ def _py_sink_filter_arg(call: ast.Call, source: str, ldap_context: bool) -> ast.
     return None
 
 
-def _py_safe_helpers(tree: ast.AST, source: str) -> set[str]:
+def _py_helper_summaries(tree: ast.AST, source: str) -> tuple[set[str], set[str]]:
     safe: set[str] = set()
+    filter_builders: set[str] = set()
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
-        body_nodes = list(_py_iter_scope(fn))
-        if not any(isinstance(n, ast.Call) and _py_filter_sanitized(n) for n in body_nodes):
-            continue
-        if any(isinstance(n, ast.Return) and n.value is not None and _py_looks_filter(n.value, source) for n in body_nodes):
+        tainted = _py_params(fn)
+        sanitized_names: set[str] = set()
+        body_nodes = sorted(
+            _py_iter_scope(fn),
+            key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)),
+        )
+        saw_filter_return = False
+        all_filter_returns_safe = True
+        for node in body_nodes:
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                value = node.value
+                if value is None:
+                    continue
+                targets = _py_targets(node)
+                if not targets:
+                    continue
+                unsanitized = _py_unsanitized_names(value)
+                value_tainted = bool(unsanitized & tainted)
+                carries_sanitized = _py_filter_sanitized(value) or bool(
+                    set(n.id for n in ast.walk(value) if isinstance(n, ast.Name)) & sanitized_names
+                )
+                for name in targets:
+                    if value_tainted:
+                        tainted.add(name)
+                        sanitized_names.discard(name)
+                    elif carries_sanitized and parents.get(node) is fn:
+                        # Only straight-line sanitizer assignments dominate every
+                        # later return. Branch-local writes need a full control-flow
+                        # proof and are therefore not trusted by this summary.
+                        tainted.discard(name)
+                        sanitized_names.add(name)
+                    elif isinstance(value, ast.Constant):
+                        tainted.discard(name)
+                        sanitized_names.discard(name)
+                continue
+            if not isinstance(node, ast.Return) or node.value is None or not _py_looks_filter(node.value, source):
+                continue
+            saw_filter_return = True
+            filter_builders.add(fn.name)
+            returned_names = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
+            has_sanitized_value = _py_filter_sanitized(node.value) or bool(returned_names & sanitized_names)
+            all_filter_returns_safe &= has_sanitized_value and not (
+                _py_unsanitized_names(node.value) & tainted
+            )
+        if saw_filter_return and all_filter_returns_safe:
             safe.add(fn.name)
-    return safe
+    return safe, filter_builders
 
 
 def _py_call_is_safe_helper(node: ast.AST, safe_helpers: set[str]) -> bool:
@@ -454,6 +506,32 @@ def _py_targets(node: ast.Assign | ast.AnnAssign | ast.NamedExpr) -> list[str]:
     return [t.id for t in targets if isinstance(t, ast.Name)]
 
 
+def _py_branch_arms(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> dict[int, str]:
+    """Return enclosing if identities and the branch containing node."""
+    arms: dict[int, str] = {}
+    current = node
+    while current in parents:
+        parent = parents[current]
+        if isinstance(parent, ast.If):
+            if current in parent.body:
+                arms[id(parent)] = "body"
+            elif current in parent.orelse:
+                arms[id(parent)] = "orelse"
+        current = parent
+    return arms
+
+
+def _py_mutually_exclusive(
+    left: ast.AST, right: ast.AST, parents: dict[ast.AST, ast.AST]
+) -> bool:
+    left_arms = _py_branch_arms(left, parents)
+    right_arms = _py_branch_arms(right, parents)
+    return any(
+        branch in right_arms and right_arms[branch] != arm
+        for branch, arm in left_arms.items()
+    )
+
+
 def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
     try:
         tree = ast.parse(source)
@@ -462,84 +540,107 @@ def scan_python(source: str, uri: str, cve: str | None = None) -> list[dict]:
     ldap_context = _py_ldap_context(tree, source)
     if not ldap_context:
         return []
-    safe_helpers = _py_safe_helpers(tree, source)
+    safe_helpers, filter_helpers = _py_helper_summaries(tree, source)
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     scopes: list[ast.AST] = [tree]
     scopes.extend(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))
     results: list[dict] = []
     seen: set[tuple[int, int]] = set()
 
     for scope in scopes:
-        nodes = sorted(_py_iter_scope(scope), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0)))
+        nodes = list(_py_iter_scope(scope))
         tainted = _py_params(scope)
         safe_names: set[str] = set()
-        candidate_defs: list[tuple[ast.AST, str]] = []
+        active_candidates: dict[str, list[ast.AST]] = {}
 
-        sink_calls = [
-            n
-            for n in nodes
-            if isinstance(n, ast.Call) and _py_sink_filter_arg(n, source, ldap_context) is not None
-        ]
+        def event_position(node: ast.AST) -> tuple[int, int]:
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                return (getattr(node, "end_lineno", node.lineno), getattr(node, "end_col_offset", node.col_offset))
+            return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
 
-        for node in nodes:
-            if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
-                continue
-            value = node.value
-            targets = _py_targets(node)
-            if not targets:
-                continue
-            sanitized = _py_filter_sanitized(value) or _py_call_is_safe_helper(value, safe_helpers)
-            identifiers = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
-            value_tainted = bool((identifiers - safe_names) & tainted)
-            for name in targets:
-                if sanitized:
-                    safe_names.add(name)
-                    tainted.discard(name)
-                elif value_tainted:
-                    tainted.add(name)
-                    safe_names.discard(name)
-                elif isinstance(value, ast.Constant):
-                    tainted.discard(name)
-                    safe_names.discard(name)
+        events = sorted(
+            (event_position(node), index, node)
+            for index, node in enumerate(nodes)
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr, ast.Call))
+        )
 
-            if value_tainted and not sanitized and _py_looks_filter(value, source):
+        for _, _, node in events:
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                value = node.value
+                if value is None:
+                    continue
+                targets = _py_targets(node)
+                if not targets:
+                    continue
+                helper_safe = _py_call_is_safe_helper(value, safe_helpers)
+                unsanitized = _py_unsanitized_names(value, safe_helpers)
+                value_tainted = bool((unsanitized - safe_names) & tainted)
+                sanitized = helper_safe or (_py_filter_sanitized(value) and not value_tainted)
                 for name in targets:
-                    reaches = False
-                    for call in sink_calls:
-                        if (call.lineno, call.col_offset) <= (node.lineno, node.col_offset):
-                            continue
-                        arg = _py_sink_filter_arg(call, source, ldap_context)
-                        if arg is not None and name in {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}:
-                            reaches = True
-                            break
-                    if reaches:
-                        candidate_defs.append((value, name))
+                    if sanitized:
+                        safe_names.add(name)
+                        tainted.discard(name)
+                    elif value_tainted:
+                        tainted.add(name)
+                        safe_names.discard(name)
+                    elif isinstance(value, ast.Constant):
+                        tainted.discard(name)
+                        safe_names.discard(name)
 
-        reported_names: set[str] = set()
-        for value, name in candidate_defs:
-            key = (value.lineno, value.col_offset)
-            if key in seen:
+                    alternatives = [
+                        candidate
+                        for candidate in active_candidates.get(name, [])
+                        if _py_mutually_exclusive(candidate, value, parents)
+                    ]
+                    active_candidates[name] = alternatives
+                    if value_tainted and not sanitized and (
+                        _py_looks_filter(value, source)
+                        or (isinstance(value, ast.Call) and _py_name(value.func) in filter_helpers)
+                    ):
+                        active_candidates[name].append(value)
+                    if not active_candidates[name]:
+                        active_candidates.pop(name)
                 continue
-            seen.add(key)
-            reported_names.add(name)
-            results.append(
-                _result(
-                    uri,
-                    value.lineno,
-                    value.col_offset + 1,
-                    "LDAP injection (CWE-90): unescaped input constructs a filter used by an LDAP search",
-                    cve,
-                )
-            )
 
-        for call in sink_calls:
+            call = node
             arg = _py_sink_filter_arg(call, source, ldap_context)
-            assert arg is not None
-            if _py_filter_sanitized(arg) or _py_call_is_safe_helper(arg, safe_helpers):
+            if arg is None:
+                continue
+            helper_safe = _py_call_is_safe_helper(arg, safe_helpers)
+            unsanitized = _py_unsanitized_names(arg, safe_helpers)
+            value_tainted = bool((unsanitized - safe_names) & tainted)
+            if helper_safe or (_py_filter_sanitized(arg) and not value_tainted):
                 continue
             identifiers = {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
-            if identifiers & reported_names:
+            candidates = [
+                candidate
+                for name in identifiers
+                for candidate in active_candidates.get(name, [])
+            ]
+            if candidates:
+                for value in candidates:
+                    key = (value.lineno, value.col_offset)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    results.append(
+                        _result(
+                            uri,
+                            value.lineno,
+                            value.col_offset + 1,
+                            "LDAP injection (CWE-90): unescaped input constructs a filter used by an LDAP search",
+                            cve,
+                        )
+                    )
                 continue
-            if not ((identifiers - safe_names) & tainted) or not _py_looks_filter(arg, source):
+            if not value_tainted or not (
+                _py_looks_filter(arg, source)
+                or (isinstance(arg, ast.Call) and _py_name(arg.func) in filter_helpers)
+            ):
                 continue
             key = (call.lineno, call.col_offset)
             if key in seen:

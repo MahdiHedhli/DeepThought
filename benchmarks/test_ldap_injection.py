@@ -54,6 +54,22 @@ def test_language_fixtures_each_flag_only_the_unescaped_filter():
             'ctx.search(base, "(uid=" + escapeLdapFilter(username) + ")", c); } }',
             0,
         ),
+        # A sanitizer assignment after the search cannot retroactively protect it.
+        (
+            "import javax.naming.directory.*; class A { void f(DirContext ctx, String base, "
+            "String username, SearchControls c) throws Exception { "
+            'ctx.search(base, "(uid=" + username + ")", c); '
+            "username = escapeLdapFilter(username); } }",
+            1,
+        ),
+        # The same reassignment is safe when it precedes the search.
+        (
+            "import javax.naming.directory.*; class A { void f(DirContext ctx, String base, "
+            "String username, SearchControls c) throws Exception { "
+            "username = escapeLdapFilter(username); "
+            'ctx.search(base, "(uid=" + username + ")", c); } }',
+            0,
+        ),
         # DN escaping is not RFC 4515 search-filter escaping.
         (
             "import javax.naming.directory.*; import javax.naming.ldap.Rdn; class A { "
@@ -109,6 +125,25 @@ def test_java_rule_variants(source, expected):
             "def f(conn, base, username):\n    return conn.search(base, make_filter(username))",
             0,
         ),
+        # A helper is not safe merely because it sanitizes an unrelated value.
+        (
+            "import ldap3\ndef make_filter(username, other):\n"
+            "    escaped = ldap3.utils.conv.escape_filter_chars(other)\n"
+            "    return f'(uid={username})'\n"
+            "def f(conn, base, username, other):\n"
+            "    return conn.search(base, make_filter(username, other))",
+            1,
+        ),
+        # Every filter-returning path must carry the encoded value.
+        (
+            "import ldap3\ndef make_filter(username, encode):\n"
+            "    if encode:\n"
+            "        return f'(uid={ldap3.utils.conv.escape_filter_chars(username)})'\n"
+            "    return f'(uid={username})'\n"
+            "def f(conn, base, username, encode):\n"
+            "    return conn.search(base, make_filter(username, encode))",
+            1,
+        ),
         # Escaping another value does not sanitize the username sent to this sink.
         (
             "import ldap3\ndef f(conn, base, username, other):\n"
@@ -121,6 +156,13 @@ def test_java_rule_variants(source, expected):
             "import ldap3\ndef f(conn, base, username):\n"
             "    out = conn.search(base, f'(uid={username})')\n"
             "    ldap3.utils.conv.escape_filter_chars(username)\n    return out",
+            1,
+        ),
+        # Rebinding the source after the search is likewise too late.
+        (
+            "import ldap3\ndef f(conn, base, username):\n"
+            "    conn.search(base, f'(uid={username})')\n"
+            "    username = ldap3.utils.conv.escape_filter_chars(username)",
             1,
         ),
         # LDAP imports elsewhere do not turn a generic index search into an LDAP sink.
@@ -137,6 +179,19 @@ def test_java_rule_variants(source, expected):
 )
 def test_python_rule_variants(source, expected):
     assert len(scan_source(source, "a.py")) == expected
+
+
+def test_python_if_else_filter_definitions_both_reach_the_merged_sink():
+    source = (
+        "import ldap\n"
+        "def f(con, base, username, configured):\n"
+        "    if configured:\n"
+        "        filter_str = f'(&(active=1)(uid={username}))'\n"
+        "    else:\n"
+        "        filter_str = f'(uid={username})'\n"
+        "    return con.search_s(base, ldap.SCOPE_SUBTREE, filter_str)\n"
+    )
+    assert _lines(scan_source(source, "a.py")) == [4, 6]
 
 
 @pytest.mark.parametrize(
