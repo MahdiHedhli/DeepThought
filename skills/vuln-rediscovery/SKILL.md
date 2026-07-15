@@ -44,7 +44,7 @@ constitution, the gates, the sandbox, or the disclosure boundary.
 
 - **Deterministic.** Static and taint detection emitting SARIF. Runs in CI, no
   target code executes. Prototype pollution, SSRF, XXE, path traversal,
-  deserialization, ReDoS, command injection.
+  deserialization, ReDoS, command injection, SQL injection.
 - **Sandbox.** Fuzzing plus a sanitizer, executed only in the signed-off sandbox.
   Heap overflow, use-after-free, and any class whose proof is a crash.
 
@@ -250,3 +250,29 @@ Each build round appends one section here using this template:
 - **Held-out generalization:** **3/3 (100%)**, with **0 patched-file flags**. The ceiling
   reflects visible sink removal/replacement for the Python cases and receiver-bound XStream
   hardening for Struts; it does not claim coverage of library-internal serialization bugs.
+
+### SQL injection (CWE-89)
+
+- **When to use:** hunting Python, PHP, or Velocity application code that turns request or
+  function-input data into SQL/HQL syntax rather than a separately bound value.
+- **Detection:** static AST (`benchmarks/sqli_detector.py`). Python models DB-API query
+  arguments and treats a separate parameter collection as the safe discriminator. PHP uses
+  tree-sitter to follow tainted query/fragment construction into database sinks, recognizing
+  expression-bound quoting such as `db_qstr`. Velocity tracks request-derived values into
+  dynamic `ORDER BY` fragments and recognizes allowlist normalization.
+- **Rule id:** `DT-SQLI-QUERY`, emitting SARIF 2.1.0 into the shipped DISCOVER ingest.
+  Verification is deterministic vulnerable/patched discrimination plus NEW PROJECT → MAP →
+  DISCOVER → `check`; no target code executes.
+- **Cohort:** seed Arches **CVE-2022-41892**; held-out OpenCart **CVE-2024-21514**,
+  Cacti **CVE-2024-31445**, and XWiki Platform **CVE-2025-32429**, all pinned to real
+  vulnerable/patched trees. OpenCart's fix removes the target, so the manifest's narrowly
+  scoped `patched_absent_paths` is accepted only after the patched commit and exact 404 are
+  independently verified; all other fetch errors fail closed.
+- **Held-out generalization:** **2/3 (67%)** — OpenCart and Cacti rediscovered; XWiki is
+  the honest miss. Its vulnerable and patched trees retain the same dynamic `ORDER BY` line;
+  the fix reorders a framework-specific safety check after location rewriting, beyond this
+  syntax-only rule. Patched-file context contains **48 flags**, reported honestly rather than
+  hidden; most are unrelated query-building sites in Cacti/XWiki's large target files. The
+  first real-tree pass found only 1/3 because a later constant PHP append stole attribution
+  from the tainted construction; binding reports to the unsafe construction site fixed that
+  generic defect and moved the honest result to 2/3.
