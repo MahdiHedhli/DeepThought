@@ -128,6 +128,36 @@ See [`benchmarks/deep-thought-benchmark.md`](benchmarks/deep-thought-benchmark.m
 DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_xxe.py
 ```
 
+## Agent memory — portable, self-contained, multi-agent
+
+Deep Thought carries its own memory so knowledge compounds across sessions **and across
+harnesses** (Claude Code, Codex, Cursor, a plain script). It is a plain-markdown, Obsidian-style
+vault — **no MCP, no external service**:
+
+- **Mechanism in the repo** (committed, travels with every clone): [`memory/`](memory/) —
+  [`AGENTS.md`](memory/AGENTS.md) (the read/write protocol), [`mem.py`](memory/mem.py) (a
+  dependency-free CLI), and a template. **Data out of git** (gitignored): `memory/vault/` (the
+  notes) and `memory/backups/`. Open `memory/vault/` as an Obsidian vault to read it.
+- **Classified for scoped recall.** Notes are typed `user | feedback | lesson | project |
+  reference`. A `lesson` (knowledge distilled from doing the work) also carries `class` (the
+  attack class / CWE, or `methodology`/`sandbox`/`toolchain`) and `tags` (surface/platform/
+  language), so an agent pulls **only** what it needs instead of the whole notebook.
+- **Durable.** Every write is atomic (temp-file + `os.replace`); the vault auto-snapshots before
+  mutation; `backup`/`restore` give rotating, gitignored history — a failed write or corruption
+  never loses memory.
+
+```bash
+python3 memory/mem.py backup                          # snapshot before writing (each session)
+python3 memory/mem.py recall --class methodology      # the always-load core lessons
+python3 memory/mem.py recall --class ssrf --tag python  # only the relevant attack + surface slice
+python3 memory/mem.py add --type lesson --class ssrf --tags "web,python,taint" \
+    --name ssrf-detection --description "one line" --body "the fact, with [[links]]"
+```
+
+Root [`AGENTS.md`](AGENTS.md) (Codex/Cursor) and [`CLAUDE.md`](CLAUDE.md) point every harness at
+the same vault. A learning that would otherwise live only in a commit message belongs in a
+`lesson` note.
+
 ## Architecture
 
 ```

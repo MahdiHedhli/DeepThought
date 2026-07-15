@@ -9,18 +9,24 @@ operations consistent; agents may also edit the markdown directly per ``memory/A
 
 Usage:
   python memory/mem.py init                         # create memory/vault/ from the template
-  python memory/mem.py add --type project \\
+  python memory/mem.py add --type lesson \\
+      --class ssrf --tags "web,python,taint" \\
       --name my-fact --description "one line" \\
       --body "the fact body, may use [[links]]"     # write a note + refresh the index
   python memory/mem.py index                        # rebuild MEMORY.md from the notes
   python memory/mem.py recall [query]               # print notes matching a query (or the index)
+  python memory/mem.py recall --class ssrf --tag python   # SCOPED recall: only the relevant slice
   python memory/mem.py list                         # list every note + its description
   python memory/mem.py backup                       # snapshot the vault (rotating, gitignored)
   python memory/mem.py restore [timestamp]          # revert to the newest (or a named) backup
 
-Notes are plain markdown with YAML-ish frontmatter (name, description, type). One fact per
-file. Writes are atomic and the vault is auto-snapshotted before mutation, so a failed write
-cannot corrupt memory. See memory/AGENTS.md for the read/write protocol every agent follows.
+Notes are plain markdown with YAML-ish frontmatter. `type` is one of
+user | feedback | lesson | project | reference. A `lesson` (knowledge distilled from doing the
+work) also carries `class` (the attack class / CWE, or methodology|sandbox|toolchain) and
+`tags` (surface/platform/language) so agents can `recall --class/--tag` just what they need
+instead of the whole vault. One fact per file. Writes are atomic and the vault is
+auto-snapshotted before mutation, so a failed write cannot corrupt memory. See
+memory/AGENTS.md for the read/write protocol every agent follows.
 """
 from __future__ import annotations
 
