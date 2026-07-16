@@ -186,3 +186,17 @@ Manifest: `benchmarks/corpus/crlf/manifest.json`.
 | held-out | CVE-2026-34514 / aiohttp | `39ae036bfa222bcaefa9a13cb5760b6523833387` | `9a6ada97e2c6cf1ce31727c6c9fcea17c21f6f06` | rediscovered |
 
 Held-out **3/3** with **4 patched-file flags** (honest). Dropped gakido (merge-time sanitize), i18next (JS), Tesla (Elixir).
+
+
+## Round 4 surface extension: NoSQL operator injection
+
+Manifest: `benchmarks/corpus/nosql/manifest.json`.
+
+| Role | CVE / package | Vulnerable SHA | Patched SHA | Result |
+| --- | --- | --- | --- | --- |
+| seed | CVE-2026-48121 / langgraph-checkpoint-mongodb | `428c4e3f2946cc2b06f8550aa6974d5bdb2352c2` | `284226c7ca164b3c81fe2d9e32b10f1fc6b99a3c` | pipeline rediscovered |
+| held-out | CVE-2026-30941 / parse-server | `bc45ef9635fa0eb0e9726b6889d6d0447a73da6a` | `b2f23172e4983e4597226ef80ccc75d3054d31ad` | rediscovered |
+| held-out | CVE-2026-32248 / parse-server | `ad826e1bf6a2abbe19683d3d5c0ad883818f7def` | `0d0a5543b35c35c12f69d5182693e50182b6faad` | rediscovered |
+| held-out | CVE-2026-29793 / @feathersjs/mongodb | `ddb9b9c558563ebd60ac1596da38b05bb54592db` | `163e664f231a57041034c852b80525fc5c8cf68d` | miss (adapter-id typeof) |
+
+Held-out **2/3** with **28 patched-file flags** (honest). Feathers miss logged as improvement-loop fixture.

@@ -1,0 +1,68 @@
+{
+  "bug_class": "nosql",
+  "cwe": "CWE-943",
+  "detector": "DT-NOSQL-OP",
+  "tier": "deterministic",
+  "language": "javascript",
+  "reproducibility": "real repositories at pinned SHAs; line-precise; pin-or-drop",
+  "seed": {
+    "cve": "CVE-2026-48121",
+    "package": "@langchain/langgraph-checkpoint-mongodb",
+    "repo": "https://github.com/langchain-ai/langgraphjs",
+    "vuln_ref": "428c4e3f2946cc2b06f8550aa6974d5bdb2352c2",
+    "patched_ref": "284226c7ca164b3c81fe2d9e32b10f1fc6b99a3c",
+    "target_paths": ["libs/checkpoint-mongodb/src/checkpoint.ts"],
+    "sink_probe": "const result = await this.db",
+    "sink": "MongoDBSaver runs collection.find on thread_id/checkpoint values taken from config.configurable without requiring strings",
+    "patched_shape": "getStringConfigValue rejects non-string configurable values before any query is built",
+    "cwe": "CWE-943",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2026-30941",
+      "package": "parse-server",
+      "repo": "https://github.com/parse-community/parse-server",
+      "vuln_ref": "bc45ef9635fa0eb0e9726b6889d6d0447a73da6a",
+      "patched_ref": "b2f23172e4983e4597226ef80ccc75d3054d31ad",
+      "target_paths": ["src/Routers/UsersRouter.js", "src/Routers/PagesRouter.js"],
+      "sink_probe": "const token = req.body?.token;",
+      "sink": "password-reset/token paths bind req.body.token into user lookups without requiring a string",
+      "patched_shape": "UsersRouter rejects non-string tokens; PagesRouter coerces non-strings via toString",
+      "cwe": "CWE-943",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-32248",
+      "package": "parse-server",
+      "repo": "https://github.com/parse-community/parse-server",
+      "vuln_ref": "ad826e1bf6a2abbe19683d3d5c0ad883818f7def",
+      "patched_ref": "0d0a5543b35c35c12f69d5182693e50182b6faad",
+      "target_paths": ["src/Auth.js"],
+      "sink_probe": "return { [`authData.${provider}.id`]: providerAuthData.id };",
+      "sink": "authData provider id is accepted as any type and used in user matching queries",
+      "patched_shape": "typeof providerAuthData.id !== 'string' throws INVALID_VALUE before login lookup",
+      "cwe": "CWE-943",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-29793",
+      "package": "@feathersjs/mongodb",
+      "repo": "https://github.com/feathersjs/feathers",
+      "vuln_ref": "ddb9b9c558563ebd60ac1596da38b05bb54592db",
+      "patched_ref": "163e664f231a57041034c852b80525fc5c8cf68d",
+      "target_paths": ["packages/mongodb/src/adapter.ts"],
+      "sink_probe": "async _get(id: Id",
+      "sink": "MongoDB adapter accepts arbitrary objects as document ids for get/patch/remove",
+      "patched_shape": "rejects ids that are not string, number, or ObjectId before querying",
+      "cwe": "CWE-943",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-54350",
+      "package": "@budibase/server",
+      "status": "dropped",
+      "drop_reason": "security advisory lists no public fix commit SHA at pin time; pin-or-drop"
+    }
+  ]
+}
