@@ -382,3 +382,26 @@ Each build round appends one section here using this template:
   prove interprocedural sanitizer dominance across modules, and library-internal merge
   sanitizers without a changed serialize line are outside the measured cohort.
 
+### NoSQL operator injection (CWE-943)
+
+- **When to use:** hunting JS/TS application code that places request- or config-derived
+  values into MongoDB identity/filter fields (tokens, auth provider ids, checkpoint
+  thread ids) without proving they are scalars.
+- **Detection:** static tree-sitter (`benchmarks/nosql_detector.py`, JS + TypeScript).
+  Flags untrusted configurable destructuring and Mongo `find`/`findOne`/… uses of
+  identity fields, plus authData/token bindings, when the enclosing scope lacks a
+  `typeof … === "string"` guard or a string-coercion helper such as
+  `getStringConfigValue`.
+- **Rule id:** `DT-NOSQL-OP`, emitting SARIF 2.1.0 into DISCOVER. Verification is
+  deterministic plus NEW PROJECT → MAP → DISCOVER → `check`.
+- **Cohort:** seed LangGraph Mongo checkpoint **CVE-2026-48121**; held-out Parse Server
+  **CVE-2026-30941** and **CVE-2026-32248**, Feathers MongoDB **CVE-2026-29793**. Dropped
+  Budibase (no public fix commit at pin time).
+- **Held-out generalization:** **2/3 (67%)**, with **28 patched-file flags** reported
+  honestly across large Parse Server routers. Feathers is the honest miss: its fix is an
+  adapter-boundary `typeof id` check on a method parameter without a `req.body` /
+  `config.configurable` surface this rule keys on.
+- **Honest ceiling:** constructor/query syntactic analysis with scope-local string
+  guards; interprocedural sanitizers and pure adapter-id APIs without untrusted roots
+  are outside the measured cohort.
+
