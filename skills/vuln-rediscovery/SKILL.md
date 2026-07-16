@@ -331,3 +331,32 @@ Each build round appends one section here using this template:
   redirect wrappers or validators across modules, and its branch-state merge is not a full
   interprocedural control-flow proof. Those shapes are not represented as covered by the
   measured cohort.
+
+### Server-side template injection (CWE-1336)
+
+- **When to use:** hunting Python application code that builds a Jinja2 template engine for
+  untrusted or repository-sourced template text (prompt managers, CLI template plugins,
+  workflow builders, messaging renderers). The dangerous shape is a plain
+  `jinja2.Environment` / `jinja2.Template` / `NativeEnvironment` constructor, or an
+  import-bound Flask `render_template_string`, without a sandbox.
+- **Detection:** static Python AST (`benchmarks/ssti_detector.py`). Import provenance is
+  binding-aware: `from jinja2 import Environment` is unsafe, while
+  `from jinja2.sandbox import SandboxedEnvironment as Environment` is safe. Local rebinding
+  and parameters shadow module bindings so a non-Jinja helper named `Environment` is not
+  flagged. Defining-module imports (`jinja2.environment`) and nativetypes aliases are
+  resolved. Flask `render_template_string` is flagged only with import/module provenance.
+- **Rule id:** `DT-SSTI-TEMPLATE`, emitting SARIF 2.1.0 into the shipped DISCOVER ingest.
+  Verification is deterministic vulnerable/patched discrimination plus NEW PROJECT → MAP →
+  DISCOVER → `check`; no target code executes.
+- **Cohort:** seed banks **CVE-2026-44209**; held-out LiteLLM **CVE-2026-42203**,
+  homeassistant-cli **CVE-2026-40602**, Haystack **CVE-2024-41950**, and Skyvern
+  **CVE-2025-49619**, all pinned to real vulnerable/patched trees. Dropped spacy-llm
+  **CVE-2025-25362** (authoritative CWE-94) and Flask-Reuploaded **CVE-2026-27641**
+  (path-traversal fix, not a Jinja sink swap).
+- **Held-out generalization:** **4/4 (100%)**, with **0 patched-file flags**. Every fix
+  visibly swaps the constructor for a sandboxed environment or removes the Template
+  constructor; line-precise discrimination holds.
+- **Honest ceiling:** the rule is constructor-provenance static analysis. It does not model
+  `getattr(jinja2, "Environment")`, star-imports, or subclasses of Environment; recursive
+  re-render of untrusted *data* inside an already-sandboxed engine (compliance-trestle shape)
+  is a different fixture and is not claimed by this cohort.

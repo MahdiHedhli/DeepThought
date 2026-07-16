@@ -153,3 +153,22 @@ outside the held-out metric and are not represented as clean.
 urllib3 **CVE-2025-50181** is authoritatively CWE-601 but is dropped from this user-code
 cohort because its fix changes library-internal redirect bookkeeping rather than an
 application redirect sink. It is not counted as a miss.
+
+## Round 4 surface extension: server-side template injection
+
+The SSTI class extends the corpus into Jinja2 sandbox provenance for untrusted or
+repository-sourced templates. The manifest at `benchmarks/corpus/ssti/manifest.json` is
+the executable source of truth:
+
+| Role | CVE / package | Vulnerable SHA | Patched SHA | Result |
+| --- | --- | --- | --- | --- |
+| seed | CVE-2026-44209 / banks | `4c14c9c3673fcf310232c1feb2e2d592e3be69a6` | `bcb9d5af64ea3e36a881c94466549b4742ce97a7` | pipeline rediscovered |
+| held-out | CVE-2026-42203 / LiteLLM | `c94a8d6514936164ef869a6dda8bb7897b3958c2` | `de28a4f352bd5f1267973615e4ddbac6742630c2` | rediscovered |
+| held-out | CVE-2026-40602 / homeassistant-cli | `eb7bd19f18d2350a3bef0d41554883fd99427c3b` | `9beac2206a053fe4ccbce25c1916e561dd3d619e` | rediscovered |
+| held-out | CVE-2024-41950 / Haystack | `47f4db8698a65f2866bac8ff347e1b8b746e39aa` | `3fed1366c448b02189851bf08166c1f6477a02b0` | rediscovered |
+| held-out | CVE-2025-49619 / Skyvern | `4905c03fd593b5ee86499a2342e97d818c26fbcb` | `db856cd8433a204c8b45979c70a4da1e119d949d` | rediscovered |
+
+The held-out score is **4/4** with **0 patched-file flags**. Each fix visibly swaps an
+unsandboxed Jinja constructor for a sandboxed environment or removes the Template
+constructor. Dropped: spacy-llm CVE-2025-25362 (authoritative CWE-94) and
+Flask-Reuploaded CVE-2026-27641 (path-traversal fix, not a Jinja sink swap).
