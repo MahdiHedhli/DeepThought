@@ -379,6 +379,77 @@
           "total": 4
         }
       ]
+    },
+    {
+      "label": "v11-2026-07-15",
+      "rates": [
+        {
+          "bug_class": "prototype_pollution",
+          "detector": "DT-PP-MERGE",
+          "rediscovered": 2,
+          "total": 3
+        },
+        {
+          "bug_class": "ssrf",
+          "detector": "DT-SSRF-TAINT",
+          "rediscovered": 3,
+          "total": 4
+        },
+        {
+          "bug_class": "xxe",
+          "detector": "DT-XXE-PARSER",
+          "rediscovered": 1,
+          "total": 3
+        },
+        {
+          "bug_class": "command_injection",
+          "detector": "DT-CMDI-EXEC",
+          "rediscovered": 3,
+          "total": 4
+        },
+        {
+          "bug_class": "path_traversal",
+          "detector": "DT-PATH-TRAVERSAL",
+          "rediscovered": 2,
+          "total": 3
+        },
+        {
+          "bug_class": "deserialization",
+          "detector": "DT-DESERIAL",
+          "rediscovered": 3,
+          "total": 3
+        },
+        {
+          "bug_class": "sql_injection",
+          "detector": "DT-SQLI-QUERY",
+          "rediscovered": 2,
+          "total": 3
+        },
+        {
+          "bug_class": "ldap_injection",
+          "detector": "DT-LDAP-FILTER",
+          "rediscovered": 3,
+          "total": 3
+        },
+        {
+          "bug_class": "open_redirect",
+          "detector": "DT-OPEN-REDIRECT",
+          "rediscovered": 3,
+          "total": 3
+        },
+        {
+          "bug_class": "ssti",
+          "detector": "DT-SSTI-TEMPLATE",
+          "rediscovered": 4,
+          "total": 4
+        },
+        {
+          "bug_class": "crlf",
+          "detector": "DT-CRLF-HEADER",
+          "rediscovered": 3,
+          "total": 3
+        }
+      ]
     }
   ]
 }

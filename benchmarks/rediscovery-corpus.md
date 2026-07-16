@@ -172,3 +172,17 @@ The held-out score is **4/4** with **0 patched-file flags**. Each fix visibly sw
 unsandboxed Jinja constructor for a sandboxed environment or removes the Template
 constructor. Dropped: spacy-llm CVE-2025-25362 (authoritative CWE-94) and
 Flask-Reuploaded CVE-2026-27641 (path-traversal fix, not a Jinja sink swap).
+
+## Round 4 surface extension: HTTP CRLF / response splitting
+
+The CRLF class covers Python header serialization and Set-Cookie/Content-Type stores.
+Manifest: `benchmarks/corpus/crlf/manifest.json`.
+
+| Role | CVE / package | Vulnerable SHA | Patched SHA | Result |
+| --- | --- | --- | --- | --- |
+| seed | CVE-2026-42874 / microdot | `da91d4272aa2fb5efcc81bf823947737e031d0f8` | `99b281b45faef8472410f2d56bfef496dfbd95d5` | pipeline rediscovered |
+| held-out | CVE-2026-22779 / BlackSheep | `ca4252cc0dc93dd39cab3cba99790ec408465191` | `bd4ecb9542b5d52442276b5a6907931b90f38d12` | rediscovered |
+| held-out | CVE-2026-50269 / aiohttp | `1e3ecd48ec423c1fcc729c98adff31172faae1ef` | `bf88077ebb14f4c29924b8e8904cba20c55c28b8` | rediscovered |
+| held-out | CVE-2026-34514 / aiohttp | `39ae036bfa222bcaefa9a13cb5760b6523833387` | `9a6ada97e2c6cf1ce31727c6c9fcea17c21f6f06` | rediscovered |
+
+Held-out **3/3** with **4 patched-file flags** (honest). Dropped gakido (merge-time sanitize), i18next (JS), Tesla (Elixir).

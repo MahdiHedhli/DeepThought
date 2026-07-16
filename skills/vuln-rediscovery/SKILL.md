@@ -360,3 +360,25 @@ Each build round appends one section here using this template:
   `getattr(jinja2, "Environment")`, star-imports, or subclasses of Environment; recursive
   re-render of untrusted *data* inside an already-sandboxed engine (compliance-trestle shape)
   is a different fixture and is not claimed by this cohort.
+
+### HTTP CRLF / response splitting (CWE-113)
+
+- **When to use:** hunting Python HTTP client/server code that serializes header names
+  and values or builds Set-Cookie / Content-Type fields from untrusted pieces without
+  neutralizing CR/LF.
+- **Detection:** static Python AST (`benchmarks/crlf_detector.py`). Flags (1) name +
+  `": "` + value + CRLF concatenations where dynamic pieces are not sanitizer-wrapped
+  (`_safe_header`, `_nocrlf`, `.replace` of CR/LF), (2) Set-Cookie stores without a
+  dominating CR/LF membership check in the enclosing function, and (3) dynamic
+  Content-Type header assignments without that guard.
+- **Rule id:** `DT-CRLF-HEADER`, emitting SARIF 2.1.0 into the shipped DISCOVER ingest.
+  Verification is deterministic discrimination plus NEW PROJECT → MAP → DISCOVER → `check`.
+- **Cohort:** seed microdot **CVE-2026-42874**; held-out BlackSheep **CVE-2026-22779**,
+  aiohttp multipart **CVE-2026-50269**, aiohttp FormData **CVE-2026-34514**. Dropped
+  gakido (sanitize-at-merge, no changed serialize sink), i18next (JS), Tesla (Elixir).
+- **Held-out generalization:** **3/3 (100%)**, with **4 patched-file flags** reported
+  honestly (unrelated header joins / residual context in large aiohttp/blacksheep files).
+- **Honest ceiling:** the rule is syntactic on serialize and store shapes. It does not
+  prove interprocedural sanitizer dominance across modules, and library-internal merge
+  sanitizers without a changed serialize line are outside the measured cohort.
+

@@ -1,0 +1,80 @@
+{
+  "bug_class": "crlf",
+  "cwe": "CWE-113",
+  "detector": "DT-CRLF-HEADER",
+  "tier": "deterministic",
+  "language": "python",
+  "reproducibility": "real repositories at pinned SHAs; line-precise; pin-or-drop",
+  "seed": {
+    "cve": "CVE-2026-42874",
+    "package": "microdot",
+    "repo": "https://github.com/miguelgrinberg/microdot",
+    "vuln_ref": "da91d4272aa2fb5efcc81bf823947737e031d0f8",
+    "patched_ref": "99b281b45faef8472410f2d56bfef496dfbd95d5",
+    "target_paths": ["src/microdot/microdot.py"],
+    "sink_probe": "self.headers['Set-Cookie'].append(http_cookie)",
+    "sink": "Response.set_cookie builds a cookie string from name/value/path/domain and stores it under Set-Cookie without rejecting CR/LF",
+    "patched_shape": "before store, raise ValueError when the cookie string contains CR or LF",
+    "cwe": "CWE-113",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2026-22779",
+      "package": "blacksheep",
+      "repo": "https://github.com/Neoteroi/BlackSheep",
+      "vuln_ref": "ca4252cc0dc93dd39cab3cba99790ec408465191",
+      "patched_ref": "bd4ecb9542b5d52442276b5a6907931b90f38d12",
+      "target_paths": ["blacksheep/scribe.py"],
+      "sink_probe": "return header[0] + b\": \" + header[1] + b\"\\r\\n\"",
+      "sink": "client header writer concatenates raw name and value with a CRLF terminator",
+      "patched_shape": "_nocrlf strips CR/LF from both name and value before serialization",
+      "cwe": "CWE-113",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-50269",
+      "package": "aiohttp",
+      "repo": "https://github.com/aio-libs/aiohttp",
+      "vuln_ref": "1e3ecd48ec423c1fcc729c98adff31172faae1ef",
+      "patched_ref": "bf88077ebb14f4c29924b8e8904cba20c55c28b8",
+      "target_paths": ["aiohttp/payload.py"],
+      "sink_probe": "k + \": \" + v + \"\\r\\n\"",
+      "sink": "multipart payload binary headers join raw keys and values with CRLF",
+      "patched_shape": "both key and value pass through _safe_header before join",
+      "cwe": "CWE-113",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-34514",
+      "package": "aiohttp",
+      "repo": "https://github.com/aio-libs/aiohttp",
+      "vuln_ref": "39ae036bfa222bcaefa9a13cb5760b6523833387",
+      "patched_ref": "9a6ada97e2c6cf1ce31727c6c9fcea17c21f6f06",
+      "target_paths": ["aiohttp/formdata.py"],
+      "sink_probe": "headers[hdrs.CONTENT_TYPE] = content_type",
+      "sink": "FormData assigns a caller-supplied content_type into headers without rejecting CR/LF",
+      "patched_shape": "raise ValueError when content_type contains CR or LF before assignment",
+      "cwe": "CWE-113",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-24489",
+      "package": "gakido",
+      "status": "dropped",
+      "drop_reason": "fix sanitizes name/value at merge time with no changed header-serialization sink line; a serialize-or-Set-Cookie rule cannot line-precisely discriminate it"
+    },
+    {
+      "cve": "CVE-2026-41683",
+      "package": "i18next-http-middleware",
+      "status": "dropped",
+      "drop_reason": "JavaScript Content-Language sanitization; current detector is Python-only"
+    },
+    {
+      "cve": "CVE-2026-48596",
+      "package": "tesla",
+      "status": "dropped",
+      "drop_reason": "Elixir multipart Content-Type param validation; current detector is Python-only"
+    }
+  ]
+}
