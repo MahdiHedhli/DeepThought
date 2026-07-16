@@ -198,52 +198,7 @@ The platform is the spine. The [`vuln-rediscovery`](skills/vuln-rediscovery/) sk
 
 Each detector is calibrated against a **seed CVE** and evaluated against **held-out CVEs it was never tuned on**. Testing uses real package source pinned to vulnerable and patched commit SHAs, not synthetic fixtures. The goal is a detector for the vulnerability *class*, never a signature for one CVE.
 
-Twelve deterministic classes are measured today. Every number is meant to be honest: unresolvable CVEs are dropped with a recorded reason, misclassified seeds are corrected, and misses become improvement fixtures rather than disappearing into a slide deck.
-
-<div align="center">
-
-<img src="docs/assets/rediscovery-classes.svg" alt="Held-out generalization by class" width="820">
-
-<img src="docs/assets/rediscovery-curve.svg" alt="The honest curve: mean generalization v1 to v12" width="820">
-
-</div>
-
-| Class | Detector | Language | Held-out |
-|---|---|---|:--:|
-| Deserialization · CWE-502 | `DT-DESERIAL` | JS · Python · Java | **3/3** |
-| LDAP injection · CWE-90 | `DT-LDAP-FILTER` | Java · Python · PHP | **3/3** |
-| Open redirect · CWE-601 | `DT-OPEN-REDIRECT` | Python | **3/3** |
-| SSTI · CWE-1336 | `DT-SSTI-TEMPLATE` | Python · JS | **4/4** |
-| CRLF injection · CWE-113 | `DT-CRLF-HEADER` | Python · Go | **3/3** |
-| SSRF · CWE-918 | `DT-SSRF-TAINT` | Python | **3/4** |
-| Command injection · CWE-78 | `DT-CMDI-EXEC` | JS · Python | **3/4** |
-| Prototype pollution · CWE-1321 | `DT-PP-MERGE` | JavaScript | **2/3** |
-| Path traversal · CWE-22 | `DT-PATH-TRAVERSAL` | JS · Python | **2/3** |
-| SQL injection · CWE-89 | `DT-SQLI-QUERY` | Python · PHP | **2/3** |
-| NoSQL injection · CWE-943 | `DT-NOSQL-OP` | JS · Python | **2/3** |
-| XXE · CWE-611 | `DT-XXE-PARSER` | Java · Python | **1/3** |
-
-**Mean held-out generalization: 79.2%** across twelve classes, versioned under a regression bar (no class rate may drop when a new one lands). XXE sits at an honest 1/3 — its fixes disable DTD processing in configuration, which a line-precise static rule legitimately cannot always discriminate. That ceiling is reported, not hidden.
-
-See the [benchmark report](benchmarks/deep-thought-benchmark.md), [rediscovery corpus](benchmarks/rediscovery-corpus.md), and versioned [generalization log](benchmarks/data/generalization-log.json).
-
-```bash
-DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_xxe.py
-```
-
-### A field note: does the benchmark hold up across models?
-
-The harness is model-agnostic, so we ran the same rediscovery task through several frontier models (Claude Opus 4.8 and Sonnet 5, GPT-5.6-Sol via Codex, Grok 4.5, and Gemini 3.1 Pro) under two conditions. It surfaced a methodology result worth stating plainly:
-
-<div align="center">
-
-<img src="docs/assets/model-standardization.svg" alt="Self-curated held-out vs a blind fixed corpus" width="820">
-
-</div>
-
-When a model **curates its own held-out set**, generalization looks strong (≈ 80–90%). When the *same* detectors are graded against a **fixed, hidden corpus the model never saw** — with train (seed) and test (held-out) cleanly separated — real single-seed generalization drops roughly **four-fold**, to ≈ 20%. Letting the graded party pick the test set inflates the score.
-
-Read this as a **floor on single-seed generalization and a caution about self-graded benchmarks**, not a model leaderboard. The absolute numbers come from a small, caveated internal corpus; reasoning-effort settings differ per harness; and one model declined the task on safety-policy grounds rather than engaging. The point that survives all of that: **a fixed corpus with hidden held-out is the honest way to measure**, and it is how DeepThought’s own numbers above are produced.
+> **Early experiments.** The generalization numbers, the honest curve, and a rough cross-model field note are **preliminary** — they live in **[docs/experiments.md](docs/experiments.md)** and should be read as directional signals, not settled benchmarks. Twelve classes are measured today at a preliminary mean of **~79% held-out generalization**, versioned under a regression bar (no class rate may drop when a new one lands). XXE sits at an honest 1/3 and that ceiling is reported, not hidden; unresolvable CVEs are dropped with a reason; misses become regression fixtures.
 
 ## Research memory
 
