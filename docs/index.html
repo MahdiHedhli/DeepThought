@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepThought — The answer is probably a vulnerability</title>
+<meta name="description" content="A governed harness for autonomous vulnerability research. Maps software, develops hypotheses, verifies findings under human control, and preserves durable research memory.">
+<meta property="og:title" content="DeepThought — The answer is probably a vulnerability">
+<meta property="og:description" content="Autonomous security research for a mostly insecure galaxy. Don't panic. Verify.">
+<meta property="og:image" content="assets/hero.png">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23080C14'/><text x='50' y='72' font-size='58' font-family='monospace' font-weight='700' fill='%23D8C9A7' text-anchor='middle'>42</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --void:#080C14; --surf:#111A28; --surf2:#0d1521;
+    --green:#B7F34A; --cyan:#45D6D0; --mag:#D05BFF; --sand:#D8C9A7;
+    --coral:#FF6B62; --gray:#7F8A9A; --white:#EDF3F7;
+    --line:#1c2839;
+    --disp:'Space Grotesk',system-ui,sans-serif; --body:'Inter',system-ui,sans-serif;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--void);color:var(--white);font-family:var(--body);
+    line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden;
+    background-image:radial-gradient(1px 1px at 20% 30%,rgba(215,201,167,.4),transparent),
+      radial-gradient(1px 1px at 70% 20%,rgba(69,214,208,.35),transparent),
+      radial-gradient(1px 1px at 85% 60%,rgba(183,243,74,.3),transparent),
+      radial-gradient(1px 1px at 40% 80%,rgba(215,201,167,.35),transparent),
+      radial-gradient(1px 1px at 15% 70%,rgba(208,91,255,.3),transparent),
+      radial-gradient(1200px 600px at 80% -10%,rgba(69,214,208,.06),transparent);
+    background-attachment:fixed;}
+  a{color:var(--cyan);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 24px}
+  .mono{font-family:var(--mono)}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+  h1,h2,h3{font-family:var(--disp);line-height:1.15;letter-spacing:-.01em}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:20;backdrop-filter:blur(10px);
+    background:rgba(8,12,20,.72);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;gap:22px;height:60px}
+  .brand{display:flex;align-items:center;gap:10px;font-family:var(--disp);font-weight:700;font-size:18px}
+  .brand img{width:30px;height:30px;border-radius:7px}
+  .brand b{color:var(--green)}
+  nav .links{margin-left:auto;display:flex;gap:20px;font-size:14px}
+  nav .links a{color:var(--gray)} nav .links a:hover{color:var(--white);text-decoration:none}
+  .btn{display:inline-block;padding:10px 18px;border-radius:9px;font-weight:600;font-size:14px;
+    border:1px solid var(--line);color:var(--white);transition:.15s}
+  .btn:hover{text-decoration:none;border-color:var(--green);transform:translateY(-1px)}
+  .btn.pri{background:var(--green);color:#0a1400;border-color:var(--green)}
+  .btn.pri:hover{filter:brightness(1.08)}
+
+  /* hero */
+  header{padding:70px 0 40px;text-align:center;position:relative}
+  header img.hero{width:100%;max-width:900px;border-radius:16px;border:1px solid var(--line);
+    box-shadow:0 30px 80px -30px rgba(69,214,208,.25)}
+  .eyebrow{font-family:var(--mono);color:var(--green);font-size:13px;letter-spacing:.18em;text-transform:uppercase}
+  header h1{font-size:clamp(40px,7vw,76px);margin:14px 0 6px}
+  header h1 b{color:var(--green)}
+  .tag{font-family:var(--disp);font-weight:600;font-size:clamp(17px,2.4vw,22px);color:var(--sand)}
+  .sub{max-width:640px;margin:16px auto 26px;color:#c3ccd6}
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+  .maxim{margin-top:24px;font-family:var(--mono);font-size:13px;color:var(--gray)}
+  .maxim b{color:var(--coral)}
+
+  section{padding:56px 0;border-top:1px solid var(--line)}
+  .kicker{font-family:var(--mono);color:var(--cyan);font-size:12px;letter-spacing:.16em;text-transform:uppercase;margin-bottom:10px}
+  section h2{font-size:clamp(26px,4vw,36px);margin:0 0 8px}
+  .lead{color:#c3ccd6;max-width:720px;margin-bottom:28px}
+
+  .grid{display:grid;gap:16px}
+  .g5{grid-template-columns:repeat(5,1fr)}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .g2{grid-template-columns:1fr 1fr}
+  .card{background:linear-gradient(180deg,var(--surf),var(--surf2));border:1px solid var(--line);
+    border-radius:14px;padding:20px}
+  .card h3{font-size:15px;margin:10px 0 4px;font-family:var(--disp)}
+  .card p{margin:0;font-size:13.5px;color:var(--gray)}
+  .ico{width:34px;height:34px;display:grid;place-items:center;border-radius:9px;
+    background:rgba(183,243,74,.08);border:1px solid var(--line);color:var(--green);font-size:18px}
+
+  /* lifecycle */
+  .life{display:flex;gap:8px;flex-wrap:wrap}
+  .step{flex:1;min-width:130px;background:var(--surf);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .step .dot{width:10px;height:10px;border-radius:50%;margin-bottom:8px}
+  .step h4{margin:0 0 3px;font-size:13.5px;font-family:var(--disp)}
+  .step p{margin:0;font-size:12px;color:var(--gray)}
+
+  /* do / don't */
+  .doblock ul{list-style:none;padding:0;margin:0}
+  .doblock li{padding:9px 0;border-bottom:1px dashed var(--line);font-size:14px;display:flex;gap:10px}
+  .doblock li:before{font-family:var(--mono);font-weight:700}
+  .can li:before{content:"✓";color:var(--green)}
+  .cant li:before{content:"✗";color:var(--coral)}
+
+  figure{margin:0 0 18px}
+  figure img{width:100%;border-radius:12px;display:block}
+  .stat{display:flex;gap:20px;flex-wrap:wrap;margin:6px 0 22px}
+  .stat div{background:var(--surf);border:1px solid var(--line);border-radius:12px;padding:14px 20px}
+  .stat b{display:block;font-family:var(--mono);font-size:26px;color:var(--cyan)}
+  .stat span{font-size:12px;color:var(--gray)}
+
+  pre{background:#05080e;border:1px solid var(--line);border-radius:12px;padding:18px 20px;overflow-x:auto;
+    font-family:var(--mono);font-size:13px;color:#cdd6df;line-height:1.7}
+  pre .c{color:var(--gray)} pre .g{color:var(--green)} pre .y{color:var(--sand)}
+  .note{background:rgba(255,107,98,.06);border:1px solid rgba(255,107,98,.3);border-radius:12px;
+    padding:16px 18px;font-size:13.5px;color:#e7d3d1}
+  .note b{color:var(--coral)}
+
+  footer{border-top:1px solid var(--line);padding:44px 0;text-align:center;color:var(--gray);font-size:13.5px}
+  footer img{width:56px;margin-bottom:14px;opacity:.9}
+  footer .big{font-family:var(--disp);font-weight:600;color:var(--sand);font-size:16px;margin:6px 0}
+  .tags{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:16px}
+  .tags span{font-family:var(--mono);font-size:11px;color:var(--gray);border:1px solid var(--line);
+    border-radius:20px;padding:4px 12px}
+
+  @media(max-width:820px){.g5,.g3,.g2{grid-template-columns:1fr 1fr}nav .links{display:none}}
+  @media(max-width:520px){.g5,.g3,.g2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <span class="brand"><img src="assets/logo.png" alt="">Deep<b>Thought</b></span>
+  <span class="links">
+    <a href="#what">What it does</a>
+    <a href="#safety">Safety</a>
+    <a href="#bench">Benchmark</a>
+    <a href="#start">Get started</a>
+  </span>
+  <a class="btn" href="https://github.com/MahdiHedhli/DeepThought">GitHub ↗</a>
+</div></nav>
+
+<header><div class="wrap">
+  <h1 class="sr-only">DeepThought — the answer is probably a vulnerability. Autonomous security research for a mostly insecure galaxy.</h1>
+  <img class="hero" src="assets/hero.png" alt="DeepThought — the answer is probably a vulnerability. Autonomous vulnerability research for a mostly insecure galaxy. Map attack surfaces, hypothesize improbable ideas, verify with evidence, document for humans, preserve what matters.">
+  <p class="sub">A governed harness for autonomous vulnerability research — it maps unfamiliar software, develops hypotheses, verifies findings under human control, and preserves everything useful for the next research session.</p>
+  <div class="cta">
+    <a class="btn pri" href="#start">Get started</a>
+    <a class="btn" href="https://github.com/MahdiHedhli/DeepThought">View on GitHub</a>
+    <a class="btn" href="#bench">See the benchmark</a>
+  </div>
+  <div class="maxim"><b>Don’t panic.</b> Verify.</div>
+</div></header>
+
+<section id="what"><div class="wrap">
+  <div class="kicker">The Guide, in five moves</div>
+  <h2>Bounded autonomy for unbounded curiosity</h2>
+  <p class="lead">Give it an authorized target, a defined scope, and an objective. It investigates until it reaches evidence, a safety gate, or the limit of its budget — independently, without becoming recklessly independent.</p>
+  <div class="grid g5">
+    <div class="card"><div class="ico">◎</div><h3>Map</h3><p>Attack surfaces and trust boundaries.</p></div>
+    <div class="card"><div class="ico">✦</div><h3>Hypothesize</h3><p>Generate and prioritize improbable ideas.</p></div>
+    <div class="card"><div class="ico">⛨</div><h3>Verify</h3><p>Reproduce in controlled environments.</p></div>
+    <div class="card"><div class="ico">▤</div><h3>Document</h3><p>Prepare disclosure-ready evidence.</p></div>
+    <div class="card"><div class="ico">⛁</div><h3>Preserve</h3><p>Durable memory for better research.</p></div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <div class="kicker">The research lifecycle</div>
+  <h2>A candidate is not a finding</h2>
+  <p class="lead">Formal machine-readable states drive standards compatibility. The Guide translates them for humans — the playful names never replace the precise records.</p>
+  <div class="life">
+    <div class="step"><div class="dot" style="background:var(--mag)"></div><h4>A Suspicion</h4><p>Initial observation or candidate</p></div>
+    <div class="step"><div class="dot" style="background:var(--mag)"></div><h4>An Improbability</h4><p>Plausible vulnerability hypothesis</p></div>
+    <div class="step"><div class="dot" style="background:var(--green)"></div><h4>Under Consideration</h4><p>Active investigation</p></div>
+    <div class="step"><div class="dot" style="background:var(--sand)"></div><h4>Mostly Harmless</h4><p>Interesting, not exploitable yet</p></div>
+    <div class="step"><div class="dot" style="background:var(--cyan)"></div><h4>The Answer</h4><p>Verified with reproducible evidence</p></div>
+    <div class="step"><div class="dot" style="background:var(--gray)"></div><h4>Somebody Else’s Problem</h4><p>Out of scope, upstream, deferred</p></div>
+    <div class="step"><div class="dot" style="background:var(--coral)"></div><h4>Don’t Panic</h4><p>High-impact, needs human review</p></div>
+  </div>
+</div></section>
+
+<section id="safety"><div class="wrap">
+  <div class="kicker">Safety model</div>
+  <h2>Autonomy is a capability to be bounded, not a personality to be trusted</h2>
+  <div class="grid g2" style="margin-top:22px">
+    <div class="card doblock can">
+      <h3 style="color:var(--green)">What it does</h3>
+      <ul>
+        <li>Maps systems and generates prioritized vulnerability hypotheses</li>
+        <li>Coordinates bounded specialist workers behind a typed envelope firewall</li>
+        <li>Verifies candidates in a sandbox — behind an explicit human stop</li>
+        <li>Preserves durable, portable research memory across sessions and harnesses</li>
+        <li>Prepares SARIF, OSV, CSAF, OpenVEX, and CVE 5.1 artifacts</li>
+      </ul>
+    </div>
+    <div class="card doblock cant">
+      <h3 style="color:var(--coral)">What it does not do</h3>
+      <ul>
+        <li>Authorize itself or silently expand its own scope</li>
+        <li>Execute untrusted target code without explicit human approval</li>
+        <li>Transmit a disclosure — drafting belongs to the machine, sending to a person</li>
+        <li>Declare a finding verified without reproducible evidence</li>
+        <li>Explain why developers keep deserializing untrusted input</li>
+      </ul>
+    </div>
+  </div>
+  <p class="lead" style="margin-top:22px">Unsafe input becomes a controlled refusal, not an accidental adventure.</p>
+</div></section>
+
+<section id="bench"><div class="wrap">
+  <div class="kicker">Vulnerability rediscovery</div>
+  <h2>Every number is meant to be honest</h2>
+  <p class="lead">Each detector is calibrated on a <b style="color:var(--sand)">seed CVE</b> and graded on <b style="color:var(--sand)">held-out CVEs it never saw</b> — real package source at pinned vulnerable and patched SHAs, not synthetic fixtures. The goal is a detector for the vulnerability class, never a signature for one CVE.</p>
+  <div class="stat">
+    <div><b>12</b><span>deterministic classes measured</span></div>
+    <div><b>79.2%</b><span>mean held-out generalization</span></div>
+    <div><b>SHA-pinned</b><span>real code, line-precise</span></div>
+  </div>
+  <figure><img src="assets/rediscovery-classes.svg" alt="Held-out generalization by vulnerability class"></figure>
+  <figure><img src="assets/rediscovery-curve.svg" alt="The honest curve, v1 to v12"></figure>
+  <p class="lead">XXE sits at an honest 1/3 — its fixes disable DTD processing in configuration, which a line-precise static rule legitimately cannot always discriminate. The ceiling is reported, not hidden. Unresolvable CVEs are dropped with a reason; misses become regression fixtures.</p>
+
+  <h3 style="margin-top:38px;font-size:22px">A field note: does the benchmark hold up across models?</h3>
+  <p class="lead">The harness is model-agnostic, so the same task was run through several frontier models under two conditions. It surfaced a methodology result worth stating plainly.</p>
+  <figure><img src="assets/model-standardization.svg" alt="Self-curated held-out versus a blind fixed corpus"></figure>
+  <p class="lead">When a model <b style="color:var(--mag)">curates its own held-out set</b>, generalization looks strong (≈ 80–90%). When the same detectors are graded against a <b style="color:var(--cyan)">fixed, hidden corpus the model never saw</b> — train and test cleanly separated — real single-seed generalization drops roughly <b style="color:var(--white)">four-fold</b>, to ≈ 20%. Letting the graded party pick the test set inflates the score.</p>
+  <div class="note"><b>Read carefully.</b> This is a floor on single-seed generalization and a caution about self-graded benchmarks — not a model leaderboard. The absolute numbers come from a small, caveated internal corpus, reasoning-effort settings differ per harness, and one model declined the task on safety-policy grounds rather than engaging. What survives all of it: a fixed corpus with hidden held-out is the honest way to measure — and it is how DeepThought’s own numbers are produced.</div>
+</div></section>
+
+<section id="start"><div class="wrap">
+  <div class="kicker">Get started</div>
+  <h2>The Guide, in three verbs</h2>
+  <p class="lead">Install, register an authorized target, validate the store, and prepare local artifacts. Nothing is transmitted.</p>
+<pre><span class="c"># install</span>
+git clone https://github.com/MahdiHedhli/DeepThought.git
+cd DeepThought
+uv venv --python 3.12 .venv
+uv pip install --python .venv -e <span class="y">".[dev]"</span>
+
+<span class="c"># run a typed research session</span>
+.venv/bin/<span class="g">deepthought</span> playbook new-project --name <span class="y">"PHP src"</span> \
+  --git-url https://github.com/php/php-src --basis permissive_oss --scope ext/soap
+
+<span class="c"># validate state, schemas, lifecycle, conformance</span>
+.venv/bin/<span class="g">deepthought</span> check
+
+<span class="c"># emit prepared local artifacts — transmit nothing</span>
+.venv/bin/<span class="g">deepthought</span> publish</pre>
+  <p class="lead" style="margin-top:20px"><a class="btn pri" href="https://github.com/MahdiHedhli/DeepThought">Read the full README ↗</a></p>
+</div></section>
+
+<footer><div class="wrap">
+  <img src="assets/logo.png" alt="DeepThought 42">
+  <div class="big">The universe is large. The attack surface is larger.</div>
+  <div>So long, and thanks for all the bugs.</div>
+  <div class="tags">
+    <span>Governed autonomy</span><span>Evidence over alerts</span><span>Human gates</span>
+    <span>Durable memory</span><span>Don’t panic. Verify.</span>
+  </div>
+  <div style="margin-top:16px">Apache-2.0 · Built for humans. Run by engines. Governed by you.</div>
+</div></footer>
+
+</body>
+</html>

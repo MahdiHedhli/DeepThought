@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 380" font-family="'Space Grotesk','Geist Sans',system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="820" height="380" rx="14" fill="#080C14"/>
+<rect x="1" y="1" width="818" height="378" rx="13" fill="none" stroke="#111A28" stroke-width="2"/>
+<text x="34" y="40" fill="#EDF3F7" font-size="21" font-weight="700">Why standardization matters</text>
+<text x="34" y="61" fill="#7F8A9A" font-size="13" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">same task. self-picked held-out inflated the score ~4x vs a blind, fixed corpus.</text>
+<line x1="64" y1="310" x2="790" y2="310" stroke="#111A28" stroke-width="1"/>
+<text x="56" y="313" fill="#7F8A9A" font-size="10" text-anchor="end" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">0%</text>
+<line x1="64" y1="256" x2="790" y2="256" stroke="#111A28" stroke-width="1"/>
+<text x="56" y="260" fill="#7F8A9A" font-size="10" text-anchor="end" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">25%</text>
+<line x1="64" y1="203" x2="790" y2="203" stroke="#111A28" stroke-width="1"/>
+<text x="56" y="206" fill="#7F8A9A" font-size="10" text-anchor="end" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">50%</text>
+<line x1="64" y1="150" x2="790" y2="150" stroke="#111A28" stroke-width="1"/>
+<text x="56" y="152" fill="#7F8A9A" font-size="10" text-anchor="end" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">75%</text>
+<line x1="64" y1="96" x2="790" y2="96" stroke="#111A28" stroke-width="1"/>
+<text x="56" y="99" fill="#7F8A9A" font-size="10" text-anchor="end" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">100%</text>
+<rect x="70" y="120" width="140" height="190" rx="4" fill="#D05BFF" opacity="0.85"/>
+<text x="140.0" y="110" fill="#D05BFF" font-size="17" font-weight="700" text-anchor="middle" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">88.9%</text>
+<text x="140.0" y="330" fill="#EDF3F7" font-size="12" text-anchor="middle">Grok 4.5</text>
+<text x="140.0" y="345" fill="#7F8A9A" font-size="10.5" text-anchor="middle">(self-curated)</text>
+<rect x="254" y="133" width="140" height="177" rx="4" fill="#D05BFF" opacity="0.85"/>
+<text x="324.0" y="123" fill="#D05BFF" font-size="17" font-weight="700" text-anchor="middle" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">82.5%</text>
+<text x="324.0" y="330" fill="#EDF3F7" font-size="12" text-anchor="middle">Sonnet 5</text>
+<text x="324.0" y="345" fill="#7F8A9A" font-size="10.5" text-anchor="middle">(self-curated)</text>
+<rect x="438" y="265" width="140" height="45" rx="4" fill="#45D6D0" opacity="0.85"/>
+<text x="508.0" y="255" fill="#45D6D0" font-size="17" font-weight="700" text-anchor="middle" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">21.2%</text>
+<text x="508.0" y="330" fill="#EDF3F7" font-size="12" text-anchor="middle">Codex 5.6</text>
+<text x="508.0" y="345" fill="#7F8A9A" font-size="10.5" text-anchor="middle">(blind corpus)</text>
+<rect x="622" y="271" width="140" height="39" rx="4" fill="#45D6D0" opacity="0.85"/>
+<text x="692.0" y="261" fill="#45D6D0" font-size="17" font-weight="700" text-anchor="middle" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">18.2%</text>
+<text x="692.0" y="330" fill="#EDF3F7" font-size="12" text-anchor="middle">Opus 4.8</text>
+<text x="692.0" y="345" fill="#7F8A9A" font-size="10.5" text-anchor="middle">(blind corpus)</text>
+<line x1="416" y1="90" x2="416" y2="318" stroke="#7F8A9A" stroke-width="1" stroke-dasharray="3 4" opacity="0.6"/>
+<text x="34" y="364" fill="#D8C9A7" font-size="11" font-family="'JetBrains Mono','Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace">Read as a floor on single-seed generalization, not a ranking. Effort knobs differ per harness.</text>
+</svg>
