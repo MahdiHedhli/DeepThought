@@ -1,0 +1,94 @@
+{
+  "bug_class": "ssti",
+  "cwe": "CWE-1336",
+  "detector": "DT-SSTI-TEMPLATE",
+  "tier": "deterministic",
+  "language": "python",
+  "reproducibility": "real repositories at pinned SHAs; line-precise; pin-or-drop",
+  "seed": {
+    "cve": "CVE-2026-44209",
+    "package": "banks",
+    "repo": "https://github.com/masci/banks",
+    "vuln_ref": "4c14c9c3673fcf310232c1feb2e2d592e3be69a6",
+    "patched_ref": "bcb9d5af64ea3e36a881c94466549b4742ce97a7",
+    "target_paths": ["src/banks/env.py"],
+    "sink_probe": "env = Environment(",
+    "sink": "module-level Jinja2 Environment constructed from jinja2.Environment without a sandbox",
+    "patched_shape": "Environment is rebound to jinja2.sandbox.SandboxedEnvironment via import alias",
+    "cwe": "CWE-1336",
+    "status": "pinned"
+  },
+  "heldout": [
+    {
+      "cve": "CVE-2026-42203",
+      "package": "litellm",
+      "repo": "https://github.com/BerriAI/litellm",
+      "vuln_ref": "c94a8d6514936164ef869a6dda8bb7897b3958c2",
+      "patched_ref": "de28a4f352bd5f1267973615e4ddbac6742630c2",
+      "target_paths": [
+        "litellm/integrations/gitlab/gitlab_prompt_manager.py",
+        "litellm/integrations/arize/arize_phoenix_prompt_manager.py",
+        "litellm/integrations/bitbucket/bitbucket_prompt_manager.py"
+      ],
+      "sink_probe": "self.jinja_env = Environment(",
+      "sink": "prompt managers build an unsandboxed Jinja Environment for repository-sourced templates",
+      "patched_shape": "each manager constructs ImmutableSandboxedEnvironment instead",
+      "cwe": "CWE-1336",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2026-40602",
+      "package": "homeassistant-cli",
+      "repo": "https://github.com/home-assistant-ecosystem/home-assistant-cli",
+      "vuln_ref": "eb7bd19f18d2350a3bef0d41554883fd99427c3b",
+      "patched_ref": "9beac2206a053fe4ccbce25c1916e561dd3d619e",
+      "target_paths": ["homeassistant_cli/plugins/template.py"],
+      "sink_probe": "env = Environment(",
+      "sink": "local template render builds a plain Jinja Environment for a user-supplied file",
+      "patched_shape": "render uses ImmutableSandboxedEnvironment and an allowlisted environ getter",
+      "cwe": "CWE-1336",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2024-41950",
+      "package": "haystack-ai",
+      "repo": "https://github.com/deepset-ai/haystack",
+      "vuln_ref": "47f4db8698a65f2866bac8ff347e1b8b746e39aa",
+      "patched_ref": "3fed1366c448b02189851bf08166c1f6477a02b0",
+      "target_paths": [
+        "haystack/components/builders/prompt_builder.py",
+        "haystack/components/builders/chat_prompt_builder.py"
+      ],
+      "sink_probe": "self.template = Template(template)",
+      "sink": "PromptBuilder constructs a plain jinja2.Template from template source",
+      "patched_shape": "SandboxedEnvironment owns from_string / parse for all template compilation",
+      "cwe": "CWE-1336",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2025-49619",
+      "package": "skyvern",
+      "repo": "https://github.com/Skyvern-AI/skyvern",
+      "vuln_ref": "4905c03fd593b5ee86499a2342e97d818c26fbcb",
+      "patched_ref": "db856cd8433a204c8b45979c70a4da1e119d949d",
+      "target_paths": ["skyvern/forge/sdk/workflow/models/block.py"],
+      "sink_probe": "template = Template(potential_template)",
+      "sink": "workflow block rendering constructs jinja2.Template on potential template text",
+      "patched_shape": "a module-level SandboxedEnvironment.from_string replaces Template()",
+      "cwe": "CWE-1336",
+      "status": "pinned"
+    },
+    {
+      "cve": "CVE-2025-25362",
+      "package": "spacy-llm",
+      "status": "dropped",
+      "drop_reason": "authoritative NVD weakness is CWE-94, not CWE-1336; verify-at-build seed/held-out contract requires matching class CWE"
+    },
+    {
+      "cve": "CVE-2026-27641",
+      "package": "Flask-Reuploaded",
+      "status": "dropped",
+      "drop_reason": "security fix is path-traversal/extension sanitization in upload naming, not a visible Jinja SSTI sink swap"
+    }
+  ]
+}
