@@ -1,266 +1,353 @@
-# Deep Thought
+<div align="center">
 
-**An autonomous vulnerability research harness for discovering deeply improbable security problems.**
+<img src="docs/assets/hero.png" alt="DeepThought — the answer is probably a vulnerability" width="880">
 
-Deep Thought runs typed agent sessions that discover, map, verify, and prepare
-disclosure for vulnerabilities, keeping every result in a durable,
-version-controlled knowledge base. An autonomous loop is only safe behind gates,
-so authorization, scope, sandboxing, and a strict finding lifecycle are
-non-negotiable and live in a constitution the platform enforces.
+<h1>DeepThought</h1>
 
-It began as **feature 001, the platform spine**: durable file-based state, a
-typed Agent Session Protocol, an orchestrator-plus-workers execution model, and
-the three operator verbs. Later features add capability behind their own gates —
-each proven test-first and merged only after an independent adversarial review.
-Shipped so far:
+### The answer is probably a vulnerability.
 
-| Feature | Session / capability | Risk posture |
-|---|---|---|
-| **001** | `NEW PROJECT`, `STATUS` — the spine | read-only |
-| **002** | `MAP`, `DISCOVER` — static reasoning → candidate findings | read-only |
-| **003** | `VERIFY` — sandboxed reproduction | execution behind a hard stop; `NoopSandbox` dry-run only, real execution needs sign-off |
-| **004** | `SIBLING HUNT` — cross-project variant analysis | read-only |
-| **005** | `DISCLOSURE` — draft advisory + CVE + CSAF + OpenVEX | **draft-only; transmits nothing** |
-| **006** | `loop` — autonomous driver + limit awareness | **bounded & gated; escalates the hard stops** |
+**Autonomous security research for a mostly insecure galaxy.**
 
-No untrusted target code executes without an explicit human sign-off, and no
-disclosure ever leaves the machine — drafting is done by an agent, sending by a
-person (Constitution Article V). The autonomous loop (feature 006) chains the
-safe, read-only, draft-only sessions behind the same gates: it runs only under an
-explicit budget, cannot expand its own scope, and advances work up to the
-target-execution and disclosure-transmission hard stops, then hands them to a
-human.
+DeepThought is a governed harness for autonomous vulnerability research. It maps unfamiliar software, develops hypotheses, follows improbable leads, coordinates specialized workers, preserves durable research memory, and prepares evidence-backed findings for human review.
 
-> Built with GitHub Spec Kit. Intent is the source of truth (`specs/`,
-> `.specify/memory/constitution.md`); the platform is the regenerated output.
+**Don’t panic. Verify.**
+
+[![License](https://img.shields.io/badge/license-Apache--2.0-B7F34A?labelColor=080C14)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.12%2B-45D6D0?labelColor=080C14)](https://www.python.org/)
+[![Status](https://img.shields.io/badge/status-active%20research-D05BFF?labelColor=080C14)](#status)
+[![Verify](https://img.shields.io/badge/don't%20panic-verify-FF6B62?labelColor=080C14)](#safety-model)
+
+**[Read the field guide →](https://mahdihedhli.github.io/DeepThought/)**
+
+</div>
 
 ---
 
-## The three verbs
+## What is DeepThought?
 
-```
-deepthought playbook   # run the Agent Session Protocol for a session type; list findings
-deepthought check      # validate state: schema, lifecycle, orphans, identity, OSV/CSAF/OpenVEX conformance
-deepthought publish    # emit prepared local artifacts, assert the human gate, transmit nothing
+Give DeepThought an authorized target, a defined scope, and a research objective. It will investigate the software autonomously until it reaches one of three things:
+
+1. evidence,
+2. a safety gate,
+3. or the limits of its budget.
+
+It is designed to operate independently without becoming recklessly independent, which is an important distinction in both security research and intergalactic travel.
+
+DeepThought can:
+
+- map attack surfaces and trust boundaries
+- generate and prioritize vulnerability hypotheses
+- coordinate bounded specialist workers
+- ingest SARIF and maintain a strict finding lifecycle
+- investigate sibling and variant vulnerabilities
+- verify candidates in controlled environments
+- preserve research knowledge across sessions and AI harnesses
+- prepare advisory, CVE, CSAF, OpenVEX, and OSV artifacts
+- stop when authorization, scope, evidence, or budget runs out
+
+DeepThought cannot:
+
+- authorize itself
+- silently expand its own scope
+- execute untrusted target code without explicit human approval
+- transmit a disclosure
+- declare a finding verified without evidence
+- explain why developers keep deserializing untrusted input
+
+> **Many hypotheses enter. Only evidence survives.**
+
+## Why DeepThought exists
+
+Most autonomous security tools are optimized to produce more alerts. DeepThought is designed to produce better research.
+
+The platform separates candidates from verified findings, keeps execution and disclosure behind hard human stops, records negative results, and preserves the reasoning that made each investigation useful. A missed hypothesis remains a lesson. A failed detector remains a regression fixture. A worker result remains data, not authority.
+
+The objective is not maximum activity. It is defensible discovery.
+
+## Current capabilities
+
+| Feature | Session or capability | Risk posture |
+|---|---|---|
+| **001** | `NEW PROJECT`, `STATUS` | Read-only platform spine |
+| **002** | `MAP`, `DISCOVER` | Static reasoning to candidate findings |
+| **003** | `VERIFY` | Sandboxed reproduction behind a hard stop |
+| **004** | `SIBLING HUNT` | Read-only cross-project variant analysis |
+| **005** | `DISCLOSURE` | Draft-only advisory, CVE, CSAF, and OpenVEX |
+| **006** | `loop` | Bounded autonomous driver that escalates hard stops |
+
+No untrusted target code executes without explicit human sign-off. No disclosure leaves the machine. The autonomous loop can chain safe, read-only, and draft-only work under a fixed budget, but it cannot expand scope, authorize execution, or send a disclosure.
+
+## The Guide, in three verbs
+
+```bash
+deepthought playbook   # run a typed research session
+deepthought check      # validate state, schemas, lifecycle, and conformance
+deepthought publish    # emit prepared local artifacts; transmit nothing
 ```
 
-`playbook` fans out to the typed sessions:
+Available playbooks:
 
-```
-deepthought playbook new-project ...                                   # register a target (gate: basis + scope)
-deepthought playbook status  --project <id>
-deepthought playbook map     --project <id>                            # 002, read-only coverage
-deepthought playbook discover --project <id> [--sarif <path>]          # 002, candidate findings
-deepthought playbook verify  --project <id> --finding <F-NNNN>         # 003, NoopSandbox dry-run (no execution)
-deepthought playbook sibling-hunt --project <id> --finding <F-NNNN> [--sibling <id> ...]  # 004, read-only variants
-deepthought playbook disclose --project <id> --finding <F-NNNN>        # 005, draft-only advisory/CVE/CSAF/OpenVEX
-deepthought publish --format osv|csaf|openvex|cve-draft|advisory|all   # local artifacts only
+```bash
+deepthought playbook new-project ...
+deepthought playbook status --project <id>
+deepthought playbook map --project <id>
+deepthought playbook discover --project <id> [--sarif <path>]
+deepthought playbook verify --project <id> --finding <F-NNNN>
+deepthought playbook sibling-hunt --project <id> --finding <F-NNNN> [--sibling <id> ...]
+deepthought playbook disclose --project <id> --finding <F-NNNN>
 ```
 
-`loop` is the autonomous driver (feature 006) — it runs the safe chain above
-behind the gates, under an explicit budget, and escalates the hard stops:
+The bounded autonomous driver:
 
+```bash
+deepthought loop \
+  --project <id> \
+  --max-sessions N \
+  [--max-seconds S] \
+  [--max-tokens T]
 ```
-deepthought loop --project <id> --max-sessions N [--max-seconds S] [--max-tokens T]
-# deterministic: status -> map -> discover -> sibling-hunt/disclose (per verified finding),
-# then stops (fixed point / budget / gate). Never runs NEW PROJECT or VERIFY: a candidate
-# needing real reproduction, and a disclosure needing to be sent, are escalated to a human.
-```
+
+The loop advances safe work until it reaches a fixed point, exhausts its budget, or encounters a gate. `NEW PROJECT`, real target execution, scope expansion, and disclosure transmission remain human decisions.
 
 ## Quickstart
 
+Requirements:
+
+- Python 3.12+
+- [`uv`](https://docs.astral.sh/uv/)
+- an authorized research target
+- a healthy skepticism of apparently harmless input
+
 ```bash
+git clone https://github.com/MahdiHedhli/DeepThought.git
+cd DeepThought
+
 uv venv --python 3.12 .venv
 uv pip install --python .venv -e ".[dev]"
+```
 
-# 1. Register a project (NEW PROJECT session). Authorization basis + scope required.
+Register a project, inspect it, validate the store, and prepare local artifacts:
+
+```bash
 .venv/bin/deepthought playbook new-project \
   --name "PHP src" --git-url https://github.com/php/php-src \
   --source-type open_source --basis permissive_oss \
   --scope ext/soap --scope ext/standard
 
-# 2. Summarize state (STATUS session). Changes no finding status.
 .venv/bin/deepthought playbook status --project php-src
-
-# 3. Validate the whole store. Hard gate before publish.
 .venv/bin/deepthought check
-
-# 4. Emit local artifacts. Nothing leaves the machine.
 .venv/bin/deepthought publish
 ```
 
-State lands as clean, reviewable Markdown under `state/`. Read the work from the
-repository alone.
+Nothing is transmitted. Drafting belongs to the machine. Sending belongs to a person.
 
-## Round 2 — the vuln-rediscovery skill
+## How the improbability is managed
 
-The platform is the spine; the **`vuln-rediscovery` skill** (`skills/vuln-rediscovery/`)
-is what runs on it. Each round calibrates one bug-class detector against a seed CVE and
-proves it **generalizes to held-out CVEs it was never tuned on** — measured on the *real
-package source at pinned vulnerable/patched commit SHAs*, not synthetic fixtures. The
-detector ships as a rule for the **class**, never a signature for the one CVE, and emits
-SARIF into the same DISCOVER ingest the platform already uses.
-
-The score is **held-out generalization**, versioned over time under a regression bar (no
-class's rate may drop). Measured to date:
-
-| # | Class (CWE) | Detector | Lang | Seed → held-out | Generalization |
-|---|---|---|---|---|---|
-| 1 | Prototype pollution (1321) | `DT-PP-MERGE` | JS (tree-sitter) | js-yaml → devalue, lodash, min-document | **2/3** |
-| 2 | SSRF (918) | `DT-SSRF-TAINT` | Python (ast taint) | dify → gradio, pydantic-ai, langchain, lmdeploy | **3/4** |
-| 3 | XXE (611) | `DT-XXE-PARSER` | Java + Python | tika → python-docx, dom4j, JDOM2 | **1/3** |
-| 4 | Path traversal (22) | `DT-PATH-TRAVERSAL` | JS + Python | decompress → adm-zip, aiohttp, NLTK | **2/3** |
-| 5 | Unsafe deserialization (502) | `DT-DESERIAL` | JS + Python + Java | serialize-to-js → Superset, suricata-update, Struts | **3/3** |
-| 7 | OS command injection (78) | `DT-CMDI-EXEC` | JS + Python | node-glob → cyclonedx, dulwich, ansys, aws-cdk | **3/4** |
-| 11 | SQL injection (89) | `DT-SQLI-QUERY` | Python + PHP + Velocity | Arches → OpenCart, Cacti, XWiki | **2/3** |
-| 12 | LDAP injection (90) | `DT-LDAP-FILTER` | Java + Python + PHP | Yamcs → mitmproxy, Airflow, Joomla | **3/3** |
-| 13 | Open redirect (601) | `DT-OPEN-REDIRECT` | Python | Archivy → Spirit, Grappelli, Jupyter | **3/3** |
-
-Every number is honest: unresolvable CVEs are **dropped-with-reason** (never counted as
-missed), **mis-classed corpus seeds are caught and swapped** by the verify-at-build
-contract (urllib3 was really an open redirect, CWE-601, not SSRF; the ReactRSC deser seed
-was a prototype-pollution-flavored mechanism), held-out sets are **re-curated to
-user-code-misuse** where the raw corpus was dominated by library-internal CVEs a user-code
-rule can't discriminate, and misses are documented as improvement-loop fixtures rather than
-hidden. The curve moves both ways honestly — 66.7% → 70.8% → 58.3% (XXE dip) → 62.5%
-(command injection) → 63.3% (path traversal) → 69.4% (deserialization) → **69.0%**
-(SQL injection) → **72.9%** (LDAP injection) → **75.9%** (open redirect) under a regression bar
-(`benchmarks/data/generalization-log.json`).
-See [`benchmarks/deep-thought-benchmark.md`](benchmarks/deep-thought-benchmark.md) and the
-[corpus](benchmarks/rediscovery-corpus.md). Six of the original ten classes plus three Round 3
-broad-surface classes are measured; ReDoS and the sandbox-tier memory-safety classes remain
-unbuilt.
-
-```bash
-# reproduce a class's held-out generalization on the real pinned trees (network)
-DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_open_redirect.py
+```text
+                     human operator
+                           │
+                  authorization + scope
+                           │
+                           ▼
+               ┌───────────────────────┐
+               │   DeepThought Core    │
+               │  primitive ledger     │
+               │  exploit graph        │
+               │  bounded session      │
+               └───────────┬───────────┘
+                           │ typed dispatch
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+          ┌────────┐   ┌────────┐   ┌────────┐
+          │ Marvin │   │ Marvin │   │ Marvin │
+          │ worker │   │ worker │   │ worker │
+          └────┬───┘   └────┬───┘   └────┬───┘
+               └────────────┼────────────┘
+                            │ distilled, length-capped envelopes
+                            ▼
+                  ┌─────────────────────┐
+                  │ Versioned Store     │
+                  │ findings · coverage │
+                  │ sessions · memory   │
+                  └─────────────────────┘
 ```
 
-## Agent memory — portable, self-contained, multi-agent
+Workers receive narrow tasks and keep their own detailed context. DeepThought Core receives only typed, length-capped envelopes. The envelope is both a coordination contract and an injection boundary: worker output is treated as untrusted data, validated against a schema, and denied the ability to become orchestration authority.
 
-Deep Thought carries its own memory so knowledge compounds across sessions **and across
-harnesses** (Claude Code, Codex, Cursor, a plain script). It is a plain-markdown, Obsidian-style
-vault — **no MCP, no external service**:
+The platform constitution lives at [`.specify/memory/constitution.md`](.specify/memory/constitution.md). Intent is the source of truth. The platform is the regenerated output.
 
-- **Mechanism in the repo** (committed, travels with every clone): [`memory/`](memory/) —
-  [`AGENTS.md`](memory/AGENTS.md) (the read/write protocol), [`mem.py`](memory/mem.py) (a
-  dependency-free CLI), and a template. **Data out of git** (gitignored): `memory/vault/` (the
-  notes) and `memory/backups/`. Open `memory/vault/` as an Obsidian vault to read it.
-- **Classified for scoped recall.** Notes are typed `user | feedback | lesson | project |
-  reference`. A `lesson` (knowledge distilled from doing the work) also carries `class` (the
-  attack class / CWE, or `methodology`/`sandbox`/`toolchain`), `tags` (surface/platform/
-  language), and an optional `harness` (`codex`/`claude`/… for a harness-specific quirk), so an
-  agent pulls **only** what it needs — `recall --class <attack> --tag <surface> --harness <you>` —
-  instead of the whole notebook. (Stable per-harness *setup* stays in the thin `CLAUDE.md` /
-  `AGENTS.md` pointers, not in memory.)
-- **Durable.** Every write is atomic (temp-file + `os.replace`); the vault auto-snapshots before
-  mutation; `backup`/`restore` give rotating, gitignored history — a failed write or corruption
-  never loses memory.
+## Finding lifecycle
+
+DeepThought keeps formal machine-readable states for standards compatibility. The Guide translates them for humans:
+
+| Guide language | Formal meaning |
+|---|---|
+| **A Suspicion** | Initial observation or candidate |
+| **An Improbability** | Plausible vulnerability hypothesis |
+| **Under Consideration** | Active investigation |
+| **Mostly Harmless** | Interesting but not currently proven exploitable |
+| **The Answer** | Verified with reproducible evidence |
+| **Somebody Else’s Problem** | Out of scope, upstream, environmental, or deferred |
+| **Don’t Panic** | High-impact condition requiring immediate human review |
+
+The playful names never replace the formal records. OSV, SARIF, CSAF, OpenVEX, CVE, and the audit trail remain precise.
+
+## Vulnerability rediscovery
+
+The platform is the spine. The [`vuln-rediscovery`](skills/vuln-rediscovery/) skill is one research program running on it.
+
+Each detector is calibrated against a **seed CVE** and evaluated against **held-out CVEs it was never tuned on**. Testing uses real package source pinned to vulnerable and patched commit SHAs, not synthetic fixtures. The goal is a detector for the vulnerability *class*, never a signature for one CVE.
+
+Twelve deterministic classes are measured today. Every number is meant to be honest: unresolvable CVEs are dropped with a recorded reason, misclassified seeds are corrected, and misses become improvement fixtures rather than disappearing into a slide deck.
+
+<div align="center">
+
+<img src="docs/assets/rediscovery-classes.svg" alt="Held-out generalization by class" width="820">
+
+<img src="docs/assets/rediscovery-curve.svg" alt="The honest curve: mean generalization v1 to v12" width="820">
+
+</div>
+
+| Class | Detector | Language | Held-out |
+|---|---|---|:--:|
+| Deserialization · CWE-502 | `DT-DESERIAL` | JS · Python · Java | **3/3** |
+| LDAP injection · CWE-90 | `DT-LDAP-FILTER` | Java · Python · PHP | **3/3** |
+| Open redirect · CWE-601 | `DT-OPEN-REDIRECT` | Python | **3/3** |
+| SSTI · CWE-1336 | `DT-SSTI-TEMPLATE` | Python · JS | **4/4** |
+| CRLF injection · CWE-113 | `DT-CRLF-HEADER` | Python · Go | **3/3** |
+| SSRF · CWE-918 | `DT-SSRF-TAINT` | Python | **3/4** |
+| Command injection · CWE-78 | `DT-CMDI-EXEC` | JS · Python | **3/4** |
+| Prototype pollution · CWE-1321 | `DT-PP-MERGE` | JavaScript | **2/3** |
+| Path traversal · CWE-22 | `DT-PATH-TRAVERSAL` | JS · Python | **2/3** |
+| SQL injection · CWE-89 | `DT-SQLI-QUERY` | Python · PHP | **2/3** |
+| NoSQL injection · CWE-943 | `DT-NOSQL-OP` | JS · Python | **2/3** |
+| XXE · CWE-611 | `DT-XXE-PARSER` | Java · Python | **1/3** |
+
+**Mean held-out generalization: 79.2%** across twelve classes, versioned under a regression bar (no class rate may drop when a new one lands). XXE sits at an honest 1/3 — its fixes disable DTD processing in configuration, which a line-precise static rule legitimately cannot always discriminate. That ceiling is reported, not hidden.
+
+See the [benchmark report](benchmarks/deep-thought-benchmark.md), [rediscovery corpus](benchmarks/rediscovery-corpus.md), and versioned [generalization log](benchmarks/data/generalization-log.json).
 
 ```bash
-python3 memory/mem.py backup                          # snapshot before writing (each session)
-python3 memory/mem.py recall --class methodology      # the always-load core lessons
-python3 memory/mem.py recall --class ssrf --tag python  # only the relevant attack + surface slice
+DEEPTHOUGHT_BENCHMARK_NET=1 .venv/bin/python -m pytest benchmarks/test_xxe.py
+```
+
+### A field note: does the benchmark hold up across models?
+
+The harness is model-agnostic, so we ran the same rediscovery task through several frontier models (Claude Opus 4.8 and Sonnet 5, GPT-5.6-Sol via Codex, Grok 4.5, and Gemini 3.1 Pro) under two conditions. It surfaced a methodology result worth stating plainly:
+
+<div align="center">
+
+<img src="docs/assets/model-standardization.svg" alt="Self-curated held-out vs a blind fixed corpus" width="820">
+
+</div>
+
+When a model **curates its own held-out set**, generalization looks strong (≈ 80–90%). When the *same* detectors are graded against a **fixed, hidden corpus the model never saw** — with train (seed) and test (held-out) cleanly separated — real single-seed generalization drops roughly **four-fold**, to ≈ 20%. Letting the graded party pick the test set inflates the score.
+
+Read this as a **floor on single-seed generalization and a caution about self-graded benchmarks**, not a model leaderboard. The absolute numbers come from a small, caveated internal corpus; reasoning-effort settings differ per harness; and one model declined the task on safety-policy grounds rather than engaging. The point that survives all of that: **a fixed corpus with hidden held-out is the honest way to measure**, and it is how DeepThought’s own numbers above are produced.
+
+## Research memory
+
+DeepThought carries its own portable research memory. Knowledge compounds across sessions and across Codex, Claude Code, Cursor, or a plain script without requiring an MCP server or external service.
+
+The memory system is plain Markdown, Obsidian-compatible, typed for scoped recall, atomic on write, automatically backed up before mutation, and kept out of git by default while the mechanism travels with the repository.
+
+```bash
+python3 memory/mem.py backup
+python3 memory/mem.py recall --class methodology
+python3 memory/mem.py recall --class ssrf --tag python
 python3 memory/mem.py add --type lesson --class ssrf --tags "web,python,taint" \
-    --name ssrf-detection --description "one line" --body "the fact, with [[links]]"
+  --name ssrf-detection --description "one line" --body "the fact, with [[links]]"
 ```
 
-Root [`AGENTS.md`](AGENTS.md) (Codex/Cursor) and [`CLAUDE.md`](CLAUDE.md) point every harness at
-the same vault. A learning that would otherwise live only in a commit message belongs in a
-`lesson` note.
+See [`memory/AGENTS.md`](memory/AGENTS.md) for the read and write protocol.
 
-## Architecture
+## Safety model
 
-```
-        operator
-           │
-   launcher (session type + config)
-           │
-           ▼
-  ┌──────────────────────────────┐
-  │  Deep Thought core           │   the orchestrator
-  │  compact state:              │   holds a small working set —
-  │  primitive ledger +          │   what each finding grants and
-  │  exploit graph               │   how primitives compose
-  └──────────────────────────────┘
-     │   ▲                    │
- dispatch │ distilled         │  version-controlled state
-     ▼   │ envelope only      ▼  findings │ coverage │ sessions
-  ┌─────────────┐        (the Store, files in git)
-  │   Marvins   │  workers
-  │ (one/task)  │
-  └─────────────┘
-     │
-  full detail paged to the Store, never inlined to the orchestrator
-```
+DeepThought treats autonomy as a capability that must be bounded, not a personality trait that should be trusted. Its controls include:
 
-The orchestrator reads only a typed, length-capped **envelope** from each
-worker. A prompt-injected worker cannot propagate the injection past that
-boundary — the envelope schema is the firewall. See
-[`specs/001-core-loop/contracts/worker-envelope.md`](specs/001-core-loop/contracts/worker-envelope.md).
+- explicit authorization basis and target scope
+- typed session inputs and worker envelopes
+- safe record identifiers and path containment
+- strict candidate-to-verified lifecycle rules
+- read-only defaults
+- sandboxed verification behind explicit approval
+- local-only disclosure preparation
+- fixed session, time, and token budgets
+- no self-directed scope expansion
+- standards validation through `deepthought check`
+- independent adversarial review for each feature
 
-## Layout
+Unsafe input becomes a controlled refusal, not an accidental adventure.
 
-```
+## Standards
+
+DeepThought uses established formats at its boundaries: **SARIF** for incoming static-analysis results, **OSV** for canonical finding records, **CSAF** for advisory exchange, **OpenVEX** for applicability, and **CVE 5.1** for draft records. `deepthought check` validates lifecycle integrity and output conformance against pinned schemas.
+
+## Repository map
+
+```text
 src/deepthought/
-  cli.py                 # playbook, check, publish
-  protocol/              # session.py (the protocol), gate.py (Gate + HermesUltraCode adapter)
-  store/                 # base.py (Store interface), filestore.py (files in git)
-  schema/                # Pydantic canonical models incl. worker envelope
-  orchestrator/          # conductor.py (envelope ingest), ledger.py (primitive ledger + exploit graph)
-  ingest/                # sarif.py (SARIF -> findings, in-scope containment)
-  sandbox/               # base.py, docker.py (config-only argv builder), noop.py (003; no execution)
-  sibling/               # signature.py (variant signature, input firewall) (004)
-  export/                # osv.py + csaf.py + openvex.py + cve.py + advisory.py + pinned schemas (005)
-  sessions/              # new_project, status, map, discover, verify, sibling_hunt, disclosure
-.claude/skills/          # the orchestrator protocol skill + a Marvin worker stub
-scripts/                 # smoke.sh, smoke_002..005.sh (hermetic end-to-end)
-state/                   # the version-controlled store
-.specify/memory/         # the constitution
-specs/                   # 001-core-loop … 005-disclosure (spec, plan, data model, contracts, tasks)
-docs/build-log/          # a per-feature build log
+  cli.py                 command-line interface
+  protocol/              session protocol and gates
+  store/                 version-controlled file store
+  schema/                canonical Pydantic models
+  orchestrator/          conductor, primitive ledger, exploit graph
+  ingest/                SARIF ingestion
+  sandbox/               verification backends
+  sibling/               variant signatures and input firewall
+  export/                OSV, CSAF, OpenVEX, CVE, advisory
+  sessions/              research session implementations
+skills/vuln-rediscovery/ vulnerability-class research skill
+memory/                  portable research memory mechanism
+benchmarks/              held-out generalization corpus and results
+specs/                   GitHub Spec Kit feature specifications
+.specify/memory/         platform constitution
 ```
 
-## Design decisions
+## Hitchhiker’s namespace
 
-1. **State** is flat files in git behind a `Store` interface. A vector DB is a
-   later, contained swap — one interface, a second implementation.
-2. **Schema aligns to standards.** SARIF in (features 002/003); OSV for the
-   finding record; CSAF, OpenVEX, and a CVE 5.1 draft out (feature 005). `check`
-   validates every finding's OSV, CSAF, and OpenVEX against pinned schemas.
-3. **Topology** is an orchestrator plus a worker pool. Workers keep their own
-   context; the orchestrator captures only distilled envelopes, so it holds the
-   working memory to chain exploits. The envelope doubles as an injection
-   firewall.
-4. **Identifiers are safe by construction.** A record id is a file name in the
-   store, so every id is a single safe path segment enforced at the model boundary
-   (`RecordId`) — no traversal, separators, or control characters. The `Store`
-   guards its raw lookups, keeps detail access inside `detail/` (symlinks and
-   `..` included), and refuses a same-id/different-identity overwrite; unsafe
-   operator input becomes a controlled refusal, never a crash.
-5. **Runtime** is Python for the core. The three verbs stay the contract.
+The lore is part of the interface, not a substitute for clear architecture.
+
+| Name | DeepThought meaning |
+|---|---|
+| **DeepThought** | The governed research orchestrator |
+| **The Guide** | Documentation and durable research knowledge |
+| **Marvins** | Brilliant specialist workers assigned narrow, tedious tasks |
+| **Improbability Drive** | Discovery, fuzzing, sibling hunting, unusual hypothesis generation |
+| **Magrathea** | Target and environment construction |
+| **Megadodo** | Artifact preparation and publishing pipeline |
+| **Babel Fish** | Translation between tools, schemas, and harnesses |
+| **Mostly Harmless** | Informational or unverified research results |
+| **The Answer** | A verified finding supported by reproducible evidence |
+| **Somebody Else’s Problem** | Deferred, upstream, environmental, or out-of-scope work |
 
 ## Development
 
 ```bash
 uv pip install --python .venv -e ".[dev]"
-.venv/bin/pytest            # test-first, per constitution Article VII
+.venv/bin/pytest
 ```
 
-`check` is itself a runtime gate and is tested. A `check` that errors counts as
-a failed check.
+Development is test-first under Constitution Article VII. A `check` that errors is a failed check. Contributions should preserve authorization and scope boundaries, typed contracts, lifecycle integrity, reproducible evidence, honest benchmark reporting, and human control of target execution and disclosure.
 
-## Naming (Hitchhiker's namespace)
+## Status
 
-The platform is **Deep Thought** — the computer built to compute the Answer; it
-produced 42. The orchestrator is **Deep Thought core**. The workers are
-**Marvins**, brilliant minds set to grind narrow tedious work, one per task. The
-discovery/fuzzing engine (feature 002+) is the **Improbability Drive**; the
-publish pipeline (feature 005) is **Megadodo**. All sit under **Magrathea**, the
-general topology.
+DeepThought is active research software. Several vulnerability classes and sandbox tiers remain under development. Results should be independently reviewed before operational or disclosure decisions.
+
+That is not a disclaimer hidden in the small print. It is the point of the system.
 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
 
-Ship safer code. Fix more bugs. Make the internet better.
+---
+
+<div align="center">
+
+<img src="docs/assets/logo.png" alt="DeepThought" width="72">
+
+**The universe is large. The attack surface is larger.**
+
+**So long, and thanks for all the bugs.**
+
+</div>
