@@ -42,10 +42,14 @@ export PYTHONPATH="${ROOT}/src:${ROOT}${PYTHONPATH:+:$PYTHONPATH}"
 say()  { printf '\n=== %s ===\n' "$1"; }
 fail() { echo "ERROR: $1" >&2; exit 1; }
 
-CHECKOUT="$(mktemp -d)/repo"
+# One managed scratch dir, cleaned on exit (even on failure) — no /tmp litter.
+TEMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TEMP_DIR"' EXIT
+
+CHECKOUT="$TEMP_DIR/repo"
 mkdir -p "$CHECKOUT/app"
 echo "print('hi')" > "$CHECKOUT/app/main.py"
-CHECKOUT2="$(mktemp -d)/repo2"       # a DISTINCT identity for the no-basis case
+CHECKOUT2="$TEMP_DIR/repo2"       # a DISTINCT identity for the no-basis case
 mkdir -p "$CHECKOUT2/app"
 echo "print('hi')" > "$CHECKOUT2/app/main.py"
 
@@ -64,7 +68,7 @@ echo "$PROFILES_OUT" | grep -q "max_sessions=25"        || fail "profiles did no
 echo "$PROFILES_OUT" | grep -q "NEVER auto-filled"      || fail "profiles did not state scope is never auto-filled"
 echo "$PROFILES_OUT" | grep -q "NEVER defaulted"        || fail "profiles did not state basis/path never defaulted"
 
-STATE_A="$(mktemp -d)/state"
+STATE_A="$TEMP_DIR/state_a"
 say "A.2 register (own_code + explicit scope) and MAP with NO profile"
 "$DT" playbook new-project --state "$STATE_A" --name "off-target" \
   --source-type open_source --local-path "$CHECKOUT" --basis own_code --scope app >/dev/null
@@ -87,7 +91,7 @@ say "A.4 the existing 006 loop smoke still passes byte-for-byte (default mode)"
 say "B. PROFILE ON — DEEPTHOUGHT_PROFILE=mostly_harmless"
 # ---------------------------------------------------------------------------
 export DEEPTHOUGHT_PROFILE=mostly_harmless
-STATE_B="$(mktemp -d)/state"
+STATE_B="$TEMP_DIR/state_b"
 
 say "B.1 register an own_code project with an EXPLICIT --scope (never auto-filled)"
 "$DT" playbook new-project --state "$STATE_B" --name "loop-target" \

@@ -145,7 +145,13 @@ def _root_default(profile: Optional[Profile], store: FileStore, project_id: str,
         return root  # explicit flag always overrides
     if profile is None or not profile.default_root_from_local_path:
         return root
-    proj = store.get_project(project_id)
+    # Best-effort only: if the store cannot resolve the project (missing/corrupt
+    # state), do NOT raise here — return the unset root and let the command's own
+    # run_session + StoreError handler produce the clean exit 2 (gemini review).
+    try:
+        proj = store.get_project(project_id)
+    except StoreError:
+        return root
     if proj is not None and proj.local_path:
         return proj.local_path
     return root

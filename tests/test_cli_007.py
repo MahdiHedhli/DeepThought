@@ -807,6 +807,29 @@ def test_profile_status_preserves_verify_escalation(tmp_path):
     assert AUTO_NEXT_SENTINEL not in out.output
 
 
+def test_root_default_survives_store_error(tmp_path, monkeypatch):
+    """gemini review (cli.py:151): under the profile, a StoreError while resolving
+    the default --root must NOT escape as a traceback — the command's own
+    StoreError handler produces a clean exit 2."""
+    from deepthought.store import FileStore, StoreError
+
+    state = tmp_path / "state"
+    repo = _repo(tmp_path)
+    _seed_project(state, local_path=str(repo), git_url=None, scope_allowlist=["src"])
+
+    def boom(self, project_id):
+        raise StoreError("corrupt state")
+
+    monkeypatch.setattr(FileStore, "get_project", boom)
+
+    out = runner.invoke(
+        app, ["playbook", "map", "--state", str(state), "--project", "php-src",
+              "--profile", "mostly_harmless"]
+    )
+    # A clean exit 2 (handled), never an unhandled traceback (exit 1 + exception).
+    assert out.exit_code == 2, (out.exit_code, out.output, out.exception)
+
+
 def test_profile_is_frozen():
     prof = resolve_profile("mostly_harmless")
     import dataclasses
