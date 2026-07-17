@@ -471,6 +471,11 @@ class ViolationReason(str, Enum):
     # certify needs is MANDATORY and resolved from committed state; omission fails closed.
     MISSING_LEDGER = "certification-requires-a-committed-ledger-that-was-not-presented"
     ACHIEVABLE_UNBOUND = "certified-report-carries-an-unbound-achievable-recall-diagnostic"
+    # Round-7 structural-report seals (R7-2): every certified numeric is RECOMPUTED from the
+    # committed detector+cohort or FORBIDDEN — no free secondary floats in a certified report.
+    FIXED_COHORT_UNVERIFIED = "certified-fixed-cohort-recall-does-not-match-the-recomputed-regression-run"
+    DENSITY_UNVERIFIED = "certified-patched-alert-density-does-not-match-the-recomputed-patched-tree-flags"
+    COVERAGE_UNBOUND = "certified-report-carries-a-free-secondary-numeric-not-recomputable-from-committed-state"
 
 
 class ContractViolation(Exception):
@@ -1441,7 +1446,11 @@ class Report(BaseModel):
 
     blind_recall: RecallReport
     fixed_cohort_recall: RecallReport
-    coverage: float = Field(ge=0.0, le=1.0)  # pinned / all
+    # R7-2: coverage (pinned / all) is NOT recomputable from committed state — the denominator
+    # "all" includes dropped, uncommitted entries. It is a labelled DIAGNOSTIC for non-certified
+    # reports only; a certified report must leave it None (a free float would be an unbound
+    # secondary headline). Optional with a None sentinel so the certify path can FORBID it.
+    coverage: Optional[float] = Field(default=None, ge=0.0, le=1.0)  # pinned / all; None in a certified report
     patched_alert_density: float = Field(ge=0.0)  # flags/KLOC on the fixed tree
     adjudicated_precision: float = Field(ge=0.0, le=1.0)
     achievable_recall: Optional[float] = None  # labelled diagnostic secondary only
@@ -1466,10 +1475,12 @@ class Report(BaseModel):
     def secondaries(self) -> dict[str, str]:
         out = {
             "fixed-cohort recall": f"{_pct(self.fixed_cohort_recall.recall)} ({self.fixed_cohort_recall.rediscovered}/{self.fixed_cohort_recall.total})",
-            "coverage": _pct(self.coverage),
-            "patched-alert density": f"{self.patched_alert_density:.2f} flags/KLOC",
-            "adjudicated precision": _pct(self.adjudicated_precision),
         }
+        # coverage is a diagnostic present only on non-certified reports (None otherwise).
+        if self.coverage is not None:
+            out["coverage"] = _pct(self.coverage)
+        out["patched-alert density"] = f"{self.patched_alert_density:.2f} flags/KLOC"
+        out["adjudicated precision"] = _pct(self.adjudicated_precision)
         if self.achievable_recall is not None:
             out["achievable-recall (diagnostic)"] = _pct(self.achievable_recall)
         return out
@@ -1724,21 +1735,26 @@ def validate(
 
         # Part B5 — the certify path. Additive: it runs after every ordinary check.
         _certifying = strict or attestation is not None
-        # F3: certification is STRUCTURAL, not opt-in. A run that produced results presented
-        # together with a headline Report is a produced+reported result — it can never be
-        # blessed UNANCHORED. Require certification (strict or a signed attestation); without
-        # it the produced+reported result is UNANCHORED.
-        if (
-            not _certifying
-            and run is not None
-            and _run_produced_results(run)
-            and report is not None
+        # R7-1 / F3: certification is STRUCTURAL on the REPORT, not opt-in and not keyed on the
+        # run's produced flag. ANY presented Report that asserts a numerator (a rediscovery
+        # claim) REQUIRES full, signed certification — so the default ``check = validate`` alias
+        # cannot bless an unanchored or truncated headline, whether or not a run/produced flag is
+        # present. Without certification (strict or a signed attestation) such a Report is
+        # UNANCHORED. The legacy F3 clause (a producing run + a Report) is subsumed but kept
+        # explicit for a report that claims nothing yet rode a producing run.
+        if not _certifying and (
+            _report_asserts_numerator(report)
+            or (run is not None and _run_produced_results(run) and report is not None)
         ):
-            result.add(
-                ViolationReason.UNANCHORED,
-                f"run {run.run_id}: produced results with a headline Report but no certification "
-                "(strict or a signed attestation) — a produced+reported result must be certified",
+            detail = (
+                f"a presented Report asserts a rediscovery numerator "
+                f"({report.blind_recall.rediscovered}/{report.blind_recall.total}) with no certification "
+                "(strict or a signed attestation) — a Report headline must be certified"
+                if _report_asserts_numerator(report)
+                else f"run {run.run_id}: produced results with a Report but no certification "
+                "(strict or a signed attestation) — a produced+reported result must be certified"
             )
+            result.add(ViolationReason.UNANCHORED, detail)
         if _certifying:
             _check_certification(
                 attestation=attestation,
@@ -1765,6 +1781,21 @@ def validate(
 def _run_produced_results(run: EvaluationRun) -> bool:
     """True iff any post-freeze attempt demonstrably produced detector results."""
     return any(a.produced_results for a in run.post_freeze_attempts)
+
+
+def _report_asserts_numerator(report: Optional["Report"]) -> bool:
+    """R7-1: True iff a presented Report makes a rediscovery CLAIM — a non-zero blind
+    numerator or denominator, or a non-empty rediscovered set. Certification is STRUCTURAL
+    on the Report: any such claim REQUIRES full, signed certification, so even the default
+    ``check = validate`` alias cannot bless an unanchored/truncated headline. A genuinely
+    empty report (0/0, no rediscovered ids) asserts nothing and stays exempt."""
+    if report is None:
+        return False
+    return bool(
+        report.blind_recall.total > 0
+        or report.blind_recall.rediscovered > 0
+        or report.rediscovered_blind_ids
+    )
 
 
 def _check_entry_hash_integrity(history: CohortHistory, report: ContractReport) -> None:
@@ -2605,6 +2636,72 @@ def _check_certification(
                         ViolationReason.NUMERATOR_UNVERIFIED,
                         "reported rediscovered_blind_ids do not match the committed detector re-run on the "
                         f"real pinned code (claimed {len(claimed)}, recomputed {len(recomputed)})",
+                    )
+
+    # ----------------------------------------------------------------------- #
+    # R7-2 — bind EVERY certified numeric: no free secondary floats. Each reported
+    # secondary is RECOMPUTED from the committed detector+cohort or FORBIDDEN in a
+    # certified report. adjudicated_precision is already bound (P1c) and achievable_recall
+    # already forbidden (R5-6); this closes fixed_cohort_recall, patched_alert_density, and
+    # the non-recomputable coverage — mirroring ACHIEVABLE_UNBOUND.
+    # ----------------------------------------------------------------------- #
+    if report is not None:
+        # coverage = pinned/all is NOT recomputable from committed state (the denominator
+        # includes dropped, uncommitted entries) — FORBID it in a certified report. It stays
+        # available as a labelled diagnostic on NON-certified reports only.
+        if report.coverage is not None:
+            result.add(
+                ViolationReason.COVERAGE_UNBOUND,
+                "a certified report must not carry a free coverage numeric; coverage (pinned/all) is not "
+                "recomputable from committed state and is a diagnostic for non-certified reports only",
+            )
+        scored = history.latest() if history is not None else None
+        if freeze is not None and scored is not None:
+            import verifier  # local import: verifier -> corpus_measure, no cycle back to contract
+
+            # fixed_cohort_recall — RECOMPUTED over the HEAD cohort's REGRESSION entries by
+            # re-running the committed detector (the fixed-cohort mirror of the blind numerator).
+            regression_entries = scored.by_role(Role.REGRESSION)
+            try:
+                fixed_rediscovered, fixed_total = verifier.recompute_fixed_cohort_recall(
+                    regression_entries, detector_id=freeze.bundle.detector_id
+                )
+            except Exception as exc:  # noqa: BLE001 — an un-recomputable fixed cohort fails closed
+                result.add(
+                    ViolationReason.FIXED_COHORT_UNVERIFIED,
+                    f"certification could not recompute fixed_cohort_recall from committed state "
+                    f"(detector_id={freeze.bundle.detector_id!r}): {exc}",
+                )
+            else:
+                if (
+                    report.fixed_cohort_recall.total != fixed_total
+                    or report.fixed_cohort_recall.rediscovered != fixed_rediscovered
+                ):
+                    result.add(
+                        ViolationReason.FIXED_COHORT_UNVERIFIED,
+                        f"reported fixed_cohort_recall "
+                        f"{report.fixed_cohort_recall.rediscovered}/{report.fixed_cohort_recall.total} does not "
+                        f"match the committed regression re-run {fixed_rediscovered}/{fixed_total}",
+                    )
+
+            # patched_alert_density — RECOMPUTED from the detector run's patched-tree flag counts
+            # (corpus_measure's patched_flag_count) over the head cohort's BLIND entries.
+            try:
+                density = verifier.recompute_patched_alert_density(
+                    scored.by_role(Role.BLIND), detector_id=freeze.bundle.detector_id
+                )
+            except Exception as exc:  # noqa: BLE001 — an un-recomputable density fails closed
+                result.add(
+                    ViolationReason.DENSITY_UNVERIFIED,
+                    f"certification could not recompute patched_alert_density from committed state "
+                    f"(detector_id={freeze.bundle.detector_id!r}): {exc}",
+                )
+            else:
+                if abs(report.patched_alert_density - density) > 1e-9:
+                    result.add(
+                        ViolationReason.DENSITY_UNVERIFIED,
+                        f"reported patched_alert_density ({report.patched_alert_density}) does not match the "
+                        f"committed detector's recomputed patched-tree density ({density})",
                     )
 
 

@@ -304,6 +304,34 @@ wired into `check`, enforcing:
     key; certification verifies against it (`ATTESTATION_INVALID` for any non-committed key).
     A repo reader can verify but cannot forge; `cryptography` is a declared dependency.
 
+- **FR-20 — Round-7 (last code-closable): certification is STRUCTURAL on the REPORT's
+  numeric claims, and EVERY certified numeric is recomputed or forbidden.** A seventh audit
+  found five survivors (all medium) sharing one root: certification keyed on the RUN's
+  `produced_results` flag / run presence, not on the REPORT's own numeric claims, so an
+  unbacked Report escaped recompute/anchoring on the non-strict path and a certified report's
+  SECONDARY numerics were free floats.
+  - **R7-1 — certification is STRUCTURAL on the Report.** `validate()` now treats ANY presented
+    Report that asserts a numerator (`blind_recall.total > 0`, `blind_recall.rediscovered > 0`,
+    or a non-empty `rediscovered_blind_ids`) as REQUIRING full, signed certification — so even
+    the default `check = validate` alias cannot bless an unanchored or truncated headline,
+    whether or not a run/produced flag is present. Without `strict` + a signed `Attestation`
+    such a Report is `UNANCHORED`; under certification the committed-genesis anti-truncation
+    (`_history_reproduces_committed`), head-binding, and numerator recompute already fire
+    unconditionally (not gated on a run — a Report with no producing run is
+    `CERTIFY_WITHOUT_EVALUATION` / `NUMERATOR_UNVERIFIED`). A Report headline is thereby
+    un-fakeable on EVERY entrypoint, including the default `check`.
+  - **R7-2 — bind EVERY certified numeric; no free floats.** Under strict certification each
+    reported numeric must be RECOMPUTED from the committed detector+cohort or FORBIDDEN,
+    mirroring `ACHIEVABLE_UNBOUND`: `fixed_cohort_recall` is recomputed over the head cohort's
+    REGRESSION entries by re-running the committed detector (else `FIXED_COHORT_UNVERIFIED`);
+    `patched_alert_density` is recomputed from the committed detector's patched-tree flag
+    counts (`corpus_measure`'s `patched_flag_count`, over the head cohort's BLIND entries; else
+    `DENSITY_UNVERIFIED`); and `coverage` (pinned/all — NOT recomputable from committed state,
+    since "all" includes dropped, uncommitted entries) is FORBIDDEN — a certified `Report`
+    leaves it `None` (a sentinel), else `COVERAGE_UNBOUND`. `adjudicated_precision` is already
+    bound (P1c) and `achievable_recall` already forbidden (R5-6). Coverage stays a labelled
+    diagnostic on NON-certified reports only.
+
 - **The FINAL residual is exactly (i) genesis-commit completeness — that what the curator
   committed at genesis is itself complete — which is git-reviewable, not validator-checkable;
   and (ii) ed25519 private-key custody — that the private signing key is held by a party that
@@ -594,6 +622,25 @@ the committed-state form, never by weakening a check.
     accepted; the private key is absent from `genesis_root.json`. `cryptography` is a declared
     dependency.
 
+### Round-7 acceptance criteria (last code-closable: structural-on-the-report + bind-every-numeric)
+
+60. **(R7-1/FR-20)** Certification is STRUCTURAL on the REPORT. Any presented Report that asserts
+    a numerator (`blind_recall.total > 0`, `blind_recall.rediscovered > 0`, or a non-empty
+    `rediscovered_blind_ids`) REQUIRES full, signed certification — the default `check = validate`
+    alias cannot bless it. A numerator-asserting Report with no `strict`/`attestation` (whether
+    presented alone, or riding a non-producing run) is `UNANCHORED`; the committed-genesis
+    anti-truncation, head-binding, and numerator recompute fire unconditionally under
+    certification (a Report with no producing run → `CERTIFY_WITHOUT_EVALUATION` /
+    `NUMERATOR_UNVERIFIED`); an honest strict-certified head still passes. A genuinely empty
+    Report (0/0, no rediscovered ids) asserts nothing and is not forced to certify.
+61. **(R7-2/FR-20)** Every certified numeric is recomputed from committed state or forbidden. A
+    certified report with an inflated `fixed_cohort_recall` (not matching the committed regression
+    re-run) is `FIXED_COHORT_UNVERIFIED`; an inflated `patched_alert_density` (not matching the
+    committed detector's recomputed patched-tree flag density) is `DENSITY_UNVERIFIED`; a free
+    `coverage` float is `COVERAGE_UNBOUND` (a certified `Report` leaves `coverage` `None`). Honest
+    recomputed values — including a non-empty `fixed_cohort_recall` over a real REGRESSION entry —
+    pass; coverage remains a labelled diagnostic on non-certified reports.
+
 ## Open questions
 
 - **Non-blocking.** Does the contract live in a new `benchmarks/harness/contract.py`
@@ -630,6 +677,9 @@ reproduces nothing) and a chain base not rooted in the committed genesis
 (`GENESIS_UNANCHORED`) — plus the round-6 floor seals: a stale non-head run
 (`DENOMINATOR_SHRINK`, F1), a `prior_evaluations` that does not reproduce the committed
 evaluation-ledger root (`EVALUATED_MORE_THAN_ONCE`, F2), and a produced+reported run with no
-certification (`UNANCHORED`, F3) — each fail `check` with a typed reason. The `report` view
-prints blind recall as the headline alongside the four labeled secondaries. Only after this
-gate is green does the shared-kernel work in the tranche begin.
+certification (`UNANCHORED`, F3) — plus the round-7 structural seals: the default `check`
+REFUSING an unanchored Report headline (`UNANCHORED`, R7-1) and a certified report carrying a
+FREE secondary numeric (a free `coverage`) failing closed (`COVERAGE_UNBOUND`, R7-2) — each fail
+`check` with a typed reason. The `report` view prints blind recall as the headline alongside the
+four labeled secondaries. Only after this gate is green does the shared-kernel work in the tranche
+begin.

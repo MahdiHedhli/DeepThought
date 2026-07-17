@@ -227,7 +227,28 @@ committed public key corresponds to a fixed test/smoke signing seed held in the 
 helpers so the smoke and unit tests can produce honest attestations; a production deployment
 commits the curator's real public key while the real private key stays external. Everything a
 validator *can* run and check, it now RUNS and checks from committed state; the two things it
-structurally cannot are git review and organizational key custody.
+structurally cannot are git review and organizational key custody. (A seventh audit found five
+more code-closable survivors — all medium, one shared root — sealed in the seventh wave below;
+the two-part residual above is unchanged and is the true floor.)
+
+## Seventh wave (round-7, last code-closable): structural-on-the-report + bind-every-numeric
+
+A seventh audit found five survivors, all medium, sharing ONE root: certification triggered on
+the RUN's `produced_results` flag / run presence, not on the REPORT's own numeric claims. So an
+unbacked Report escaped recompute/anchoring on the non-strict default `check`, and a certified
+report's SECONDARY numerics were free floats. All are now closed; after them, only the
+irreducible two-part floor above remains. (Regression tests `test_r7_1_*`, `test_r7_2_*`.)
+
+| Hole | Bypass it left open | Now sealed in `validate()` by |
+|---|---|---|
+| R7-1 | the default `check = validate` alias blessed a bare truncated Report + inflated numerator with no run; a Report asserting a numerator without a producing run skipped recompute + anchoring; N-times-keep-best was presentable as an unbacked claim | certification is STRUCTURAL on the Report: ANY presented Report asserting a numerator (`blind_recall.total > 0`, `blind_recall.rediscovered > 0`, or a non-empty `rediscovered_blind_ids`) REQUIRES `strict` + a signed `Attestation` (else `UNANCHORED`), whether or not a run/produced flag is present; under certification the committed-genesis anti-truncation (`_history_reproduces_committed`), head-binding, and numerator recompute fire unconditionally (a Report with no producing run → `CERTIFY_WITHOUT_EVALUATION` / `NUMERATOR_UNVERIFIED`). A Report headline is un-fakeable on EVERY entrypoint, including the default `check` |
+| R7-2 | under strict certification the Report's OTHER numerics (`fixed_cohort_recall`, `coverage`, `patched_alert_density`) were free floats never recomputed — a certified report could carry arbitrary secondary numbers | every certified numeric is RECOMPUTED from the committed detector+cohort or FORBIDDEN (mirroring `ACHIEVABLE_UNBOUND`): `fixed_cohort_recall` recomputed over the head cohort's REGRESSION entries via the committed detector (`FIXED_COHORT_UNVERIFIED`); `patched_alert_density` recomputed from the committed detector's patched-tree flag counts (`corpus_measure.patched_flag_count`) over the head BLIND entries (`DENSITY_UNVERIFIED`); `coverage` (pinned/all — not recomputable from committed state) FORBIDDEN, a certified report leaves it `None` (`COVERAGE_UNBOUND`). `adjudicated_precision` already bound (P1c), `achievable_recall` already forbidden (R5-6) |
+
+**The FINAL residual is unchanged and is exactly the two-part floor named above: (i)
+genesis-commit completeness [git-reviewable] and (ii) ed25519 private-key custody [curator ≠
+subject, organizational].** After round-7 every certified numeric a validator can recompute from
+committed state is recomputed, and every Report headline is structurally forced through signed
+certification; nothing code-closable remains.
 
 ## Sealing note (for the later cross-model evaluator)
 

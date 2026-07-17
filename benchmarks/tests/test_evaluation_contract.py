@@ -49,6 +49,7 @@ from contract import (  # noqa: E402
     build_attestation,
     candidates_from_adjudications,
     chain_root,
+    check_report,
     ed25519_public_key,
     leaf_hash,
     merkle_root,
@@ -753,7 +754,12 @@ def test_h7_report_bound_to_cohort_denominator():
         cohort_content_hash=v1.content_hash,
         rediscovered_blind_ids=[blinds[0].identity_hash, blinds[1].identity_hash],
     )
-    assert validate(history=hist, report=rep_ok).ok
+    # the binding itself is honest (check_report only exercises the denominator/numerator
+    # binding); the full validate() now additionally requires certification (R7-1), tested
+    # separately — so this asserts the binding via check_report.
+    assert check_report(rep_ok, hist).ok
+    # and a numerator-asserting Report through the default check is UNANCHORED without cert
+    assert ViolationReason.UNANCHORED in _reasons(validate(history=hist, report=rep_ok))
 
     # a rediscovered set that disagrees with the reported count is rejected
     rep_bad_set = rep_ok.model_copy(update={"rediscovered_blind_ids": [blinds[0].identity_hash]})
@@ -1017,7 +1023,10 @@ def test_r4_report_numerator_and_binding_mandatory():
         cohort_content_hash=v1.content_hash,
         rediscovered_blind_ids=[blinds[0].identity_hash],
     )
-    assert validate(history=hist, report=bound).ok
+    # the honest bound form passes the binding check; full validate() additionally requires
+    # certification for a numerator-asserting Report (R7-1), verified separately.
+    assert check_report(bound, hist).ok
+    assert ViolationReason.UNANCHORED in _reasons(validate(history=hist, report=bound))
 
 
 # R5 — a canonical, non-re-rollable run_id + evaluate-once ledger.
@@ -1162,7 +1171,9 @@ def test_a1_report_binds_to_runs_evaluated_cohort():
         cohort_content_hash=v2.content_hash,
         rediscovered_blind_ids=[v2_blinds[0].identity_hash],
     )
-    assert validate(history=hist, run=run, freeze=freeze, report=honest).ok
+    # the honest report binds correctly to the run's evaluated cohort (check_report); full
+    # certification is required separately for a numerator-asserting Report (R7-1).
+    assert check_report(honest, hist, run=run, freeze=freeze).ok
 
 
 # A2 — POLICY_REFUSAL cannot launder a produced run to N/A; a produced run needs a Report.
@@ -1553,18 +1564,30 @@ def _anchored(
     chain_from=ATT_CHAIN_BASE,
     evln=None,
     committed_evaluation_root=None,
+    regression=None,
 ):
     """A fully honest, anchored evaluation bundle plus its signed Attestation, with the
     COMMITTED state + committed detector/fetcher installed to match it. Reused by the B5
-    fail-closed cases and the Round-4/5 certify cases (each tampers exactly one thing). The
+    fail-closed cases and the Round-4/5/7 certify cases (each tampers exactly one thing). The
     freeze commits ``committed_k`` (R5-3/P1d), the certify binds a real
     ``AdjudicatedPrecision`` (P1c), the chain roots in the committed latest attestation root
     (R5-2/PART3, overridable via ``prior_attestation_root``), and the numerator is
-    RECOMPUTED by ``validate`` running the committed detector (R5-1/PART2)."""
+    RECOMPUTED by ``validate`` running the committed detector (R5-1/PART2).
+
+    R7-2: every certified secondary numeric is bound. ``coverage`` is forbidden (None on a
+    certified report); ``patched_alert_density`` and ``fixed_cohort_recall`` are set to the
+    values ``validate`` itself recomputes from the committed detector, so the honest bundle
+    passes and any tamper fails closed. ``regression`` is an optional list of
+    ``(CohortEntry, files_fragment)`` REGRESSION entries added to the head cohort so a
+    non-empty ``fixed_cohort_recall`` can be exercised."""
     a_entry = _entry(vuln=_A_VULN, patched=_A_PATCHED, paths=["a.py"], probe="sinka(x)", role="blind")
     b_entry = _entry(vuln=_B_VULN, patched=_B_PATCHED, paths=["b.py"], probe="sinkb(x)", role="blind")
     blinds = [a_entry, b_entry]
-    v1 = _cohort("v1", blinds)
+    reg_entries = [e for e, _ in (regression or [])]
+    reg_files = {}
+    for _, frag in (regression or []):
+        reg_files.update(frag)
+    v1 = _cohort("v1", blinds + reg_entries)
     hist = CohortHistory(versions=[v1])
     pool = _pool(12)
     committed_k = 3
@@ -1577,8 +1600,8 @@ def _anchored(
     report = Report(
         blind_recall=RecallReport(rediscovered=1, total=2),
         fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
-        coverage=1.0,
-        patched_alert_density=0.0,
+        coverage=None,  # R7-2: forbidden on a certified report
+        patched_alert_density=0.0,  # recomputed below from the committed detector
         adjudicated_precision=1.0,
         cohort_content_hash=v1.content_hash,
         rediscovered_blind_ids=[a_entry.identity_hash],
@@ -1607,8 +1630,18 @@ def _anchored(
     )
     evln = EvaluationLedger() if evln is None else evln
     _install_committed(
-        monkeypatch, presented_history=hist, files=files or _default_files(), chain_from=chain_from, scan=scan,
-        evaluation_root=committed_evaluation_root,
+        monkeypatch, presented_history=hist, files={**(files or _default_files()), **reg_files},
+        chain_from=chain_from, scan=scan, evaluation_root=committed_evaluation_root,
+    )
+    # R7-2: set the certified secondary numerics to exactly what validate() recomputes from the
+    # committed detector, so the honest bundle passes (a tamper in a test then fails closed).
+    fc_rediscovered, fc_total = verifier.recompute_fixed_cohort_recall(reg_entries, detector_id="d")
+    density = verifier.recompute_patched_alert_density(blinds, detector_id="d")
+    report = report.model_copy(
+        update={
+            "fixed_cohort_recall": RecallReport(rediscovered=fc_rediscovered, total=fc_total),
+            "patched_alert_density": density,
+        }
     )
     att = build_attestation(
         history=hist,
@@ -1626,7 +1659,7 @@ def _anchored(
     )
     return dict(
         hist=hist, freeze=freeze, run=run, report=report, precision=precision, ledger=ledger,
-        excl=excl, evln=evln, blinds=blinds, att=att,
+        excl=excl, evln=evln, blinds=blinds, reg_entries=reg_entries, att=att,
     )
 
 
@@ -1906,8 +1939,8 @@ def _chain_certify(
     report = Report(
         blind_recall=RecallReport(rediscovered=len(rediscovered_entries), total=len(scored_blind)),
         fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
-        coverage=1.0,
-        patched_alert_density=0.0,
+        coverage=None,  # R7-2: forbidden on a certified report
+        patched_alert_density=0.0,  # recomputed below from the committed detector
         adjudicated_precision=1.0,
         cohort_content_hash=scored_cohort.content_hash,
         rediscovered_blind_ids=[e.identity_hash for e in rediscovered_entries],
@@ -1928,6 +1961,16 @@ def _chain_certify(
     _install_committed(
         monkeypatch, presented_history=hist, files=files, chain_from=chain_from,
         prior_history_root=prior_history.history_root,
+    )
+    # R7-2: bind the certified secondary numerics to what validate() recomputes. The scored
+    # head cohort here holds only BLIND entries, so fixed_cohort_recall recomputes to (0, 0);
+    # density is the committed detector's patched-tree flag density over the blind set.
+    report = report.model_copy(
+        update={
+            "patched_alert_density": verifier.recompute_patched_alert_density(
+                scored_blind, detector_id="d"
+            ),
+        }
     )
     att = build_attestation(
         history=hist, freeze=freeze, run=run, report=report,
@@ -2188,3 +2231,158 @@ def test_f4_ed25519_signatures_and_private_key_never_committed(monkeypatch):
     ).digest()
     assert committed_seed.hex() not in raw
     assert ed25519_public_key(committed_seed) == committed_pub
+
+
+# --------------------------------------------------------------------------- #
+# Round-7 (last code-closable): certification is STRUCTURAL on the REPORT's numeric
+# claims (R7-1), and EVERY certified numeric is recomputed or forbidden (R7-2). After
+# these the only residual is the irreducible floor — genesis-commit completeness
+# (git-reviewable) + ed25519 private-key custody (organizational).
+# --------------------------------------------------------------------------- #
+
+
+def _reg_entry(tag, *, rediscovered):
+    """A REGRESSION-role entry plus its fake-corpus fragment. When ``rediscovered`` the
+    patched file drops the FLAG (the fix is confirmed); else it keeps the FLAG."""
+    vuln = f"vr{tag}" + "0" * (40 - len(f"vr{tag}"))
+    patched = f"pr{tag}" + "0" * (40 - len(f"pr{tag}"))
+    path, probe = f"r{tag}.py", f"sinkr{tag}(x)"
+    entry = _entry(vuln=vuln, patched=patched, paths=[path], probe=probe, role="regression")
+    frag = {
+        (vuln, path): f"def fr():\n    {probe}  # FLAG\n",
+        (patched, path): (
+            f"def fr():\n    guard()\n    {probe}\n" if rediscovered else f"def fr():\n    {probe}  # FLAG\n"
+        ),
+    }
+    return entry, frag
+
+
+# R7-1 — certification is STRUCTURAL on the Report: ANY Report asserting a numerator
+# requires full signed certification, so even the default ``check`` cannot bless an
+# unanchored/truncated headline. No run, no strict, no attestation → UNANCHORED.
+def test_r7_1_report_headline_is_structurally_certified(monkeypatch):
+    blinds = [_entry(vuln=x * 40, role="blind") for x in ("a", "b")]
+    # a "truncated" single version presented on its own (no prior baseline, no run/strict)
+    v2 = _cohort("v2", blinds, reason="a truncated single version", parent="v1")
+    hist = CohortHistory(versions=[v2])
+    headline = Report(
+        blind_recall=RecallReport(rediscovered=1, total=2),  # asserts a numerator
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v2.content_hash,
+        rediscovered_blind_ids=[blinds[0].identity_hash],  # binds honestly
+    )
+    # the default check (no run, no strict, no attestation) REFUSES the headline
+    rep = validate(history=hist, report=headline)
+    assert not rep.ok and ViolationReason.UNANCHORED in _reasons(rep)
+    # the binding itself is honest — only the missing certification fails it
+    assert check_report(headline, hist).ok
+
+    # a genuinely EMPTY report (0/0, no rediscovered ids) asserts nothing → not forced to certify
+    empty = Report(
+        blind_recall=RecallReport(rediscovered=0, total=0),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        patched_alert_density=0.0,
+        adjudicated_precision=0.0,
+        cohort_content_hash=v2.content_hash,
+        rediscovered_blind_ids=[],
+    )
+    # v2's blind count is 2, so this empty (0/0) report mismatches the denominator — but the
+    # failure is the ordinary binding one, NOT UNANCHORED (an empty report is not a headline)
+    empty_rep = validate(history=hist, report=empty)
+    assert ViolationReason.UNANCHORED not in _reasons(empty_rep)
+
+
+# R7-1 — a numerator-asserting Report riding a NON-producing run (the old F3 keyed on the
+# run's produced flag and would have missed this) is UNANCHORED; a strict request with no
+# signed attestation is likewise UNANCHORED; the honest strict-certified head still passes.
+def test_r7_1_numerator_report_requires_signed_certification(monkeypatch):
+    blinds = [_entry(vuln=x * 40, role="blind") for x in ("a", "b")]
+    v1 = _cohort("v1", blinds)
+    hist = CohortHistory(versions=[v1])
+    freeze = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z"
+    )
+    run = _run("codex", v1.content_hash, freeze.freeze_hash)  # a run with NO producing attempt
+    assert not any(att.produced_results for att in run.post_freeze_attempts)
+    headline = Report(
+        blind_recall=RecallReport(rediscovered=2, total=2),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v1.content_hash,
+        rediscovered_blind_ids=[b.identity_hash for b in blinds],
+    )
+    # the numerator claim forces certification even though the run produced nothing → UNANCHORED
+    rep = validate(history=hist, run=run, freeze=freeze, report=headline)
+    assert not rep.ok and ViolationReason.UNANCHORED in _reasons(rep)
+    # strict but with NO signed attestation is also UNANCHORED
+    rep_strict = validate(history=hist, report=headline, strict=True)
+    assert not rep_strict.ok and ViolationReason.UNANCHORED in _reasons(rep_strict)
+    # the honest strict-certified head (full signed bundle) still passes
+    assert _certify(_anchored(monkeypatch)).ok
+
+
+# R7-2 — a certified report's fixed_cohort_recall must be RECOMPUTED over the head cohort's
+# REGRESSION entries; an inflated value fails FIXED_COHORT_UNVERIFIED, the honest recompute passes.
+def test_r7_2_certified_fixed_cohort_recall_is_recomputed(monkeypatch):
+    reg = _reg_entry("x", rediscovered=True)  # a regression entry the committed detector rediscovers
+    a = _anchored(monkeypatch, regression=[reg])
+    # the honest bundle carries the recomputed fixed_cohort_recall (1/1) → passes
+    assert a["report"].fixed_cohort_recall.rediscovered == 1
+    assert a["report"].fixed_cohort_recall.total == 1
+    assert _certify(a).ok, _reasons(_certify(a))
+
+    # an inflated fixed_cohort_recall that the regression re-run does not reproduce → reject
+    inflated = a["report"].model_copy(
+        update={"fixed_cohort_recall": RecallReport(rediscovered=5, total=5)}
+    )
+    att = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=inflated,
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=KEY,
+        prior_attestation_root=ATT_CHAIN_BASE,
+        exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep = _certify(a, report=inflated, attestation=att)
+    assert not rep.ok and ViolationReason.FIXED_COHORT_UNVERIFIED in _reasons(rep)
+
+
+# R7-2 — a certified report's patched_alert_density must be RECOMPUTED from the committed
+# detector's patched-tree flag counts; an inflated value fails DENSITY_UNVERIFIED.
+def test_r7_2_certified_patched_alert_density_is_recomputed(monkeypatch):
+    a = _anchored(monkeypatch)
+    # the honest bundle carries the recomputed density → passes
+    assert _certify(a).ok, _reasons(_certify(a))
+
+    # a density the committed detector's patched-tree flags do not reproduce → reject
+    wrong = a["report"].model_copy(update={"patched_alert_density": a["report"].patched_alert_density + 13.0})
+    att = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=wrong,
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=KEY,
+        prior_attestation_root=ATT_CHAIN_BASE,
+        exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep = _certify(a, report=wrong, attestation=att)
+    assert not rep.ok and ViolationReason.DENSITY_UNVERIFIED in _reasons(rep)
+
+
+# R7-2 — a certified report must not carry a free ``coverage`` (not recomputable from committed
+# state); the certified report must leave it None (COVERAGE_UNBOUND otherwise).
+def test_r7_2_certified_report_forbids_free_coverage(monkeypatch):
+    a = _anchored(monkeypatch)
+    assert a["report"].coverage is None  # the honest certified report omits coverage
+    assert _certify(a).ok, _reasons(_certify(a))
+
+    # a certified report carrying a free coverage float → COVERAGE_UNBOUND
+    with_coverage = a["report"].model_copy(update={"coverage": 0.9})
+    att = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=with_coverage,
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=KEY,
+        prior_attestation_root=ATT_CHAIN_BASE,
+        exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep = _certify(a, report=with_coverage, attestation=att)
+    assert not rep.ok and ViolationReason.COVERAGE_UNBOUND in _reasons(rep)
+    # coverage stays available as a labelled diagnostic on a NON-certified report
+    assert with_coverage.coverage == 0.9 and "coverage" in with_coverage.render()

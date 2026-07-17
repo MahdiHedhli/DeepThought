@@ -177,8 +177,8 @@ def _certify_with_claim(monkeypatch, cohort, claimed_entries, *, detector_id="d"
     report = Report(
         blind_recall=RecallReport(rediscovered=len(claimed_entries), total=len(blind)),
         fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
-        coverage=1.0,
-        patched_alert_density=0.0,
+        coverage=None,  # R7-2: forbidden on a certified report
+        patched_alert_density=0.0,  # recomputed below (when the detector is resolvable)
         adjudicated_precision=1.0,
         cohort_content_hash=cohort.content_hash,
         rediscovered_blind_ids=[e.identity_hash for e in claimed_entries],
@@ -207,6 +207,16 @@ def _certify_with_claim(monkeypatch, cohort, claimed_entries, *, detector_id="d"
     ledger = ExposureLedger()
     evln = EvaluationLedger()
     _install_committed(monkeypatch, hist, detector_id=detector_id, register=register)
+    # R7-2: bind the certified secondary numerics to what validate() recomputes. Only possible
+    # when the detector is resolvable; the unregistered case fails closed on the recompute.
+    if register:
+        report = report.model_copy(
+            update={
+                "patched_alert_density": verifier.recompute_patched_alert_density(
+                    cohort.entries, detector_id=detector_id
+                ),
+            }
+        )
     att = build_attestation(
         history=hist,
         freeze=freeze,

@@ -15,9 +15,12 @@
 # rooted in the committed genesis (GENESIS_UNANCHORED), and the round-6 floor seals:
 # a stale non-head run (F1, DENOMINATOR_SHRINK), a prior_evaluations that does not
 # reproduce the committed eval-ledger root (F2, EVALUATED_MORE_THAN_ONCE), and a
-# produced+reported run with no certification (F3, UNANCHORED). Finally prints the
-# Report with blind recall as the headline plus the four labelled secondaries. Exit 0
-# on success (all positives pass AND all guards trip with the expected reason).
+# produced+reported run with no certification (F3, UNANCHORED), the round-7 structural
+# seals — the default `check` REFUSING an unanchored Report headline (R7-1, UNANCHORED)
+# and a certified report carrying a FREE secondary numeric failing closed (R7-2,
+# COVERAGE_UNBOUND). Finally prints the Report with blind recall as the headline plus the
+# four labelled secondaries. Exit 0 on success (all positives pass AND all guards trip with
+# the expected reason).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,6 +58,7 @@ from contract import (
     ContractViolation,
     _canonical_run_id,
     build_attestation,
+    check,
     ed25519_public_key,
     load_committed_evaluator_id,
     load_committed_genesis_root,
@@ -140,11 +144,13 @@ run = EvaluationRun(run_id=run_id, subject="codex", cohort_content_hash=v1.conte
 run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
 
 # A1/A2: a produced run MUST present a Report bound to the RUN's evaluated cohort.
+# R7-2: a certified report carries NO free coverage (None) and its patched_alert_density /
+# fixed_cohort_recall are exactly what validate() recomputes from the committed detector.
 report_view = Report(
     blind_recall=RecallReport(rediscovered=1, total=1),  # v1 has exactly one BLIND entry (e2)
-    fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
-    coverage=1.0,
-    patched_alert_density=0.0,
+    fixed_cohort_recall=RecallReport(rediscovered=0, total=0),  # no REGRESSION entries -> (0, 0)
+    coverage=None,  # R7-2: forbidden on a certified report
+    patched_alert_density=0.0,  # e2's patched tree flags nothing -> density 0.0
     adjudicated_precision=1.0,
     cohort_content_hash=v1.content_hash,
     rediscovered_blind_ids=[e2.identity_hash],
@@ -388,6 +394,33 @@ print("== guard 10: F3 structural certify — a produced+reported run WITHOUT ce
 rep10 = validate(history=history, ledger=ledger, run=run, freeze=freeze, report=report_view)
 expect("produced+reported run without certification trips UNANCHORED", ViolationReason.UNANCHORED in rep10.reasons())
 print(f"        -> {rep10.summary()}")
+
+print()
+print("== guard 11: R7-1 structural certify — the DEFAULT check refuses an unanchored Report headline ==")
+# certification is STRUCTURAL on the REPORT: a Report asserting a numerator presented through the
+# plain default `check` (no run, no strict, no attestation) can never be blessed — UNANCHORED. Even
+# the default `check = validate` alias cannot bless an unanchored/truncated headline.
+rep11 = check(history=history, report=report_view)
+expect("default check refuses an unanchored Report headline (UNANCHORED)", ViolationReason.UNANCHORED in rep11.reasons())
+print(f"        -> {rep11.summary()}")
+
+print()
+print("== guard 12: R7-2 bind-every-numeric — a certified report with a FREE secondary numeric fails closed ==")
+# every certified numeric is recomputed from committed state or FORBIDDEN. A certified report
+# carrying a free `coverage` (pinned/all — not recomputable from committed state) fails closed.
+bad_report = report_view.model_copy(update={"coverage": 0.9})
+bad_att = build_attestation(
+    history=history, freeze=freeze, run=run, report=bad_report,
+    evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=SIGNING_KEY,
+    prior_attestation_root=load_committed_genesis_root(),
+    exclusions=None, ledger=ledger, evaluation_ledger=evaluations, achievability=None,
+)
+rep12 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=bad_report,
+    precision=precision_view, prior_evaluations=evaluations, attestation=bad_att, strict=True,
+)
+expect("certified report with a free coverage numeric trips COVERAGE_UNBOUND", ViolationReason.COVERAGE_UNBOUND in rep12.reasons())
+print(f"        -> {rep12.summary()}")
 
 print()
 print("== report: blind recall is the headline, four labelled secondaries ==")

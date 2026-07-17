@@ -158,3 +158,39 @@ def recompute_certified_numerator(blind_entries: Iterable, *, detector_id: str) 
     neither is a caller argument the scored party could forge."""
     scan_fn = resolve_scan_fn(detector_id)
     return recompute_rediscovered(blind_entries, fetch_fn=FETCH_FN, scan_fn=scan_fn)
+
+
+def recompute_fixed_cohort_recall(regression_entries: Iterable, *, detector_id: str) -> tuple[int, int]:
+    """R7-2: RECOMPUTE ``(rediscovered, total)`` over the head cohort's REGRESSION entries by
+    re-running the COMMITTED detector — the fixed-cohort mirror of the blind numerator. The
+    total is the regression-entry count; the numerator is how many the committed detector
+    rediscovers under the EXACT ``corpus_measure`` line-precise rule. RUN from committed state
+    (registry + :data:`FETCH_FN`), never a caller-supplied number, so a certified
+    ``fixed_cohort_recall`` cannot be a free float (``FIXED_COHORT_UNVERIFIED`` on mismatch)."""
+    entries = list(regression_entries)
+    scan_fn = resolve_scan_fn(detector_id)
+    rediscovered = recompute_rediscovered(entries, fetch_fn=FETCH_FN, scan_fn=scan_fn)
+    return len(rediscovered), len(entries)
+
+
+def recompute_patched_alert_density(entries: Iterable, *, detector_id: str) -> float:
+    """R7-2: RECOMPUTE patched-alert density (flags/KLOC on the fixed tree) by re-running the
+    COMMITTED detector over each entry's PATCHED target files. The flag count is EXACTLY
+    ``corpus_measure._sink_is_flagged``'s emitted-finding count (the same ``patched_flag_count``
+    ``corpus_measure`` reports), summed over every patched target line; density is
+    ``flags / (lines / 1000)``. RUN from committed state (registry + :data:`FETCH_FN`), never a
+    caller-supplied number, so a certified ``patched_alert_density`` cannot be a free float
+    (``DENSITY_UNVERIFIED`` on mismatch). SAFETY (Article III): the patched source is PARSED as
+    DATA by ``scan_fn``; it is never executed."""
+    scan_fn = resolve_scan_fn(detector_id)
+    total_flags = 0
+    total_lines = 0
+    for entry in entries:
+        for path in entry.target_paths:
+            patched_source = FETCH_FN(entry.repo, entry.patched_ref, path)
+            _, flag_count = corpus_measure._sink_is_flagged(scan_fn, patched_source, path, entry.sink_probe)
+            total_flags += flag_count
+            total_lines += len(patched_source.splitlines())
+    if total_lines == 0:
+        return 0.0
+    return total_flags / (total_lines / 1000.0)
