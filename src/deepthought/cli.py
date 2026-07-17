@@ -25,9 +25,16 @@ from .export.cve import finding_to_cve_draft
 from .export.openvex import finding_to_openvex
 from .export.osv import finding_to_osv, osv_id_for
 from .loop import LoopBudget, run_loop
+from .profile import (
+    Profile,
+    UnknownProfileError,
+    available_profiles,
+    profile_fields,
+    resolve_profile,
+)
 from .protocol import HermesUltraCodeGate, run_session
 from .sandbox import NoopSandbox, SandboxError, SandboxPolicy, SandboxResult, SandboxSpec
-from .schema import FindingStatus
+from .schema import FindingStatus, GateOutcome
 from .sessions import (
     DisclosureSession,
     DiscoverSession,
@@ -54,19 +61,100 @@ _STATE_OPTION = typer.Option(
     "state", "--state", envvar="DEEPTHOUGHT_STATE", help="Path to the state store."
 )
 
+# Opt-in, per-invocation, and NEVER persisted (FR-1). Unset (or an empty env var)
+# is default mode — today's behavior, byte-for-byte (FR-13). Mirrors the
+# DEEPTHOUGHT_STATE precedent.
+_PROFILE_OPTION = typer.Option(
+    None,
+    "--profile",
+    envvar="DEEPTHOUGHT_PROFILE",
+    help=(
+        "Opt-in low-friction profile (e.g. mostly_harmless). Unset = default "
+        "behavior. Fills unset defaults and trims informational output only; it "
+        "changes no gate decision, scope, basis, execution, or transmission."
+    ),
+)
+
 
 def _store(state: Path) -> FileStore:
     return FileStore(state)
 
 
-def _echo_session(record) -> None:
-    typer.echo(f"session : {record.id}")
-    typer.echo(f"gate    : {record.gate_outcome.value if record.gate_outcome else '-'}")
-    if record.gate_reason:
-        typer.echo(f"reason  : {record.gate_reason}")
-    typer.echo(f"close   : {record.close_state.value}")
+def _resolve_profile_or_exit(name: Optional[str]) -> Optional[Profile]:
+    """Resolve the profile name to a frozen Profile (or None), exiting cleanly on
+    an unknown name rather than raising a traceback."""
+    try:
+        return resolve_profile(name)
+    except UnknownProfileError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+
+def _echo_session(record, *, profile: Optional[Profile] = None,
+                  read_only: bool = False) -> None:
+    # terse_output applies ONLY to the read-only verbs
+    # (status/map/discover/sibling-hunt). verify/disclose pass no profile here, so
+    # their sign-off/execution/transmission banners always render in full (FR-7).
+    terse = bool(profile and profile.terse_output and read_only)
+    if terse:
+        # Collapse the purely-informational header block to one compact line; the
+        # body (summary + next steps) is preserved in full.
+        gate = record.gate_outcome.value if record.gate_outcome else "-"
+        reason = f" reason={record.gate_reason}" if record.gate_reason else ""
+        typer.echo(
+            f"session {record.id} gate={gate} close={record.close_state.value}{reason}"
+        )
+    else:
+        typer.echo(f"session : {record.id}")
+        typer.echo(
+            f"gate    : {record.gate_outcome.value if record.gate_outcome else '-'}"
+        )
+        if record.gate_reason:
+            typer.echo(f"reason  : {record.gate_reason}")
+        typer.echo(f"close   : {record.close_state.value}")
     typer.echo("")
+    # The body — including the session's OWN next steps — always renders in full.
+    # The profile never substitutes or suppresses a session's guidance (e.g. a
+    # pending VERIFY escalation on a candidate-bearing status); it only trims the
+    # informational header above (terse_output).
     typer.echo(record.body)
+
+
+def _maybe_scope_hint(profile: Optional[Profile], record) -> None:
+    """Under a profile, an empty-scope HOLD prints a helpful pointer — the profile
+    never invents a scope (FR-5). No-op in default mode (FR-13)."""
+    if profile is None:
+        return
+    if (record.gate_outcome is GateOutcome.hold and record.gate_reason
+            and "scope" in record.gate_reason):
+        typer.echo("")
+        typer.echo(
+            "hint: this profile never invents a scope. Pass --scope "
+            "<path/module/host> to define the in-scope surface; an empty scope "
+            "stays a HOLD (Constitution Article II)."
+        )
+
+
+def _root_default(profile: Optional[Profile], store: FileStore, project_id: str,
+                  root: Optional[str]) -> Optional[str]:
+    """Under a profile with ``default_root_from_local_path``, an UNSET ``--root``
+    defaults to the project's ``local_path`` (FR-4). An explicit ``--root`` always
+    wins (FR-17); ``scope.py`` containment (``resolve_within``) is unchanged, so
+    every area escaping the root is still refused."""
+    if root is not None:
+        return root  # explicit flag always overrides
+    if profile is None or not profile.default_root_from_local_path:
+        return root
+    # Best-effort only: if the store cannot resolve the project (missing/corrupt
+    # state), do NOT raise here — return the unset root and let the command's own
+    # run_session + StoreError handler produce the clean exit 2 (gemini review).
+    try:
+        proj = store.get_project(project_id)
+    except StoreError:
+        return root
+    if proj is not None and proj.local_path:
+        return proj.local_path
+    return root
 
 
 # --- playbook ------------------------------------------------------------
@@ -90,8 +178,12 @@ def playbook_new_project(
     project_id: Optional[str] = typer.Option(None, help="Override the derived id."),
     notes: str = typer.Option("", help="Free notes for the project body."),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Register a project (NEW PROJECT session)."""
+    prof = _resolve_profile_or_exit(profile)
+    # The profile NEVER supplies a basis (FR-6) or a scope (FR-5): the session is
+    # constructed from exactly what the operator passed.
     session = NewProjectSession(
         name=name,
         source_type=source_type,
@@ -105,14 +197,17 @@ def playbook_new_project(
     )
     record = run_session(_store(state), HermesUltraCodeGate(), session)
     _echo_session(record)
+    _maybe_scope_hint(prof, record)
 
 
 @playbook_app.command("status")
 def playbook_status(
     project: str = typer.Option(..., help="Project id to summarize."),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Summarize state without changing it (STATUS session)."""
+    prof = _resolve_profile_or_exit(profile)
     try:
         record = run_session(
             _store(state), HermesUltraCodeGate(), StatusSession(project)
@@ -120,7 +215,8 @@ def playbook_status(
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
-    _echo_session(record)
+    _echo_session(record, profile=prof, read_only=True)
+    _maybe_scope_hint(prof, record)
 
 
 @playbook_app.command("map")
@@ -130,20 +226,25 @@ def playbook_map(
         None, "--root", help="Local checkout to walk; defaults to the project's local_path."
     ),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Record the in-scope attack surface, READ-ONLY (MAP session, feature 002).
 
     Walks only the project's in-scope areas and records Coverage. Executes no
     target code, transmits nothing, and never widens scope.
     """
+    prof = _resolve_profile_or_exit(profile)
+    store = _store(state)
+    root = _root_default(prof, store, project, root)
     try:
         record = run_session(
-            _store(state), HermesUltraCodeGate(), MapSession(project, root=root)
+            store, HermesUltraCodeGate(), MapSession(project, root=root)
         )
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
-    _echo_session(record)
+    _echo_session(record, profile=prof, read_only=True)
+    _maybe_scope_hint(prof, record)
 
 
 @playbook_app.command("discover")
@@ -156,6 +257,7 @@ def playbook_discover(
         None, "--root", help="Local checkout for code reasoning; defaults to local_path."
     ),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Reason over code and SARIF for candidates, READ-ONLY (DISCOVER, feature 002).
 
@@ -163,16 +265,20 @@ def playbook_discover(
     orchestrator ingests only the typed envelope. Executes no target code,
     transmits nothing, and never widens scope.
     """
+    prof = _resolve_profile_or_exit(profile)
+    store = _store(state)
+    root = _root_default(prof, store, project, root)
     try:
         record = run_session(
-            _store(state),
+            store,
             HermesUltraCodeGate(),
             DiscoverSession(project, sarif_path=sarif, root=root),
         )
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
-    _echo_session(record)
+    _echo_session(record, profile=prof, read_only=True)
+    _maybe_scope_hint(prof, record)
 
 
 @playbook_app.command("sibling-hunt")
@@ -191,6 +297,7 @@ def playbook_sibling_hunt(
         None, "--root", help="Local checkout for code reasoning; defaults to local_path."
     ),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Hunt read-only for same-class variants of a verified finding (SIBLING HUNT, 004).
 
@@ -202,9 +309,12 @@ def playbook_sibling_hunt(
     sibling that is not already registered (with its own authorization basis) is
     skipped, never created.
     """
+    prof = _resolve_profile_or_exit(profile)
+    store = _store(state)
+    root = _root_default(prof, store, project, root)
     try:
         record = run_session(
-            _store(state),
+            store,
             HermesUltraCodeGate(),
             SiblingHuntSession(
                 project_id=project,
@@ -217,7 +327,8 @@ def playbook_sibling_hunt(
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
-    _echo_session(record)
+    _echo_session(record, profile=prof, read_only=True)
+    _maybe_scope_hint(prof, record)
 
 
 # The dry-run repro spec. It is DATA the NoopSandbox merely records — an argv
@@ -263,6 +374,10 @@ def playbook_verify(
         ),
     ),
     state: Path = _STATE_OPTION,
+    # Accepted for uniform env-activation, but DELIBERATELY not resolved before
+    # the hard stop below and never used to alter execution posture: verify
+    # constructs only a NoopSandbox dry-run under EVERY profile value (FR-8).
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Verify a candidate finding in the sandbox (VERIFY session, feature 003).
 
@@ -294,6 +409,12 @@ def playbook_verify(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    # Non-signoff path: validate the profile NAME for parity with every other verb
+    # (a typo'd --profile is still rejected), but AFTER the hard stop and WITHOUT
+    # letting the result alter execution posture — verify is a NoopSandbox dry-run
+    # under every profile value (FR-8, RT F2.2).
+    _resolve_profile_or_exit(profile)
 
     # --- default: a NoopSandbox dry-run that executes NOTHING --------------
     # The canned verdict is non-reproducing by default (a true dry-run: the
@@ -354,6 +475,7 @@ def playbook_disclose(
     project: str = typer.Option(..., help="Project id the finding belongs to."),
     finding: str = typer.Option(..., help="VERIFIED finding id to draft (F-NNNN)."),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Draft disclosure artifacts for a verified finding (DISCLOSURE session, 005).
 
@@ -365,6 +487,10 @@ def playbook_disclose(
     fabricates a CVE or advisory reference. Sending is a human action performed
     outside this tool; Deep Thought drafts only.
     """
+    # Validate the profile for uniform env-activation, but NEVER apply terse or
+    # auto-next-steps here: disclosure is not a read-only verb, so its full
+    # human-gate teach-back and transmission notice always render (FR-7, FR-9).
+    _resolve_profile_or_exit(profile)
     store = _store(state)
     # Refuse an unknown project or finding BEFORE entering the harness, so a typo
     # never persists a Session record at all. (The session ALSO refuses a missing
@@ -410,8 +536,12 @@ def playbook_disclose(
 def playbook_findings(
     project: Optional[str] = typer.Option(None, help="Filter by project id."),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """List findings."""
+    # Validate DEEPTHOUGHT_PROFILE uniformly: a misspelled global profile is
+    # rejected here too, not silently accepted (codex review PR #37).
+    _resolve_profile_or_exit(profile)
     findings = _store(state).list_findings(project=project)
     if not findings:
         typer.echo("no findings")
@@ -420,10 +550,54 @@ def playbook_findings(
         typer.echo(f"{finding.id}  {finding.status.value:<10}  {finding.summary}")
 
 
+# --- profiles ------------------------------------------------------------
+@app.command("profiles")
+def profiles(profile: Optional[str] = _PROFILE_OPTION) -> None:
+    """List available low-friction profiles and the EXACT defaults each applies.
+
+    Read-only introspection (Constitution Article VII): it lets an operator audit
+    a profile — its finite loop budget, its root default, and its terse display
+    flag — before trusting it, and changes no state. It also names the ceremony the
+    profile deliberately does NOT streamline (scope, authorization basis, and
+    output path are never defaulted).
+    """
+    # Validate DEEPTHOUGHT_PROFILE uniformly (codex review PR #37); an explicit
+    # valid --profile flag still overrides a stale bad env var (flag-over-env).
+    _resolve_profile_or_exit(profile)
+    profs = available_profiles()
+    if not profs:
+        typer.echo("no profiles registered")
+        return
+    for prof in profs:
+        budget = prof.default_loop_budget
+        bases = ", ".join(sorted(b.value for b in prof.low_ceremony_bases)) or "(none)"
+        typer.echo(f"profile: {prof.name}")
+        typer.echo(
+            "  loop budget (flag-free default): "
+            f"max_sessions={budget.max_sessions}, "
+            f"max_wall_seconds={budget.max_wall_seconds}, "
+            f"max_context_tokens={budget.max_context_tokens}"
+        )
+        typer.echo(f"  default_root_from_local_path: {prof.default_root_from_local_path}")
+        typer.echo(f"  terse_output: {prof.terse_output}")
+        typer.echo(f"  low_ceremony_bases (descriptive only): {bases}")
+        typer.echo("  scope: NEVER auto-filled — pass --scope (empty stays a HOLD)")
+        typer.echo("  authorization basis: NEVER defaulted or guessed")
+        typer.echo("  output/state path: NEVER defaulted (no exfiltration knob)")
+        typer.echo("  execution: no sandbox field; confers zero execution privilege")
+        typer.echo(f"  fields: {', '.join(profile_fields(prof))}")
+        typer.echo("")
+
+
 # --- check ---------------------------------------------------------------
 @app.command("check")
-def check(state: Path = _STATE_OPTION) -> None:
+def check(
+    state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
+) -> None:
     """Validate state: schema, lifecycle, orphans, identity, OSV conformance."""
+    # Validate DEEPTHOUGHT_PROFILE uniformly (codex review PR #37).
+    _resolve_profile_or_exit(profile)
     report = run_check(_store(state))
     if report.ok:
         typer.echo("check: OK")
@@ -488,6 +662,7 @@ def publish(
         "patched findings.",
     ),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Emit prepared local artifacts. Asserts the human gate. Transmits nothing.
 
@@ -496,6 +671,10 @@ def publish(
     ``all`` write each into an ``out/<format>/`` subdirectory. No format transmits;
     every write is a local artifact under the human gate (Constitution Article V).
     """
+    # Validate the profile for uniform env-activation, but NEVER let it choose an
+    # output path (FR-10) or trim the transmission notice (FR-7): the ``--out``
+    # default and the human-gate banner are unchanged under every profile value.
+    _resolve_profile_or_exit(profile)
     if format != "all" and format not in _PUBLISH_FORMATS:
         typer.echo(
             f"publish refused: unknown --format {format!r}. Choose one of: "
@@ -572,6 +751,7 @@ def loop(
         None, "--max-tokens", help="Max summed session context tokens."
     ),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """Drive the safe, gated session chain autonomously under a budget (feature 006).
 
@@ -581,27 +761,47 @@ def loop(
     be sent, are escalated to a human. Requires at least one budget limit; a
     governed stop (fixed point, budget, gate refusal) exits 0.
     """
-    if max_sessions is None and max_seconds is None and max_tokens is None:
+    prof = _resolve_profile_or_exit(profile)
+    no_flags = max_sessions is None and max_seconds is None and max_tokens is None
+    used_profile_budget = False
+    if no_flags and prof is not None:
+        # Under a profile, a flag-free loop uses the profile's FINITE default
+        # budget instead of exiting 2 (FR-3). It is a frozen LoopBudget with >=1
+        # positive finite limit (validated at profile construction).
+        budget = prof.default_loop_budget
+        used_profile_budget = True
+    elif no_flags:
         typer.echo(
             "error: the loop requires at least one budget limit "
             "(--max-sessions / --max-seconds / --max-tokens) — it is never unbounded"
         )
         raise typer.Exit(code=2)
-    try:
-        budget = LoopBudget(
-            max_sessions=max_sessions,
-            max_wall_seconds=max_seconds,
-            max_context_tokens=max_tokens,
-        )
-    except ValidationError:
-        typer.echo("error: every budget limit must be a positive number")
-        raise typer.Exit(code=2)
+    else:
+        # An explicit flag ALWAYS overrides the profile default (FR-3, FR-17).
+        try:
+            budget = LoopBudget(
+                max_sessions=max_sessions,
+                max_wall_seconds=max_seconds,
+                max_context_tokens=max_tokens,
+            )
+        except ValidationError:
+            typer.echo("error: every budget limit must be a positive number")
+            raise typer.Exit(code=2)
     try:
         run = run_loop(_store(state), HermesUltraCodeGate(), project, budget)
     except StoreError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2)
     _echo_loop_run(run)
+    if used_profile_budget:
+        # Echo the effective budget so a flag-free run is never opaque (FR-3).
+        typer.echo("")
+        typer.echo(
+            f"budget   : profile {prof.name!r} default — "
+            f"max_sessions={budget.max_sessions}, "
+            f"max_wall_seconds={budget.max_wall_seconds}, "
+            f"max_context_tokens={budget.max_context_tokens}"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
