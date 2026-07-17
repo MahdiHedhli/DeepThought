@@ -42,16 +42,31 @@ from contract import (  # noqa: E402
     SyntheticVariant,
     ViolationReason,
     _canonical_run_id,
+    build_attestation,
     candidates_from_adjudications,
+    chain_root,
+    leaf_hash,
+    merkle_root,
+    pool_root_of,
     precision_sample_seed,
     sample_confusion_pairs,
+    sign,
     validate,
+    verify,
 )
 from roundrecord import ClassRate  # noqa: E402
 
 A40 = "a" * 40
 B40 = "b" * 40
 C40 = "c" * 40
+
+# A fixed evaluator key (deterministic tests never read os.urandom).
+KEY = b"deepthought-test-evaluator-key-0123456789"
+
+
+def _pool(n):
+    """A canonical (sorted, unique) confusion-pair pool (A6)."""
+    return [f"p{i:02d}" for i in range(n)]
 
 
 def _entry(
@@ -346,7 +361,7 @@ def test_ac9_recall_independent_of_density_precision_needs_blind_sample():
 
     seed = precision_sample_seed("cohortH", "freezeF", "run1")
     assert seed == precision_sample_seed("cohortH", "freezeF", "run1")  # deterministic
-    pairs = [f"p{i}" for i in range(20)]
+    pairs = [f"p{i:02d}" for i in range(20)]
     assert sample_confusion_pairs(pairs, 5, seed) == sample_confusion_pairs(pairs, 5, seed)
 
     # a builder on the panel is invalid
@@ -728,7 +743,7 @@ def test_h7_report_bound_to_cohort_denominator():
 # H8 — precision requires full coverage and a seed/sample bound to precision_sample_seed.
 def test_h8_precision_coverage_and_sample_binding():
     seed = precision_sample_seed("cohortH", "freezeF", "run1")
-    pool = [f"p{i}" for i in range(20)]
+    pool = [f"p{i:02d}" for i in range(20)]
     sample = sample_confusion_pairs(pool, 3, seed)
 
     # coverage: adjudicating only a favorable subset is rejected
@@ -1050,7 +1065,7 @@ def test_r7_exposure_resolved_by_entry_identity_across_versions():
 # R8 — precision draw is ALWAYS verified: pool/k mandatory; no run/freeze → unbound.
 def test_r8_precision_pool_k_mandatory_and_binding_required():
     seed = precision_sample_seed("cohortH", "freezeF", "run1")
-    pool = [f"p{i}" for i in range(20)]
+    pool = [f"p{i:02d}" for i in range(20)]
     sample = sample_confusion_pairs(pool, 3, seed)
 
     # pool/k are MANDATORY: omitting them is rejected at the type boundary (P1)
@@ -1081,3 +1096,477 @@ def test_r8_precision_pool_k_mandatory_and_binding_required():
     )
     out = validate(precision=ap)
     assert not out.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(out)
+
+
+# --------------------------------------------------------------------------- #
+# Round-3 Class-1 silent-bug regression floor (A1..A6). Each case dishonestly
+# passed validate() (or a constructor) AFTER the R1..R8 seals held; the contract
+# must now REJECT it. See scratchpad/contract-fix-spec-r3-crypto.md and
+# specs/008-evaluation-contract/threat-model.md.
+# --------------------------------------------------------------------------- #
+
+
+# A1 — the Report binds to the RUN's evaluated cohort, not an easier earlier one.
+def test_a1_report_binds_to_runs_evaluated_cohort():
+    v1_blinds = [_entry(vuln=x * 40, role="blind") for x in ("a", "b")]
+    v2_blinds = v1_blinds + [_entry(vuln=x * 40, role="blind") for x in ("c", "d", "e")]
+    v1 = _cohort("v1", v1_blinds)
+    v2 = _cohort("v2", v2_blinds, reason="add 3 blind", parent="v1")  # superset: no shrink
+    hist = CohortHistory(versions=[v1, v2])
+    freeze = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z"
+    )
+    run = _run("s", v2.content_hash, freeze.freeze_hash)  # the run evaluated v2 (5 blind)
+
+    # a report bound to the EASIER v1 (2/2) while the run evaluated v2 → reject
+    liar = Report(
+        blind_recall=RecallReport(rediscovered=2, total=2),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v1.content_hash,
+        rediscovered_blind_ids=[v1_blinds[0].identity_hash, v1_blinds[1].identity_hash],
+    )
+    rep = validate(history=hist, run=run, freeze=freeze, report=liar)
+    assert not rep.ok and ViolationReason.REPORT_DENOMINATOR_MISMATCH in _reasons(rep)
+
+    # the honest form: bound to v2 (the run's cohort), numerator a subset of v2's blind
+    honest = Report(
+        blind_recall=RecallReport(rediscovered=1, total=5),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v2.content_hash,
+        rediscovered_blind_ids=[v2_blinds[0].identity_hash],
+    )
+    assert validate(history=hist, run=run, freeze=freeze, report=honest).ok
+
+
+# A2 — POLICY_REFUSAL cannot launder a produced run to N/A; a produced run needs a Report.
+def test_a2_policy_refusal_on_produced_run_and_produced_needs_report():
+    a = _entry(vuln=A40, role="blind")
+    v1 = _cohort("v1", [a])
+    hist = CohortHistory(versions=[v1])
+    freeze = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z"
+    )
+    run = _run("s", v1.content_hash, freeze.freeze_hash)
+    run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+
+    # a produced run + a run-level POLICY_REFUSAL exclusion (scored N/A) → reject
+    excl = ExclusionLog(events=[ExclusionEvent(reason=ExclusionReason.POLICY_REFUSAL)])
+    rep = validate(history=hist, run=run, freeze=freeze, exclusions=excl)
+    assert not rep.ok and ViolationReason.POLICY_REFUSAL_ON_PRODUCED_RUN in _reasons(rep)
+
+    # a produced run that presents NO bound Report → REPORT_UNBOUND
+    rep2 = validate(history=hist, run=run, freeze=freeze)
+    assert not rep2.ok and ViolationReason.REPORT_UNBOUND in _reasons(rep2)
+
+
+# A3 — evaluate-once is BLIND-SET scoped: a re-freeze cannot re-roll the same blind cohort.
+def test_a3_evaluate_once_is_blind_set_scoped_across_freezes():
+    a = _entry(vuln=A40, role="blind")
+    v1 = _cohort("v1", [a])
+    hist = CohortHistory(versions=[v1])
+    f1 = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L", params={"budget": 100}),
+        timestamp="2026-07-16T10:00:00Z",
+    )
+    f2 = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L", params={"budget": 200}),
+        timestamp="2026-07-16T10:00:00Z",
+    )
+    assert f1.freeze_hash != f2.freeze_hash  # a trivial re-freeze mints a new ledger key
+
+    # the first eval under f1 is already recorded WITH its scored blind identities
+    prior = EvaluationLedger()
+    prior.record(
+        cohort_content_hash=v1.content_hash,
+        freeze_hash=f1.freeze_hash,
+        subject="s",
+        blind_ids=[a.identity_hash],
+    )
+    # the second eval re-freezes (f2) and re-scores the SAME blind cohort+subject → reject
+    run2 = _run("s", v1.content_hash, f2.freeze_hash)
+    rep = validate(history=hist, run=run2, freeze=f2, prior_evaluations=prior)
+    assert not rep.ok and ViolationReason.BLIND_REEVALUATED in _reasons(rep)
+
+    # a disjoint blind cohort (b) for the same subject is fine
+    b = _entry(vuln=B40, role="blind")
+    v2 = _cohort("v1b", [b])
+    hist2 = CohortHistory(versions=[v2])
+    run3 = _run("s", v2.content_hash, f2.freeze_hash)
+    assert validate(history=hist2, run=run3, freeze=f2, prior_evaluations=prior).ok
+
+
+# A4 — the first post-freeze attempt is bound to the freeze (freeze B, evaluate B' → reject).
+def test_a4_evaluated_artifact_bound_to_freeze():
+    a = _entry(vuln=A40, role="blind")
+    v1 = _cohort("v1", [a])
+    hist = CohortHistory(versions=[v1])
+    freeze = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z"
+    )
+    # a post-freeze attempt whose freeze_hash is NOT the frozen bundle's hash
+    run = _run("s", v1.content_hash, freeze.freeze_hash)
+    run.attempts.append(
+        EvalAttempt(
+            phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", freeze_hash="unrelated"
+        )
+    )
+    rep = validate(history=hist, run=run, freeze=freeze)
+    assert not rep.ok and ViolationReason.BAD_FREEZE_BINDING in _reasons(rep)
+
+    # the honest bound form (attempt.freeze_hash == freeze.freeze_hash) does not trip it
+    run_ok = _run("s", v1.content_hash, freeze.freeze_hash)
+    run_ok.attempt_evaluation(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E")
+    assert ViolationReason.BAD_FREEZE_BINDING not in _reasons(validate(history=hist, run=run_ok, freeze=freeze))
+
+
+# A5 — validate() mirrors the ordering invariant: no attempt may follow a producing one.
+def test_a5_producing_attempt_must_be_terminal_in_validate():
+    run = EvaluationRun(
+        run_id="r",
+        subject="s",
+        cohort_content_hash="H",
+        freeze_hash="fz",
+        attempts=[
+            EvalAttempt(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", freeze_hash="fz"),
+            EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", freeze_hash="fz"),
+        ],
+    )
+    rep = validate(run=run)
+    assert not rep.ok and ViolationReason.BLIND_ACCESS_EXCEEDED in _reasons(rep)
+
+
+# A6 — the precision pool must be canonical (sorted, unique) with a minimum k.
+def test_a6_precision_pool_must_be_canonical_and_min_k():
+    seed = precision_sample_seed("cohortH", "freezeF", "run1")
+    canonical = _pool(10)
+
+    # a permuted pool (same set, attacker-favorable order) is rejected
+    permuted = list(reversed(canonical))
+    perm_sample = sample_confusion_pairs(permuted, 3, seed)
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(
+            seed=seed,
+            sampled_pairs=perm_sample,
+            pool=permuted,
+            k=3,
+            adjudications=[_good_panel(s, "true-positive") for s in perm_sample],
+        )
+
+    # a duplicate in the pool is rejected
+    dup = canonical + [canonical[0]]
+    dup_sample = sample_confusion_pairs(dup, 3, seed)
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(
+            seed=seed,
+            sampled_pairs=dup_sample,
+            pool=dup,
+            k=3,
+            adjudications=[_good_panel(s, "true-positive") for s in dup_sample],
+        )
+
+    # a too-small k relative to |pool| is rejected
+    k1_sample = sample_confusion_pairs(canonical, 1, seed)
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(
+            seed=seed,
+            sampled_pairs=k1_sample,
+            pool=canonical,
+            k=1,
+            adjudications=[_good_panel(s, "true-positive") for s in k1_sample],
+        )
+
+    # the canonical pool with k >= 2 passes and draws from sorted(set(pool))
+    good = sample_confusion_pairs(canonical, 3, seed)
+    assert good == sample_confusion_pairs(list(reversed(canonical)), 3, seed)  # order-independent draw
+    ap = AdjudicatedPrecision(
+        seed=seed,
+        sampled_pairs=good,
+        pool=canonical,
+        k=3,
+        adjudications=[_good_panel(s, "true-positive") for s in good],
+    )
+    assert ap.precision == 1.0
+
+
+# --------------------------------------------------------------------------- #
+# Round-3 cryptographic-anchoring regression floor (B1..B5). The "omit the
+# baseline" class becomes impossible: a certified score is bound to a single
+# committed, signed attestation root; validate(strict=...) fails closed unless
+# the presented state reproduces every root and the signature verifies.
+# --------------------------------------------------------------------------- #
+
+
+# B1/B2 primitives — append-only + order-independent, deterministic sign/verify.
+def test_b1_b2_anchoring_primitives_are_deterministic():
+    # leaf_hash: canonical-JSON sha256 — deterministic and membership-sensitive.
+    assert leaf_hash({"a": 1, "b": 2}) == leaf_hash({"b": 2, "a": 1})  # key order irrelevant
+    assert leaf_hash({"a": 1}) != leaf_hash({"a": 2})
+    # chain_root: append-only. Drop / reorder / rewrite ANY entry changes the root.
+    base = chain_root(["x", "y", "z"])
+    assert base == chain_root(["x", "y", "z"])  # deterministic
+    assert base != chain_root(["x", "z"])  # drop
+    assert base != chain_root(["x", "z", "y"])  # reorder
+    assert base != chain_root(["x", "y", "Z"])  # rewrite
+    # merkle_root: order-independent over the SAME set; membership-sensitive.
+    assert merkle_root(["a", "b", "c"]) == merkle_root(["c", "b", "a"])
+    assert merkle_root(["a", "b", "c"]) != merkle_root(["a", "b"])
+    # sign/verify: round-trips; a forged signature or a wrong key fails (constant-time).
+    root = merkle_root(["a", "b"])
+    sig = sign(root, KEY)
+    assert verify(root, sig, KEY)
+    assert not verify(root, sig, b"a-different-key")
+    assert not verify(root, "00" * 32, KEY)
+
+
+# B1 — history_root closes truncation/omission/reorder.
+def test_b1_history_root_detects_truncation_and_reorder():
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=B40, role="blind")
+    c = _entry(vuln=C40, role="blind")
+    v1 = _cohort("v1", [a, b])
+    v2 = _cohort("v2", [a, b, c], reason="add c", parent="v1")
+    full = CohortHistory(versions=[v1, v2])
+    assert full.history_root != CohortHistory(versions=[v1]).history_root  # truncation
+    assert full.history_root != CohortHistory(versions=[v2, v1]).history_root  # reorder
+
+
+# B2 — each ledger/log exposes a chain root that a rewrite/omission breaks.
+def test_b2_ledger_and_log_roots_detect_rewrite():
+    excl1 = ExclusionLog(events=[ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity="x")])
+    excl2 = ExclusionLog(events=[ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity="y")])
+    assert excl1.root != excl2.root
+    assert excl1.root == ExclusionLog(events=list(excl1.events)).root  # deterministic
+
+    led1 = ExposureLedger()
+    led1.record(cohort_content_hash="H", actor="a", activity="curated")
+    led2 = ExposureLedger()
+    led2.record(cohort_content_hash="H", actor="b", activity="curated")
+    assert led1.root != led2.root
+
+    ev1 = EvaluationLedger()
+    ev1.record(cohort_content_hash="H", freeze_hash="F", subject="s", blind_ids=["i"])
+    ev2 = EvaluationLedger()
+    ev2.record(cohort_content_hash="H", freeze_hash="F", subject="s", blind_ids=["j"])
+    assert ev1.root != ev2.root
+
+    ach1 = AchievabilityLog(
+        freeze_timestamp="2026-07-16T12:00:00Z",
+        predictions=[AchievabilityPrediction(entry_identity="E1", predicted_achievable=False, registered_at="2026-07-16T09:00:00Z")],
+    )
+    ach2 = AchievabilityLog(
+        freeze_timestamp="2026-07-16T12:00:00Z",
+        predictions=[AchievabilityPrediction(entry_identity="E2", predicted_achievable=False, registered_at="2026-07-16T09:00:00Z")],
+    )
+    assert ach1.root != ach2.root
+
+
+# B3 — exposure resolves by entry identity (no old version needed); unresolvable == HARD FAIL.
+def test_b3_exposure_by_curated_entry_ids_and_unresolvable_hard_fail():
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=B40, role="blind")
+    scored = _cohort("v1", [a, b])
+    hist = CohortHistory(versions=[scored])
+
+    # the subject curated entry 'a' under an OLD cohort version that is NOT presented;
+    # recorded by IDENTITY, exposure still bars it — no old version needed
+    ledger = ExposureLedger()
+    ledger.record(
+        cohort_content_hash="old-cohort-not-presented",
+        actor="claude",
+        activity="curated",
+        curated_entry_ids=[a.identity_hash],
+    )
+    run = _run("claude", scored.content_hash, "fz")
+    rep = validate(history=hist, run=run, ledger=ledger)
+    assert not rep.ok and ViolationReason.CURATOR_IS_SUBJECT in _reasons(rep)
+
+    # an UNRESOLVABLE record whose actor == subject is a HARD FAILURE (fail closed)
+    ledger2 = ExposureLedger()
+    ledger2.record(cohort_content_hash="unresolvable", actor="claude", activity="curated")
+    run2 = _run("claude", scored.content_hash, "fz")
+    rep2 = validate(history=hist, run=run2, ledger=ledger2)
+    assert not rep2.ok and ViolationReason.CURATOR_IS_SUBJECT in _reasons(rep2)
+
+    # a subject whose curated identities are disjoint from the scored blind set is fine
+    ledger3 = ExposureLedger()
+    ledger3.record(
+        cohort_content_hash="old", actor="codex", activity="curated", curated_entry_ids=["some-other-identity"]
+    )
+    run3 = _run("codex", scored.content_hash, "fz")
+    assert validate(history=hist, run=run3, ledger=ledger3).ok
+
+
+# B4 — the precision pool must reproduce the committed freeze pool_root.
+def test_b4_precision_pool_must_reproduce_committed_pool_root():
+    pool = _pool(20)
+    committed = pool_root_of(pool)
+    bundle = DetectorBundle(detector_id="d", lockfile_hash="L", pool_root=committed)
+    freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
+    rid = _canonical_run_id("CH", freeze.freeze_hash, "s")
+    run = EvaluationRun(run_id=rid, subject="s", cohort_content_hash="CH", freeze_hash=freeze.freeze_hash)
+    seed = precision_sample_seed("CH", freeze.freeze_hash, rid)
+
+    def mk(p):
+        s = sample_confusion_pairs(p, 3, seed)
+        return AdjudicatedPrecision(
+            seed=seed,
+            sampled_pairs=s,
+            pool=p,
+            k=3,
+            cohort_hash="CH",
+            freeze_hash=freeze.freeze_hash,
+            run_id=rid,
+            adjudications=[_good_panel(x, "true-positive") for x in s],
+        )
+
+    # the honest pool reproduces the committed root
+    assert validate(run=run, freeze=freeze, precision=mk(pool)).ok
+    # a swapped (canonical but different-membership) pool does NOT reproduce it → reject
+    swapped = [f"q{i:02d}" for i in range(20)]
+    rep = validate(run=run, freeze=freeze, precision=mk(swapped))
+    assert not rep.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep)
+
+
+def _anchored():
+    """A fully honest, anchored evaluation bundle plus its signed Attestation.
+    Reused by the B5 fail-closed cases (each tampers exactly one thing)."""
+    blinds = [_entry(vuln=x * 40, role="blind") for x in ("a", "b")]
+    v1 = _cohort("v1", blinds)
+    hist = CohortHistory(versions=[v1])
+    pool = _pool(12)
+    bundle = DetectorBundle(detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool))
+    freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
+    run = _run("codex", v1.content_hash, freeze.freeze_hash)
+    run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+    report = Report(
+        blind_recall=RecallReport(rediscovered=1, total=2),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v1.content_hash,
+        rediscovered_blind_ids=[blinds[0].identity_hash],
+    )
+    ledger = ExposureLedger()
+    ledger.record(
+        cohort_content_hash=v1.content_hash,
+        actor="claude",  # a curator that is NOT the subject (codex)
+        activity="curated",
+        curated_entry_ids=[e.identity_hash for e in blinds],
+    )
+    excl = ExclusionLog(
+        events=[ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity="z", from_version="v0", to_version="v1")]
+    )
+    evln = EvaluationLedger()
+    att = build_attestation(
+        history=hist,
+        freeze=freeze,
+        run=run,
+        report=report,
+        evaluator_id="curator-not-subject",
+        attested_at="2026-07-16T12:00:00Z",
+        key=KEY,
+        exclusions=excl,
+        ledger=ledger,
+        evaluation_ledger=evln,
+        achievability=None,
+    )
+    return dict(hist=hist, freeze=freeze, run=run, report=report, ledger=ledger, excl=excl, evln=evln, blinds=blinds, att=att)
+
+
+def _certify(a, **overrides):
+    kw = dict(
+        history=a["hist"],
+        freeze=a["freeze"],
+        run=a["run"],
+        report=a["report"],
+        exclusions=a["excl"],
+        ledger=a["ledger"],
+        prior_evaluations=a["evln"],
+        attestation=a["att"],
+        verify_key=KEY,
+        strict=True,
+    )
+    kw.update(overrides)
+    return validate(**kw)
+
+
+# B5 — a fully honest, signed attestation is ACCEPTED under strict certification.
+def test_b5_honest_signed_attestation_accepted():
+    a = _anchored()
+    rep = _certify(a)
+    assert rep.ok, _reasons(rep)
+
+
+# B5 — a forged signature is rejected.
+def test_b5_forged_signature_rejected():
+    a = _anchored()
+    forged = a["att"].model_copy(update={"signature": "00" * 32})
+    rep = _certify(a, attestation=forged)
+    assert not rep.ok and ViolationReason.ATTESTATION_INVALID in _reasons(rep)
+
+
+# B5 — a tampered/omitted history version (root mismatch) is rejected.
+def test_b5_tampered_history_root_mismatch():
+    a = _anchored()
+    extra = _entry(vuln=C40, role="blind")
+    v2 = _cohort("v2", a["blinds"] + [extra], reason="append not attested", parent="v1")
+    tampered = CohortHistory(versions=[a["hist"].versions[0], v2])
+    rep = _certify(a, history=tampered)
+    assert not rep.ok and ViolationReason.ATTESTATION_MISMATCH in _reasons(rep)
+
+
+# B5 — a rewritten ledger entry (chain-root mismatch) is rejected.
+def test_b5_rewritten_ledger_entry_root_mismatch():
+    a = _anchored()
+    rewritten = ExclusionLog(
+        events=[
+            ExclusionEvent(
+                reason=ExclusionReason.ALIAS_DUPE,
+                entry_identity="z",
+                from_version="v0",
+                to_version="v1",
+                detail="TAMPERED",
+            )
+        ]
+    )
+    rep = _certify(a, exclusions=rewritten)
+    assert not rep.ok and ViolationReason.ATTESTATION_MISMATCH in _reasons(rep)
+
+
+# B5 — a swapped pool (pool_root mismatch) is rejected.
+def test_b5_swapped_pool_root_mismatch():
+    a = _anchored()
+    swapped_bundle = a["freeze"].bundle.model_copy(update={"pool_root": pool_root_of(_pool(20))})
+    swapped_freeze = FreezeManifest(bundle=swapped_bundle, timestamp=a["freeze"].timestamp)
+    rep = _certify(a, freeze=swapped_freeze)
+    assert not rep.ok and ViolationReason.ATTESTATION_MISMATCH in _reasons(rep)
+
+
+# B5 — an attestation that references a component not presented is rejected (fail closed).
+def test_b5_missing_component_incomplete():
+    a = _anchored()
+    rep = _certify(a, history=None)
+    assert not rep.ok and ViolationReason.ATTESTATION_INCOMPLETE in _reasons(rep)
+
+
+# B5 — a certify path with NO attestation is UNANCHORED (fail closed).
+def test_b5_certify_without_attestation_unanchored():
+    a = _anchored()
+    rep = validate(
+        history=a["hist"],
+        freeze=a["freeze"],
+        run=a["run"],
+        report=a["report"],
+        exclusions=a["excl"],
+        ledger=a["ledger"],
+        prior_evaluations=a["evln"],
+        strict=True,  # no attestation, no verify_key
+    )
+    assert not rep.ok and ViolationReason.UNANCHORED in _reasons(rep)

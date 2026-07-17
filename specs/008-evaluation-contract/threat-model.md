@@ -94,6 +94,49 @@ and `EvaluationRun.run_id` canonical are intended tightenings of the honest boun
 form; the existing tests and `scripts/smoke_008.sh` were updated to construct these
 objects correctly, never by weakening a check.
 
+## Third wave (round-3): Class-1 silent bugs SEALED, Class-2 CLOSED by anchoring
+
+A third red-team separated the residue into two classes:
+
+- **Class-1 — fakeable in a single honest `validate()` call**, independent of
+  storage. These are outright bugs and are now sealed regardless of anchoring
+  (regression tests `test_a1`..`test_a6`):
+
+| Hole | Leak it re-opened | Now sealed in the contract by |
+|---|---|---|
+| A1 | L1/L9 — a Report pointing at an easier earlier cohort than the run evaluated | Report denominates against the RUN's cohort first; a mismatch ⇒ `REPORT_DENOMINATOR_MISMATCH` |
+| A2 | L8 — a produced run laundered to N/A by `POLICY_REFUSAL`; a produced run carrying no Report | `POLICY_REFUSAL_ON_PRODUCED_RUN`; a produced run must present a bound Report ⇒ `REPORT_UNBOUND` |
+| A3 | L4 — "freeze once, evaluate N, keep the best" via a trivial re-freeze | evaluate-once is BLIND-SET scoped (the record carries the scored blind identities) ⇒ `BLIND_REEVALUATED` |
+| A4 | L2/L4 — freeze bundle B, evaluate B' (no attempt tied to the freeze) | the first post-freeze `EvalAttempt.freeze_hash` must equal the frozen bundle hash ⇒ `BAD_FREEZE_BINDING` |
+| A5 | L4 — a from-storage `[produced, retry]` bypassing the record-time ordering guard | a producing attempt that is not terminal ⇒ `BLIND_ACCESS_EXCEEDED` in `validate()` |
+| A6 | L6 — permuting a public-seed pool so favorable pairs land at sampled indices | the sample draws from `sorted(set(pool))` and the pool must be canonical (unique, sorted) with a minimum `k` |
+
+- **Class-2 — the "omit / truncate / rewrite / reorder the baseline" class**, which
+  an earlier wave only made *fail closed*. Round-3 makes it **impossible** with
+  cryptographic anchoring (FR-15; regression tests `test_b1`..`test_b5`). A certified
+  score is bound to one committed, signed `attestation_root`; `validate(strict=…)`
+  RECOMPUTES every component root from the presented objects and refuses unless they
+  all reproduce the committed roots AND the signature verifies:
+
+| Anchor | Leak it closes | Mechanism |
+|---|---|---|
+| B1 | L1/L10 — truncate/omit/reorder a cohort version | `CohortHistory.history_root` = append-only `chain_root` of version hashes |
+| B2 | L1/L8/L10 — rewrite/drop a ledger or log entry | `.root` = `chain_root` on `ExclusionLog` / `ExposureLedger` / `EvaluationLedger` / `AchievabilityLog` |
+| B3 | L5 — a version bump laundering a curator, or a silently-skipped unresolvable record | exposure resolves by `curated_entry_ids` (entry identity); an unresolvable record with actor == subject is a HARD FAIL |
+| B4 | L6 — swapping the confusion-pool membership | the freeze commits `pool_root` before the seed is derivable; precision must reproduce it |
+| B5 | L1/L4/L9/L10 — omit/rewrite/re-point ANY component of a certified score | a signed `Attestation` binds every root; strict certify ⇒ `ATTESTATION_MISMATCH` / `ATTESTATION_INVALID` / `ATTESTATION_INCOMPLETE` / `UNANCHORED` |
+
+**The anti-omission property does NOT depend on the signature** — it comes from "the
+presented state must reproduce the committed root". The signature adds non-repudiation
+and tamper-evidence. The signing primitive is HMAC-SHA256 here (stdlib, deterministic);
+**production swaps it for an asymmetric scheme (ed25519)** so a *published* verify-key
+lets any third party verify a certified score while the *private* signing key is held
+by a party that is **not** the scored builder (curator ≠ subject). This is the same
+custody boundary the exposure ledger enforces for cohorts, now extended to the
+attestation: the party that can *mint* a certified score is separated from the party
+being *scored*. The `attestation` / `verify_key` / `strict` parameters are keyword-only
+and additive; the non-strict path is unchanged, so every prior caller is unaffected.
+
 ## Sealing note (for the later cross-model evaluator)
 
 The exposure ledger and freeze manifest are the in-contract guarantees. The OS-level

@@ -178,6 +178,33 @@ wired into `check`, enforcing:
   blind-access counter (≤ 1 post-freeze, 0 pre-freeze). Any violation is a failed
   check (Constitution VII).
 
+- **FR-15 — Cryptographic anchoring (a certified score cannot be fabricated).** A
+  certified score is bound to a single **committed, signed attestation root**
+  covering ALL state, so it cannot be forged even by an operator who controls
+  storage. Stdlib-only, deterministic primitives (`hashlib`/`hmac`, no wall clock,
+  no randomness) provide: `leaf_hash` (sha256 of canonical JSON), `merkle_root`
+  (order-independent root over a sorted leaf set), `chain_root` (an append-only fold
+  from a fixed genesis — dropping, reordering, or rewriting ANY entry changes it),
+  and `sign`/`verify` (constant-time HMAC-SHA256; **production swaps HMAC for
+  ed25519** with a published verify-key and the private signing key held by a party
+  that is **not** the scored builder — curator ≠ subject). Every append-only surface
+  exposes its root: `CohortHistory.history_root`, and `.root` on `ExclusionLog`,
+  `ExposureLedger`, `EvaluationLedger`, `AchievabilityLog`. The freeze commits the
+  confusion-pair `pool_root` before the precision seed is derivable; exposure records
+  carry `curated_entry_ids` so exposure resolves by entry identity without
+  re-supplying old cohort versions. A frozen `Attestation` binds every component root
+  plus `freeze_hash`, `pool_root`, canonical `run_id`, `report_hash`, `evaluator_id`,
+  and `attested_at`, and is signed over the Merkle `attestation_root`. `validate`
+  gains keyword-only `attestation`, `verify_key`, and `strict`: on the certify path it
+  RECOMPUTES every root from the presented objects and fails closed unless each equals
+  the attestation's committed root (`ATTESTATION_MISMATCH`), the signature verifies
+  (`ATTESTATION_INVALID` / `ATTESTATION_UNSIGNED`), and every referenced component is
+  present (`ATTESTATION_INCOMPLETE`); a Report / producing run offered for
+  certification with no signed attestation + verify-key is `UNANCHORED`. The
+  anti-omission guarantee comes from "the presented state must reproduce the committed
+  root"; the signature adds non-repudiation and tamper-evidence. The non-strict path is
+  unchanged, so every prior call site is unaffected.
+
 ## Acceptance criteria
 
 1. An entry whose canonical fields change without a new identity hash fails `check`.
@@ -309,6 +336,60 @@ optional baselines (`prior_history`, `prior_evaluations`); `AdjudicatedPrecision
     subset is rejected at the type boundary, and a precision presented with no run/freeze to
     bind to is `PRECISION_SAMPLE_UNBOUND`.
 
+### Round-3 acceptance criteria (Class-1 silent-bug seals + cryptographic anchoring)
+
+A third red-team found a batch of **Class-1** holes — each fakeable in a single
+honest `validate()` call, independent of storage — and motivated closing the
+**Class-2** "omit the baseline" class outright with cryptographic anchoring (FR-15).
+Each maps to a dedicated regression test (`test_a1`..`test_a6`, `test_b1`..`test_b5`).
+Intended tightenings (a produced run must present a Report; the precision pool must be
+canonical sorted-unique with a minimum k; certification requires a signed attestation)
+updated the honest object-builders and `scripts/smoke_008.sh`, never by weakening a
+check.
+
+32. **(A1, L1/L9)** A `Report` denominates against exactly the RUN's evaluated cohort:
+    when a run is present the binding cohort is resolved from `run.cohort_content_hash`
+    FIRST, and a report bound to a different (e.g. easier, earlier) cohort than the run
+    evaluated is `REPORT_DENOMINATOR_MISMATCH`; with no run, a report may only bind to the
+    latest version.
+33. **(A2, L8)** A run that demonstrably produced results cannot be laundered to N/A by a
+    run-level `POLICY_REFUSAL` exclusion (`POLICY_REFUSAL_ON_PRODUCED_RUN`), and a produced
+    run that presents no bound `Report` is `REPORT_UNBOUND`.
+34. **(A3, L4)** Evaluate-once is BLIND-SET scoped, not freeze scoped: an
+    `EvaluationRecord` carries the scored cohort's blind entry identities, and a second
+    evaluation whose blind identities overlap any prior record's blind set for the same
+    subject — even under a fresh `freeze_hash` from a trivial re-freeze — is
+    `BLIND_REEVALUATED`.
+35. **(A4, L2/L4)** The evaluated artifact is bound to the freeze: the first post-freeze
+    `EvalAttempt.freeze_hash` must equal the frozen bundle hash, else `BAD_FREEZE_BINDING`
+    — you cannot freeze bundle B and evaluate an unrelated B'.
+36. **(A5, L4)** `validate()` mirrors the record-time ordering invariant: a from-storage
+    run in which a producing post-freeze attempt is not the terminal one (an attempt follows
+    a producing evaluation) is `BLIND_ACCESS_EXCEEDED`.
+37. **(A6, L6)** The precision pool is canonicalized: `sample_confusion_pairs` draws from
+    `sorted(set(pool))`, and `AdjudicatedPrecision` requires `pool == sorted(set(pool))`
+    (unique, sorted) plus a minimum `k` relative to `|pool|` — so a public deterministic seed
+    cannot be gamed by permuting the pool.
+38. **(B1, L1/L10)** `CohortHistory.history_root` is an append-only `chain_root` over the
+    version content hashes; omitting, reordering, or truncating any version changes the root.
+39. **(B2, L1/L8/L10)** `ExclusionLog`, `ExposureLedger`, `EvaluationLedger`, and
+    `AchievabilityLog` each expose a `chain_root` over their entries; rewriting or dropping
+    any entry changes the root.
+40. **(B3, L5)** Exposure resolves by entry identity via `ExposureRecord.curated_entry_ids`
+    without re-supplying old cohort versions; a subject whose scored blind identities intersect
+    a curated set is barred, and an unresolvable exposure record whose actor == subject is a
+    HARD FAILURE (`CURATOR_IS_SUBJECT`), never a silent skip.
+41. **(B4, L6)** The freeze commits `pool_root` (a Merkle root over the canonical pool) before
+    the seed is derivable, and precision binding requires the presented pool to reproduce it —
+    membership is pinned, so the sample is a pure function of committed membership.
+42. **(B5, L1/L4/L9/L10)** A frozen, signed `Attestation` binds every component root; the
+    strict/certify path RECOMPUTES each root and fails closed unless all match
+    (`ATTESTATION_MISMATCH`), the signature verifies (`ATTESTATION_INVALID` /
+    `ATTESTATION_UNSIGNED`), and every referenced component is present
+    (`ATTESTATION_INCOMPLETE`); certification with no signed attestation + verify-key is
+    `UNANCHORED`. A forged signature, an omitted/tampered history version, a rewritten ledger
+    entry, and a swapped pool are each rejected; a fully honest signed attestation is accepted.
+
 ## Open questions
 
 - **Non-blocking.** Does the contract live in a new `benchmarks/harness/contract.py`
@@ -327,9 +408,13 @@ optional baselines (`prior_history`, `prior_evaluations`); `AdjudicatedPrecision
 ## Success criteria
 
 A smoke (`scripts/smoke_008.sh`) builds a two-entry cohort `v1`, freezes a dummy
-detector, records exactly one blind evaluation, and passes `check`; then
-demonstrates each guard failing: an in-place entry edit, a silent denominator
-shrink, a second blind evaluation, and a curator==subject score each fail `check`
-with a typed reason. The `report` view prints blind recall as the headline
-alongside the four labeled secondaries. Only after this gate is green does the
-shared-kernel work in the tranche begin.
+detector (committing the confusion `pool_root`), records exactly one blind
+evaluation, binds a `Report`, builds and SIGNS an `Attestation`, and passes strict
+certification; then demonstrates each guard failing: an in-place entry edit, a
+silent denominator shrink, a second blind evaluation, and a curator==subject score,
+plus the cryptographic-anchoring fail-closed cases — a forged signature
+(`ATTESTATION_INVALID`), an omitted component (`ATTESTATION_INCOMPLETE`), and a
+certify path with no attestation (`UNANCHORED`) — each fail `check` with a typed
+reason. The `report` view prints blind recall as the headline alongside the four
+labeled secondaries. Only after this gate is green does the shared-kernel work in
+the tranche begin.

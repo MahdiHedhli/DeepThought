@@ -25,6 +25,7 @@ and CI (and ``scripts/smoke_008.sh``) invoke ``validate`` directly.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import random
 import re
@@ -54,6 +55,79 @@ def _sha256(text: str) -> str:
 
 def _content_hash(obj: Any) -> str:
     return _sha256(_canonical_json(obj))
+
+
+# --------------------------------------------------------------------------- #
+# Cryptographic anchoring primitives (Part B) — stdlib-only, DETERMINISTIC
+# --------------------------------------------------------------------------- #
+#
+# These turn "omit / truncate / rewrite / reorder any component" from a
+# fail-closed hole into an *impossible* one: a certified score is bound to a
+# single committed, signed root, and ``validate(strict=...)`` refuses unless the
+# presented state REPRODUCES that root and the signature verifies.
+#
+# The anti-omission property does NOT depend on the signature — it comes from
+# "the presented state must reproduce the committed root". The signature adds
+# non-repudiation and tamper-evidence. HMAC-SHA256 is used here because it is
+# stdlib and deterministic; PRODUCTION swaps it for an asymmetric scheme
+# (ed25519) so a published verify-key lets any third party verify while the
+# private signing key is held by a party that is NOT the scored builder
+# (curator != subject). Everything below uses only ``hashlib`` / ``hmac`` — no
+# wall clock, no randomness — so a root computed on one machine equals the root
+# computed anywhere else.
+
+# A fixed, domain-separated genesis for the append-only chain fold. Baking a
+# constant in means an empty chain has a well-defined, reproducible root.
+_CHAIN_GENESIS = _sha256("deepthought/evaluation-contract/chain-genesis/v1")
+
+
+def leaf_hash(obj: Any) -> str:
+    """A leaf hash = sha256 of the object's canonical JSON. Two semantically
+    equal objects hash identically on any machine."""
+    return _content_hash(obj)
+
+
+def merkle_root(hashes: list[str]) -> str:
+    """A deterministic sha256 Merkle root over ``sorted(hashes)`` (pairwise,
+    duplicate-last-on-odd). Order-independent by construction: the same *set* of
+    leaves always yields the same root, so callers need not agree on an order.
+    An empty list yields the domain-separated genesis (a well-defined "nothing"
+    root); a single leaf yields that leaf unchanged."""
+    nodes = sorted(hashes)
+    if not nodes:
+        return _CHAIN_GENESIS
+    while len(nodes) > 1:
+        if len(nodes) % 2 == 1:
+            nodes.append(nodes[-1])  # duplicate the last node on an odd count
+        nodes = [_sha256(nodes[i] + nodes[i + 1]) for i in range(0, len(nodes), 2)]
+    return nodes[0]
+
+
+def chain_root(entries: list[str]) -> str:
+    """An APPEND-ONLY root: fold ``h = sha256(h || entry)`` from the fixed
+    genesis. Because each step mixes the running hash with the next entry in
+    order, dropping, reordering, OR rewriting ANY entry changes the final root —
+    that is the anti-truncation / anti-rewrite property the ledgers rely on. An
+    empty entry list yields the genesis."""
+    h = _CHAIN_GENESIS
+    for entry in entries:
+        h = _sha256(h + entry)
+    return h
+
+
+# The reproducible "nothing" root shared by an empty history / ledger / log.
+_EMPTY_ROOT = chain_root([])
+
+
+def sign(root: str, key: bytes) -> str:
+    """Sign a root with HMAC-SHA256 (stdlib, deterministic). PRODUCTION swaps
+    this for ed25519 (see the module note above)."""
+    return hmac.new(key, root.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify(root: str, signature: str, key: bytes) -> bool:
+    """Constant-time verification of :func:`sign`."""
+    return hmac.compare_digest(sign(root, key), signature)
 
 
 # --------------------------------------------------------------------------- #
@@ -166,6 +240,17 @@ class ViolationReason(str, Enum):
     REPORT_UNBOUND = "report-not-bound-to-any-resolvable-cohort"
     NON_CANONICAL_RUN_ID = "run-id-not-the-canonical-cohort-freeze-subject-hash"
     EVALUATED_MORE_THAN_ONCE = "cohort-freeze-subject-evaluated-more-than-once"
+    # Round-3 Class-1 silent-bug seals (A1..A6).
+    POLICY_REFUSAL_ON_PRODUCED_RUN = "policy-refusal-on-a-run-that-produced-results"
+    BLIND_REEVALUATED = "blind-set-re-evaluated-across-a-re-freeze"
+    # Round-3 cryptographic-anchoring seals (B5): a certified score is bound to a
+    # single committed, signed attestation root — validate() fails closed unless
+    # the presented state reproduces every root and the signature verifies.
+    ATTESTATION_MISMATCH = "presented-state-does-not-reproduce-the-attested-root"
+    ATTESTATION_INVALID = "attestation-signature-does-not-verify"
+    ATTESTATION_INCOMPLETE = "attestation-references-a-component-that-was-not-presented"
+    ATTESTATION_UNSIGNED = "certification-requires-a-verify-key"
+    UNANCHORED = "certification-requires-a-signed-attestation"
 
 
 class ContractViolation(Exception):
@@ -352,6 +437,14 @@ class CohortHistory(BaseModel):
                 return c
         return None
 
+    @property
+    def history_root(self) -> str:
+        """B1: an append-only :func:`chain_root` over the version content hashes.
+        Omitting, reordering, or truncating any version changes the root, so a
+        from-storage rebuild that drops an earlier (harder) baseline cannot
+        reproduce the committed ``history_root``."""
+        return chain_root([v.content_hash for v in self.versions])
+
 
 def _version_num(tag: str) -> int:
     """Parse the ordering integer from a version tag like ``v3`` -> 3. A tag with
@@ -382,12 +475,26 @@ class DetectorBundle(BaseModel):
     entrypoint: str = ""
     params: dict[str, Any] = Field(default_factory=dict)
     calibration_seed_ids: list[str] = Field(default_factory=list)  # entry-identity hashes
+    # B4: the confusion-pair pool membership, committed at freeze time BEFORE the
+    # precision seed is derivable. ``pool_root = merkle_root([leaf_hash(p) for p
+    # in sorted(set(pool))])`` (see :func:`pool_root_of`). Because it rides inside
+    # the bundle it is part of ``bundle_hash``/``freeze_hash``, so it is frozen
+    # alongside everything else. Combined with A6's canonical draw, the precision
+    # sample becomes a pure function of committed membership.
+    pool_root: str = ""
 
     @property
     def bundle_hash(self) -> str:
         payload = self.model_dump()
         payload["calibration_seed_ids"] = sorted(payload["calibration_seed_ids"])
         return _content_hash(payload)
+
+
+def pool_root_of(pool: list[str]) -> str:
+    """B4: the committed pool root — ``merkle_root`` over the canonical
+    (sorted, unique) confusion-pair pool. The freeze commits this; the precision
+    check later requires the presented pool to reproduce it."""
+    return merkle_root([leaf_hash(p) for p in sorted(set(pool))])
 
 
 class FreezeManifest(BaseModel):
@@ -405,6 +512,11 @@ class FreezeManifest(BaseModel):
     def freeze_hash(self) -> str:
         return self.bundle.bundle_hash
 
+    @property
+    def pool_root(self) -> str:
+        """B4: the confusion-pair pool root committed inside the frozen bundle."""
+        return self.bundle.pool_root
+
 
 # --------------------------------------------------------------------------- #
 # FR-6 — ExposureLedger: curator != subject
@@ -417,6 +529,11 @@ class ExposureRecord(BaseModel):
     cohort_content_hash: str
     actor: str  # model / harness id
     activity: str = Field(pattern="^(curated|inspected)$")
+    # B3: the entry identities this actor curated/inspected, recorded by IDENTITY
+    # so exposure resolves WITHOUT re-supplying the old cohort version. A subject
+    # whose scored blind identities intersect any record's ``curated_entry_ids`` is
+    # barred, no matter how the cohort was later re-versioned.
+    curated_entry_ids: list[str] = Field(default_factory=list)
 
 
 class ExposureLedger(BaseModel):
@@ -427,10 +544,28 @@ class ExposureLedger(BaseModel):
 
     records: list[ExposureRecord] = Field(default_factory=list)
 
-    def record(self, *, cohort_content_hash: str, actor: str, activity: str) -> None:
+    def record(
+        self,
+        *,
+        cohort_content_hash: str,
+        actor: str,
+        activity: str,
+        curated_entry_ids: Optional[list[str]] = None,
+    ) -> None:
         self.records.append(
-            ExposureRecord(cohort_content_hash=cohort_content_hash, actor=actor, activity=activity)
+            ExposureRecord(
+                cohort_content_hash=cohort_content_hash,
+                actor=actor,
+                activity=activity,
+                curated_entry_ids=list(curated_entry_ids or []),
+            )
         )
+
+    @property
+    def root(self) -> str:
+        """B2: an append-only :func:`chain_root` over the records. Rewriting or
+        dropping any record changes the root."""
+        return chain_root([leaf_hash(r.model_dump(mode="json")) for r in self.records])
 
     def curators_inspectors_of(self, cohort_content_hash: str) -> set[str]:
         return {r.actor for r in self.records if r.cohort_content_hash == cohort_content_hash}
@@ -505,6 +640,12 @@ class ExclusionLog(BaseModel):
     def append(self, event: ExclusionEvent) -> None:
         self.events.append(event)
 
+    @property
+    def root(self) -> str:
+        """B2: an append-only :func:`chain_root` over the events. Rewriting or
+        dropping any event changes the root."""
+        return chain_root([leaf_hash(e.model_dump(mode="json")) for e in self.events])
+
     def is_extension_of(self, prior: "ExclusionLog") -> bool:
         """True iff ``prior`` is a prefix of this log — the append-only invariant.
         A log that dropped or reordered a prior event is NOT an extension."""
@@ -549,6 +690,10 @@ class EvalAttempt(BaseModel):
     artifact_hash: str = ""
     env_hash: str = ""
     logs_intact: bool = True
+    # A4: the freeze hash this attempt ran under. ``validate`` requires the first
+    # post-freeze attempt's ``freeze_hash`` to equal the FreezeManifest's hash, so
+    # you cannot freeze bundle B and then evaluate an unrelated bundle B'.
+    freeze_hash: str = ""
 
 
 class EvaluationRun(BaseModel):
@@ -626,6 +771,8 @@ class EvaluationRun(BaseModel):
             artifact_hash=artifact_hash,
             env_hash=env_hash,
             logs_intact=logs_intact,
+            # A4: bind the attempt to the freeze it ran under.
+            freeze_hash=self.freeze_hash or "",
         )
         self.attempts.append(attempt)
         return attempt
@@ -641,13 +788,19 @@ def _canonical_run_id(cohort_content_hash: str, freeze_hash: str, subject: str) 
 
 
 class EvaluationRecord(BaseModel):
-    """One completed evaluation, keyed by the sealed (cohort, freeze, subject)."""
+    """One completed evaluation, keyed by the sealed (cohort, freeze, subject).
+
+    A3: it also records the scored cohort's BLIND entry-identity set, so
+    evaluate-once is enforced at BLIND-SET granularity — a re-freeze (a trivial
+    param change that mints a new ``freeze_hash``) cannot re-roll the same blind
+    cohort behind a fresh ledger key."""
 
     model_config = ConfigDict(extra="forbid")
 
     cohort_content_hash: str
     freeze_hash: str
     subject: str
+    blind_ids: list[str] = Field(default_factory=list)  # scored cohort's blind entry identities
 
 
 class EvaluationLedger(BaseModel):
@@ -661,10 +814,20 @@ class EvaluationLedger(BaseModel):
 
     records: list[EvaluationRecord] = Field(default_factory=list)
 
-    def record(self, *, cohort_content_hash: str, freeze_hash: str, subject: str) -> None:
+    def record(
+        self,
+        *,
+        cohort_content_hash: str,
+        freeze_hash: str,
+        subject: str,
+        blind_ids: Optional[list[str]] = None,
+    ) -> None:
         self.records.append(
             EvaluationRecord(
-                cohort_content_hash=cohort_content_hash, freeze_hash=freeze_hash, subject=subject
+                cohort_content_hash=cohort_content_hash,
+                freeze_hash=freeze_hash,
+                subject=subject,
+                blind_ids=sorted(blind_ids or []),
             )
         )
 
@@ -676,6 +839,12 @@ class EvaluationLedger(BaseModel):
             and r.freeze_hash == freeze_hash
             and r.subject == subject
         )
+
+    @property
+    def root(self) -> str:
+        """B2: an append-only :func:`chain_root` over the records. Rewriting or
+        dropping any record changes the root."""
+        return chain_root([leaf_hash(r.model_dump(mode="json")) for r in self.records])
 
 
 # --------------------------------------------------------------------------- #
@@ -711,10 +880,20 @@ def precision_sample_seed(cohort_hash: str, freeze_hash: str, run_id: str) -> in
     return int(_sha256("\x1f".join([cohort_hash, freeze_hash, run_id])), 16)
 
 
+# A6: the minimum sample size relative to the pool. A single-pair "precision" is
+# not a measurement; the floor is min'd against the pool size so a pool smaller
+# than the floor is still sampleable.
+_MIN_PRECISION_SAMPLE_K = 2
+
+
 def sample_confusion_pairs(pairs: list[str], k: int, seed: int) -> list[str]:
-    """A deterministic, seed-reproducible sample of confusion pairs."""
+    """A deterministic, seed-reproducible sample of confusion pairs. A6: the draw
+    is always taken from the CANONICAL pool ``sorted(set(pairs))`` — never the
+    operator-supplied order — so a public deterministic seed cannot be gamed by
+    permuting the pool to land favorable pairs at the sampled indices."""
+    canonical = sorted(set(pairs))
     rng = random.Random(seed)
-    return rng.sample(list(pairs), min(k, len(pairs)))
+    return rng.sample(canonical, min(k, len(canonical)))
 
 
 class AdjudicatorVerdict(BaseModel):
@@ -780,6 +959,16 @@ class AdjudicatedPrecision(BaseModel):
     def _panel_and_sample_are_valid(self) -> "AdjudicatedPrecision":
         if not self.sampled_pairs:
             raise ValueError("precision requires a non-empty blind confusion-pair sample")
+        # A6: the pool MUST be canonical — sorted and unique. Any permutation or
+        # duplicate is rejected, so the sample is a pure function of committed
+        # membership (B4) rather than of an operator-chosen order.
+        if list(self.pool) != sorted(set(self.pool)):
+            raise ValueError("pool must be canonical: exactly sorted(set(pool)) (unique, sorted)")
+        # A6: enforce a minimum sample size relative to the pool.
+        if self.k < min(len(self.pool), _MIN_PRECISION_SAMPLE_K):
+            raise ValueError(
+                f"k ({self.k}) is below the minimum min(|pool|, {_MIN_PRECISION_SAMPLE_K})"
+            )
         sampled = set(self.sampled_pairs)
         # COVERAGE (H8): every seeded pair must be adjudicated. A subset lets the
         # unfavorable pairs be silently dropped to inflate precision.
@@ -965,6 +1154,24 @@ class AchievabilityLog(BaseModel):
     def content_hash(self) -> str:
         return self.declared_content_hash or self.computed_content_hash
 
+    @property
+    def root(self) -> str:
+        """B2: an append-only :func:`chain_root` over the predictions. Rewriting
+        or dropping any prediction changes the root."""
+        return chain_root(
+            [
+                leaf_hash(
+                    {
+                        "entry_identity": p.entry_identity,
+                        "predicted_achievable": p.predicted_achievable,
+                        "registered_at": p.registered_at,
+                        "note": p.note,
+                    }
+                )
+                for p in self.predictions
+            ]
+        )
+
     def sealed(self) -> "AchievabilityLog":
         return self.model_copy(update={"declared_content_hash": self.computed_content_hash})
 
@@ -1042,6 +1249,108 @@ class Report(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Part B5 — the signed Attestation: the single fail-closed root
+# --------------------------------------------------------------------------- #
+
+
+class Attestation(BaseModel):
+    """A frozen, signed commitment binding EVERY component root of one certified
+    score into a single ``attestation_root``. Certification (``validate(strict=
+    True)`` or supplying an ``attestation``) recomputes each root from the
+    presented objects and REFUSES unless they all match AND the signature
+    verifies — so a certified score cannot be fabricated even by an operator who
+    controls storage: you cannot omit, truncate, rewrite, reorder, or re-point
+    any component without breaking a root or the signature.
+
+    The signature here is HMAC-SHA256; PRODUCTION uses ed25519 with a published
+    verify-key and the private key held by a party != the scored builder. The
+    anti-omission property comes from "the presented state must reproduce the
+    committed root"; the signature adds non-repudiation + tamper-evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    history_root: str
+    exclusion_root: str
+    exposure_root: str
+    evaluation_root: str
+    achievability_root: str
+    freeze_hash: str
+    pool_root: str
+    run_id: str
+    report_hash: str
+    evaluator_id: str
+    attested_at: str  # ISO-8601, supplied by the caller (never datetime.now)
+    signature: str
+
+    @property
+    def component_roots(self) -> list[str]:
+        """The ordered component values folded into ``attestation_root``. Order is
+        immaterial (``merkle_root`` sorts), but this fixes exactly what is
+        committed."""
+        return [
+            self.history_root,
+            self.exclusion_root,
+            self.exposure_root,
+            self.evaluation_root,
+            self.achievability_root,
+            self.freeze_hash,
+            self.pool_root,
+            self.run_id,
+            self.report_hash,
+            self.evaluator_id,
+            self.attested_at,
+        ]
+
+    @property
+    def attestation_root(self) -> str:
+        """The single root the signature covers: a Merkle root over every bound
+        component. Change any component and this root changes."""
+        return merkle_root(self.component_roots)
+
+
+def build_attestation(
+    *,
+    history: Optional[CohortHistory],
+    freeze: FreezeManifest,
+    run: EvaluationRun,
+    report: "Report",
+    evaluator_id: str,
+    attested_at: str,
+    key: bytes,
+    exclusions: Optional[ExclusionLog] = None,
+    ledger: Optional[ExposureLedger] = None,
+    evaluation_ledger: Optional[EvaluationLedger] = None,
+    achievability: Optional[AchievabilityLog] = None,
+) -> Attestation:
+    """Compute every component root from the honest objects and sign the Merkle
+    ``attestation_root``. Absent components fold in the reproducible empty root, so
+    the attestation is a total function of exactly what was presented. Deterministic:
+    ``attested_at`` and ``key`` are passed in."""
+    history_root = history.history_root if history is not None else _EMPTY_ROOT
+    exclusion_root = exclusions.root if exclusions is not None else _EMPTY_ROOT
+    exposure_root = ledger.root if ledger is not None else _EMPTY_ROOT
+    evaluation_root = evaluation_ledger.root if evaluation_ledger is not None else _EMPTY_ROOT
+    achievability_root = achievability.root if achievability is not None else _EMPTY_ROOT
+    report_hash = leaf_hash(report.model_dump(mode="json"))
+
+    unsigned = Attestation(
+        history_root=history_root,
+        exclusion_root=exclusion_root,
+        exposure_root=exposure_root,
+        evaluation_root=evaluation_root,
+        achievability_root=achievability_root,
+        freeze_hash=freeze.freeze_hash,
+        pool_root=freeze.pool_root,
+        run_id=run.run_id,
+        report_hash=report_hash,
+        evaluator_id=evaluator_id,
+        attested_at=attested_at,
+        signature="",
+    )
+    return unsigned.model_copy(update={"signature": sign(unsigned.attestation_root, key)})
+
+
+# --------------------------------------------------------------------------- #
 # FR-14 — validate: the contract's `check`
 # --------------------------------------------------------------------------- #
 
@@ -1060,6 +1369,9 @@ def validate(
     prior_achievability: Optional[AchievabilityLog] = None,
     prior_history: Optional[CohortHistory] = None,
     prior_evaluations: Optional[EvaluationLedger] = None,
+    attestation: Optional[Attestation] = None,
+    verify_key: Optional[bytes] = None,
+    strict: bool = False,
 ) -> ContractReport:
     """Validate the Evaluation Contract (FR-14). Checks entry-hash integrity,
     version monotonicity, denominator preservation, blind-reuse, the exposure
@@ -1070,10 +1382,20 @@ def validate(
 
     The optional parameters (``freeze``, ``report``, ``precision``,
     ``achievability``, and the ``prior_*`` baselines) let ``validate`` enforce the
-    adversarial-audit seals (H1..H9) that previously lived only in constructor
-    helpers — bypassed whenever a model is rebuilt from storage. They are
-    keyword-only and default to ``None`` so every existing call site keeps working
-    unchanged."""
+    adversarial-audit seals (H1..H9, R1..R8, A1..A6) that previously lived only in
+    constructor helpers — bypassed whenever a model is rebuilt from storage. They
+    are keyword-only and default to ``None`` so every existing call site keeps
+    working unchanged.
+
+    ``attestation`` / ``verify_key`` / ``strict`` drive the CERTIFY path (Part B).
+    When an ``attestation`` is supplied OR ``strict=True``, ``validate`` runs every
+    ordinary check AND additionally recomputes every component root from the
+    presented objects, requires each to equal the attestation's committed root
+    (``ATTESTATION_MISMATCH``), verifies the signature (``ATTESTATION_INVALID`` /
+    ``ATTESTATION_UNSIGNED``), and requires every referenced component to be present
+    (``ATTESTATION_INCOMPLETE``). A Report / producing run presented for
+    certification with no signed attestation + verify_key is ``UNANCHORED``. The
+    non-strict path is unchanged, so existing per-check tests are unaffected."""
     result = ContractReport()
 
     try:
@@ -1098,7 +1420,7 @@ def validate(
             _check_freeze_before_evaluation(run, result)
             _check_blind_access(run, result)
             _check_run_id_canonical(run, result)  # R5
-            _check_evaluation_ledger(run, prior_evaluations, result)  # R5
+            _check_evaluation_ledger(run, prior_evaluations, history, result)  # R5 + A3
             # R6: a run that recorded post-freeze attempts MUST be validated against
             # its FreezeManifest — a fabricated run.freeze_hash cannot stand in for it.
             if run.post_freeze_attempts and freeze is None:
@@ -1107,7 +1429,22 @@ def validate(
                     "a run with post-freeze attempts must be validated against its FreezeManifest",
                 )
             if ledger is not None:
-                _check_exposure(run, ledger, history, result)  # R7
+                _check_exposure(run, ledger, history, result)  # R7 + B3
+            # A2: a run that demonstrably produced results cannot be laundered to N/A
+            # by a POLICY_REFUSAL exclusion, and must present a bound Report.
+            if _run_produced_results(run):
+                if exclusions is not None and any(
+                    e.reason is ExclusionReason.POLICY_REFUSAL for e in exclusions.events
+                ):
+                    result.add(
+                        ViolationReason.POLICY_REFUSAL_ON_PRODUCED_RUN,
+                        f"run {run.run_id}: produced results but a POLICY_REFUSAL exclusion scores it N/A",
+                    )
+                if report is None:
+                    result.add(
+                        ViolationReason.REPORT_UNBOUND,
+                        f"run {run.run_id}: produced results but presents no bound Report",
+                    )
 
         if freeze is not None:
             _check_freeze_binding(freeze, run, history, result)
@@ -1120,12 +1457,35 @@ def validate(
 
         if achievability is not None:
             _check_achievability(achievability, prior_achievability, result)
+
+        # Part B5 — the certify path. Additive: it runs after every ordinary check.
+        _certifying = strict or attestation is not None
+        if _certifying:
+            _check_certification(
+                attestation=attestation,
+                verify_key=verify_key,
+                strict=strict,
+                history=history,
+                exclusions=exclusions,
+                ledger=ledger,
+                evaluation_ledger=prior_evaluations,
+                achievability=achievability,
+                freeze=freeze,
+                run=run,
+                report=report,
+                result=result,
+            )
     except ContractViolation as exc:  # a guard that raised mid-check is a failure
         result.violations.append(exc)
     except Exception as exc:  # noqa: BLE001 - any crash in check IS a failed check
         result.add(ViolationReason.IN_PLACE_EDIT, f"unexpected check error: {exc}")
 
     return result
+
+
+def _run_produced_results(run: EvaluationRun) -> bool:
+    """True iff any post-freeze attempt demonstrably produced detector results."""
+    return any(a.produced_results for a in run.post_freeze_attempts)
 
 
 def _check_entry_hash_integrity(history: CohortHistory, report: ContractReport) -> None:
@@ -1269,6 +1629,18 @@ def _check_blind_access(run: EvaluationRun, report: ContractReport) -> None:
             ViolationReason.BLIND_ACCESS_EXCEEDED,
             f"run {run.run_id}: {run.semantic_evaluation_count} post-freeze semantic evaluations (>1)",
         )
+    # A5: mirror the ordering invariant ``attempt_evaluation`` enforces — no attempt
+    # may follow a producing one. A from-storage ``[produced=True, produced=False]``
+    # would pass the >1 counter (only one producing attempt) yet still records a
+    # second blind touch after the semantic evaluation; flag a producing attempt
+    # that is not the terminal one.
+    post_all = run.post_freeze_attempts
+    producing_positions = [i for i, a in enumerate(post_all) if a.produced_results]
+    if producing_positions and max(producing_positions) != len(post_all) - 1:
+        report.add(
+            ViolationReason.BLIND_ACCESS_EXCEEDED,
+            f"run {run.run_id}: a post-freeze attempt follows a producing evaluation (must be terminal)",
+        )
     # Mirror the infra-retry invariant that ``attempt_evaluation`` enforces at
     # record-time, so a run REBUILT FROM STORAGE cannot launder several blind
     # evaluations as "retries" (H5). Across the post-freeze attempts: every
@@ -1300,10 +1672,12 @@ def _check_exposure(
     history: Optional[CohortHistory],
     report: ContractReport,
 ) -> None:
-    """R7: resolve exposure by ENTRY IDENTITY across versions, not by the
-    version-scoped cohort content hash. A version bump (same entries, new hash) must
-    not launder a curator into a subject: if the subject curated/inspected ANY cohort
-    version that shares an entry identity with the scored cohort, it is barred."""
+    """R7 + B3: resolve exposure by ENTRY IDENTITY, not by the version-scoped cohort
+    content hash. A version bump (same entries, new hash) must not launder a curator
+    into a subject. B3: each ``ExposureRecord`` records ``curated_entry_ids``, so a
+    subject whose scored blind identities intersect ANY record's curated identities
+    is barred WITHOUT re-supplying the old cohort version — and an UNRESOLVABLE record
+    whose actor == subject is a HARD FAILURE (never a silent skip)."""
     # Direct content-hash exposure always bars (works even with no history to resolve).
     if not ledger.can_score(run.cohort_content_hash, run.subject):
         report.add(
@@ -1311,17 +1685,34 @@ def _check_exposure(
             f"run {run.run_id}: subject {run.subject!r} curated/inspected this cohort",
         )
         return
-    # Entry-identity resolution across versions (needs history to resolve hashes).
     scored = _cohort_by_content_hash(history, run.cohort_content_hash)
-    if scored is None:
-        return
-    scored_ids = scored.identities()
+    scored_ids = scored.identities() if scored is not None else set()
+    scored_blind = _blind_identities(scored) if scored is not None else set()
     for record in ledger.records:
         if record.actor != run.subject:
             continue
+        # B3: entry-identity resolution via curated_entry_ids — no old version needed.
+        curated = set(record.curated_entry_ids)
+        if curated:
+            if scored_blind and (curated & scored_blind):
+                report.add(
+                    ViolationReason.CURATOR_IS_SUBJECT,
+                    f"run {run.run_id}: subject {run.subject!r} curated an entry identity in the scored blind set",
+                )
+                return
+            # Resolvable by identity and disjoint from the scored blind set → cleared.
+            continue
+        # No curated_entry_ids: fall back to resolving the record's cohort via history.
         record_cohort = _cohort_by_content_hash(history, record.cohort_content_hash)
         if record_cohort is None:
-            continue
+            # B3: an unresolvable exposure record for THIS subject cannot be cleared —
+            # fail closed rather than silently skip it.
+            report.add(
+                ViolationReason.CURATOR_IS_SUBJECT,
+                f"run {run.run_id}: subject {run.subject!r} has an unresolvable exposure record "
+                f"({record.cohort_content_hash[:12]!r}); fail closed",
+            )
+            return
         if scored_ids & record_cohort.identities():
             report.add(
                 ViolationReason.CURATOR_IS_SUBJECT,
@@ -1347,11 +1738,18 @@ def _check_run_id_canonical(run: EvaluationRun, report: ContractReport) -> None:
 
 
 def _check_evaluation_ledger(
-    run: EvaluationRun, prior_evaluations: Optional[EvaluationLedger], report: ContractReport
+    run: EvaluationRun,
+    prior_evaluations: Optional[EvaluationLedger],
+    history: Optional[CohortHistory],
+    report: ContractReport,
 ) -> None:
-    """R5: evaluate-once. If a prior EvaluationLedger already contains this
-    (cohort, freeze, subject) triple, this is a second evaluation of the same blind
-    cohort — the "keep the best of N" re-roll — and is flagged."""
+    """R5 + A3: evaluate-once, BLIND-SET scoped. The exact (cohort, freeze, subject)
+    re-roll is flagged ``EVALUATED_MORE_THAN_ONCE`` (R5). But keying only on the full
+    triple lets a trivial re-freeze mint a fresh key: A3 flags ``BLIND_REEVALUATED``
+    whenever the scored cohort's BLIND identities overlap ANY prior record's blind set
+    for the SAME subject, regardless of ``freeze_hash``. A re-frozen detector must be
+    scored on a cohort whose blind identities are disjoint from every prior blind eval
+    for that subject."""
     if run.freeze_hash is None or prior_evaluations is None:
         return
     if prior_evaluations.count(run.cohort_content_hash, run.freeze_hash, run.subject) > 0:
@@ -1359,6 +1757,23 @@ def _check_evaluation_ledger(
             ViolationReason.EVALUATED_MORE_THAN_ONCE,
             f"run {run.run_id}: (cohort, freeze, subject={run.subject!r}) was already evaluated",
         )
+    # A3: blind-set-scoped evaluate-once (freeze-independent).
+    scored = _cohort_by_content_hash(history, run.cohort_content_hash)
+    if scored is None:
+        return
+    scored_blind = _blind_identities(scored)
+    if not scored_blind:
+        return
+    for record in prior_evaluations.records:
+        if record.subject != run.subject:
+            continue
+        if scored_blind & set(record.blind_ids):
+            report.add(
+                ViolationReason.BLIND_REEVALUATED,
+                f"run {run.run_id}: subject {run.subject!r} already had these blind identities "
+                "evaluated under an earlier freeze (blind-set re-roll across a re-freeze)",
+            )
+            return
 
 
 def _cohort_by_content_hash(history: Optional[CohortHistory], content_hash: Optional[str]) -> Optional[Cohort]:
@@ -1384,12 +1799,25 @@ def _check_freeze_binding(
     """A freeze must bind a real bundle (H6). The run's ``freeze_hash`` must equal
     the freeze's content hash — a free string can no longer stand in for a frozen
     bundle — and the calibration seeds must be disjoint from the scored cohort's
-    BLIND entries (a seed sitting in the blind set would tune on the denominator)."""
+    BLIND entries (a seed sitting in the blind set would tune on the denominator).
+    A4: the FIRST post-freeze attempt must also be bound to the freeze — its
+    ``freeze_hash`` must equal the frozen bundle hash — so you cannot freeze bundle
+    B and then evaluate an unrelated bundle B'."""
     if run is not None and run.freeze_hash is not None and run.freeze_hash != freeze.freeze_hash:
         report.add(
             ViolationReason.BAD_FREEZE_BINDING,
             f"run freeze_hash {run.freeze_hash!r} does not equal the frozen bundle hash {freeze.freeze_hash[:12]}",
         )
+
+    # A4: bind the evaluated artifact — the first post-freeze attempt — to the freeze.
+    if run is not None and run.post_freeze_attempts:
+        first_post = run.post_freeze_attempts[0]
+        if first_post.freeze_hash != freeze.freeze_hash:
+            report.add(
+                ViolationReason.BAD_FREEZE_BINDING,
+                f"run {run.run_id}: the first post-freeze attempt's freeze_hash "
+                f"{first_post.freeze_hash!r} is not the frozen bundle hash {freeze.freeze_hash[:12]}",
+            )
 
     cohort = None
     if run is not None:
@@ -1416,12 +1844,38 @@ def _check_report(
     """Bind the Report's blind recall to the frozen cohort (H7). ``blind_recall.total``
     is recomputed from the cohort's BLIND entries, so a free int can no longer
     under-report the true denominator; the rediscovered set (when supplied) must be a
-    subset of the actual blind identities and its size must equal the reported count."""
-    cohort = _cohort_by_content_hash(history, report_view.cohort_content_hash)
-    if cohort is None and run is not None:
+    subset of the actual blind identities and its size must equal the reported count.
+
+    A1: when a ``run`` is present the binding cohort is resolved from the RUN's
+    evaluated cohort FIRST (not the report's declared hash), and a report bound to a
+    DIFFERENT cohort than the run evaluated is ``REPORT_DENOMINATOR_MISMATCH`` — a
+    report can no longer point at an easier earlier version than the run scored. With
+    no run, the report must bind to the LATEST cohort version (a non-latest sibling is
+    rejected)."""
+    if run is not None:
+        # A1: the report must denominate against exactly the run's evaluated cohort.
+        if (
+            report_view.cohort_content_hash is not None
+            and report_view.cohort_content_hash != run.cohort_content_hash
+        ):
+            report.add(
+                ViolationReason.REPORT_DENOMINATOR_MISMATCH,
+                "report cohort_content_hash is not the run's evaluated cohort",
+            )
         cohort = _cohort_by_content_hash(history, run.cohort_content_hash)
-    if cohort is None and history is not None:
-        cohort = history.latest()
+        if cohort is None and history is not None:
+            cohort = history.latest()
+    else:
+        cohort = _cohort_by_content_hash(history, report_view.cohort_content_hash)
+        latest = history.latest() if history is not None else None
+        # A1: with no run, a report may only bind to the LATEST version.
+        if cohort is not None and latest is not None and cohort.content_hash != latest.content_hash:
+            report.add(
+                ViolationReason.REPORT_DENOMINATOR_MISMATCH,
+                "report binds to a non-latest cohort version; bind to the latest",
+            )
+        if cohort is None:
+            cohort = latest
     if cohort is None:
         # R4 (P1): a Report presented with nothing to bind against is NOT a silent
         # pass — an unbound headline number is unverifiable and therefore rejected.
@@ -1505,6 +1959,15 @@ def _check_precision_binding(
             ViolationReason.PRECISION_SAMPLE_UNBOUND,
             "precision seed is not precision_sample_seed(cohort, freeze, run_id) for this run",
         )
+    # B4: when the freeze committed a pool_root, the presented pool MUST reproduce it.
+    # Combined with A6's canonical draw, the sample is then a pure function of the
+    # membership frozen BEFORE the seed was derivable — a swapped pool is rejected.
+    if freeze.pool_root:
+        if pool_root_of(precision.pool) != freeze.pool_root:
+            report.add(
+                ViolationReason.PRECISION_SAMPLE_UNBOUND,
+                "precision pool does not reproduce the committed freeze pool_root",
+            )
 
 
 def _check_achievability(
@@ -1533,6 +1996,88 @@ def _check_achievability(
             ViolationReason.IN_PLACE_EDIT,
             "achievability log is not an append-only extension of its prior baseline",
         )
+
+
+def _check_certification(
+    *,
+    attestation: Optional[Attestation],
+    verify_key: Optional[bytes],
+    strict: bool,
+    history: Optional[CohortHistory],
+    exclusions: Optional[ExclusionLog],
+    ledger: Optional[ExposureLedger],
+    evaluation_ledger: Optional[EvaluationLedger],
+    achievability: Optional[AchievabilityLog],
+    freeze: Optional[FreezeManifest],
+    run: Optional[EvaluationRun],
+    report: Optional["Report"],
+    result: ContractReport,
+) -> None:
+    """B5: the fail-closed CERTIFY path. A certified score is bound to a single
+    committed, signed attestation root — so it cannot be fabricated even by an
+    operator who controls storage. Every component root is RECOMPUTED from the
+    presented objects and must equal the attestation's committed root
+    (``ATTESTATION_MISMATCH``); the signature must verify (``ATTESTATION_INVALID`` /
+    ``ATTESTATION_UNSIGNED``); every referenced component must be present
+    (``ATTESTATION_INCOMPLETE``). A certification requested with no signed
+    attestation + verify_key is ``UNANCHORED``."""
+    # Certification requires BOTH a signed attestation and a verify_key. Without
+    # them there is nothing to reproduce — fail closed rather than pass silently.
+    if attestation is None or verify_key is None:
+        result.add(
+            ViolationReason.UNANCHORED,
+            "certification requires a signed Attestation and a verify_key; none supplied",
+        )
+        return
+
+    # 1. The signature over the committed attestation_root must verify.
+    if not verify(attestation.attestation_root, attestation.signature, verify_key):
+        result.add(
+            ViolationReason.ATTESTATION_INVALID,
+            "attestation signature does not verify against verify_key",
+        )
+
+    # 2. Recompute each component root from the presented objects. A component the
+    #    attestation references (root != the empty root) but that was not presented
+    #    is ATTESTATION_INCOMPLETE (fail closed); a presented component whose
+    #    recomputed root differs is ATTESTATION_MISMATCH.
+    def _match(name: str, committed: str, obj: Any, recompute) -> None:
+        if obj is None:
+            if committed != _EMPTY_ROOT:
+                result.add(
+                    ViolationReason.ATTESTATION_INCOMPLETE,
+                    f"attestation references a {name} root but no {name} was presented",
+                )
+            return
+        if recompute(obj) != committed:
+            result.add(
+                ViolationReason.ATTESTATION_MISMATCH,
+                f"presented {name} does not reproduce the attested {name} root",
+            )
+
+    _match("history", attestation.history_root, history, lambda h: h.history_root)
+    _match("exclusion", attestation.exclusion_root, exclusions, lambda x: x.root)
+    _match("exposure", attestation.exposure_root, ledger, lambda le: le.root)
+    _match("evaluation", attestation.evaluation_root, evaluation_ledger, lambda e: e.root)
+    _match("achievability", attestation.achievability_root, achievability, lambda a: a.root)
+
+    # 3. The scalar commitments: freeze_hash, pool_root, run_id, report_hash. Each is
+    #    mandatory for certification — a missing one is ATTESTATION_INCOMPLETE.
+    if freeze is None:
+        result.add(ViolationReason.ATTESTATION_INCOMPLETE, "no FreezeManifest presented for certification")
+    else:
+        if attestation.freeze_hash != freeze.freeze_hash:
+            result.add(ViolationReason.ATTESTATION_MISMATCH, "presented freeze_hash != attested freeze_hash")
+        if attestation.pool_root != freeze.pool_root:
+            result.add(ViolationReason.ATTESTATION_MISMATCH, "presented pool_root != attested pool_root")
+    if run is None:
+        result.add(ViolationReason.ATTESTATION_INCOMPLETE, "no EvaluationRun presented for certification")
+    elif attestation.run_id != run.run_id:
+        result.add(ViolationReason.ATTESTATION_MISMATCH, "presented run_id != attested run_id")
+    if report is None:
+        result.add(ViolationReason.ATTESTATION_INCOMPLETE, "no Report presented for certification")
+    elif attestation.report_hash != leaf_hash(report.model_dump(mode="json")):
+        result.add(ViolationReason.ATTESTATION_MISMATCH, "presented report does not reproduce the attested report_hash")
 
 
 # A convenience alias: the contract's `check` (FR-14) reads as `check(...)` too.

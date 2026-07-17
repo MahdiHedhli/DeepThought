@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Smoke test for feature 008 — the typed EvaluationContract.
 #
-# Builds a 2-entry cohort v1, freezes a dummy detector, records exactly one blind
-# evaluation, and passes validate(). Then demonstrates each guard FAILING with a
-# typed reason: an in-place entry edit, a silent denominator shrink, a second
-# blind evaluation, and a curator==subject score. Finally prints the Report with
-# blind recall as the headline plus the four labelled secondaries. Exit 0 on
+# Builds a 2-entry cohort v1, freezes a dummy detector (committing the confusion
+# pool root), records exactly one blind evaluation, binds a Report, builds and
+# SIGNS an Attestation, and passes strict certification. Then demonstrates each
+# guard FAILING with a typed reason: an in-place entry edit, a silent denominator
+# shrink, a second blind evaluation, a curator==subject score, plus the
+# cryptographic-anchoring fail-closed cases — a forged signature, an omitted
+# component, and a certify path with no attestation. Finally prints the Report
+# with blind recall as the headline plus the four labelled secondaries. Exit 0 on
 # success (all positives pass AND all guards trip with the expected reason).
 set -euo pipefail
 
@@ -22,10 +25,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path.cwd() / "benchmarks" / "harness"))
 
 from contract import (
+    Attestation,
     Cohort,
     CohortEntry,
     CohortHistory,
     DetectorBundle,
+    EvaluationLedger,
     EvaluationRun,
     ExclusionEvent,
     ExclusionLog,
@@ -38,8 +43,14 @@ from contract import (
     ViolationReason,
     ContractViolation,
     _canonical_run_id,
+    build_attestation,
+    pool_root_of,
     validate,
 )
+
+# A fixed evaluator key — DETERMINISTIC (never read from os.urandom). PRODUCTION
+# swaps HMAC for ed25519 with the private key held by a party != the scored builder.
+KEY = b"deepthought-smoke-evaluator-key-0123456789"
 
 
 def entry(vuln, probe, role=Role.BLIND):
@@ -64,12 +75,15 @@ def expect(label, ok):
         failures.append(label)
 
 
-print("== positive: a clean 2-entry cohort v1, freeze, one blind eval, validate ==")
+print("== positive: cohort v1, freeze (pool committed), one blind eval, SIGNED attestation, strict certify ==")
 e1 = entry("8ab05d4c36b4720dc3f1f654564745f47c5034cd", "requests.get(url, stream=True)", Role.CALIBRATION)
 e2 = entry("819a80836e991ca3f427b0e85faca159083d3d40", "client.get(url_spec.geturl()", Role.BLIND)
 v1 = Cohort(version="v1", entries=[e1, e2], reason="initial cohort").sealed()
 history = CohortHistory(versions=[v1])
 
+# B4: the confusion-pair pool membership is committed in the freeze, BEFORE the seed
+# is derivable, as a Merkle pool_root.
+pool = [f"p{i:02d}" for i in range(12)]
 bundle = DetectorBundle(
     detector_id="DT-SSRF-TAINT",
     module_hashes={"ssrf_detector.py": "deadbeef"},
@@ -80,6 +94,7 @@ bundle = DetectorBundle(
     entrypoint="ssrf_detector:scan_source",
     params={"budget": 100},
     calibration_seed_ids=[e1.identity_hash],
+    pool_root=pool_root_of(pool),
 )
 freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
 
@@ -90,9 +105,47 @@ ledger.record(cohort_content_hash=v1.content_hash, actor="claude", activity="cur
 run_id = _canonical_run_id(v1.content_hash, freeze.freeze_hash, "codex")
 run = EvaluationRun(run_id=run_id, subject="codex", cohort_content_hash=v1.content_hash, freeze_hash=freeze.freeze_hash)
 run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+
+# A1/A2: a produced run MUST present a Report bound to the RUN's evaluated cohort.
+report_view = Report(
+    blind_recall=RecallReport(rediscovered=1, total=1),  # v1 has exactly one BLIND entry (e2)
+    fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+    coverage=1.0,
+    patched_alert_density=0.0,
+    adjudicated_precision=1.0,
+    cohort_content_hash=v1.content_hash,
+    rediscovered_blind_ids=[e2.identity_hash],
+)
+evaluations = EvaluationLedger()  # an empty, honest evaluate-once ledger
+
+# B5: bind every component root into one signed Attestation.
+attestation = build_attestation(
+    history=history,
+    freeze=freeze,
+    run=run,
+    report=report_view,
+    evaluator_id="curator-not-subject",
+    attested_at="2026-07-16T12:00:00Z",
+    key=KEY,
+    exclusions=None,
+    ledger=ledger,
+    evaluation_ledger=evaluations,
+    achievability=None,
+)
+
 # R6: a run with post-freeze attempts is validated against its FreezeManifest (freeze=).
-report = validate(history=history, ledger=ledger, run=run, freeze=freeze)
-expect("clean cohort + one blind eval validates", report.ok)
+certified = validate(
+    history=history,
+    ledger=ledger,
+    run=run,
+    freeze=freeze,
+    report=report_view,
+    prior_evaluations=evaluations,
+    attestation=attestation,
+    verify_key=KEY,
+    strict=True,
+)
+expect("honest signed attestation certifies (strict)", certified.ok)
 expect("exactly one semantic evaluation recorded", run.semantic_evaluation_count == 1)
 
 print()
@@ -133,6 +186,33 @@ expect("curator scoring itself trips CURATOR_IS_SUBJECT", ViolationReason.CURATO
 print(f"        -> {rep4.summary()}")
 
 print()
+print("== guard 5: cryptographic anchoring fails closed (forged / omitted / unanchored) ==")
+# a forged signature cannot certify
+forged = attestation.model_copy(update={"signature": "00" * 32})
+rep5a = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    prior_evaluations=evaluations, attestation=forged, verify_key=KEY, strict=True,
+)
+expect("forged signature trips ATTESTATION_INVALID", ViolationReason.ATTESTATION_INVALID in rep5a.reasons())
+print(f"        -> {rep5a.summary()}")
+
+# omitting a referenced component (the history) fails closed
+rep5b = validate(
+    history=None, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    prior_evaluations=evaluations, attestation=attestation, verify_key=KEY, strict=True,
+)
+expect("omitted history component trips ATTESTATION_INCOMPLETE", ViolationReason.ATTESTATION_INCOMPLETE in rep5b.reasons())
+print(f"        -> {rep5b.summary()}")
+
+# certifying with NO attestation at all is UNANCHORED
+rep5c = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    prior_evaluations=evaluations, strict=True,
+)
+expect("certify with no attestation trips UNANCHORED", ViolationReason.UNANCHORED in rep5c.reasons())
+print(f"        -> {rep5c.summary()}")
+
+print()
 print("== report: blind recall is the headline, four labelled secondaries ==")
 rep = Report(
     blind_recall=RecallReport(rediscovered=3, total=4, patched_alert_density=1.2),
@@ -154,5 +234,5 @@ print()
 if failures:
     print(f"SMOKE FAILED: {len(failures)} check(s) failed: {failures}")
     sys.exit(1)
-print("SMOKE 008 OK: contract validates the clean run and every guard trips with a typed reason.")
+print("SMOKE 008 OK: contract certifies the signed run and every guard (incl. anchoring) trips with a typed reason.")
 PYEOF
