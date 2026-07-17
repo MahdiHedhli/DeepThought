@@ -536,8 +536,12 @@ def playbook_disclose(
 def playbook_findings(
     project: Optional[str] = typer.Option(None, help="Filter by project id."),
     state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
 ) -> None:
     """List findings."""
+    # Validate DEEPTHOUGHT_PROFILE uniformly: a misspelled global profile is
+    # rejected here too, not silently accepted (codex review PR #37).
+    _resolve_profile_or_exit(profile)
     findings = _store(state).list_findings(project=project)
     if not findings:
         typer.echo("no findings")
@@ -548,15 +552,18 @@ def playbook_findings(
 
 # --- profiles ------------------------------------------------------------
 @app.command("profiles")
-def profiles() -> None:
+def profiles(profile: Optional[str] = _PROFILE_OPTION) -> None:
     """List available low-friction profiles and the EXACT defaults each applies.
 
     Read-only introspection (Constitution Article VII): it lets an operator audit
-    a profile — its finite loop budget, its root default, and its terse /
-    auto-next-steps display flags — before trusting it, and changes no state. It
-    also names the ceremony the profile deliberately does NOT streamline (scope,
-    authorization basis, and output path are never defaulted).
+    a profile — its finite loop budget, its root default, and its terse display
+    flag — before trusting it, and changes no state. It also names the ceremony the
+    profile deliberately does NOT streamline (scope, authorization basis, and
+    output path are never defaulted).
     """
+    # Validate DEEPTHOUGHT_PROFILE uniformly (codex review PR #37); an explicit
+    # valid --profile flag still overrides a stale bad env var (flag-over-env).
+    _resolve_profile_or_exit(profile)
     profs = available_profiles()
     if not profs:
         typer.echo("no profiles registered")
@@ -584,8 +591,13 @@ def profiles() -> None:
 
 # --- check ---------------------------------------------------------------
 @app.command("check")
-def check(state: Path = _STATE_OPTION) -> None:
+def check(
+    state: Path = _STATE_OPTION,
+    profile: Optional[str] = _PROFILE_OPTION,
+) -> None:
     """Validate state: schema, lifecycle, orphans, identity, OSV conformance."""
+    # Validate DEEPTHOUGHT_PROFILE uniformly (codex review PR #37).
+    _resolve_profile_or_exit(profile)
     report = run_check(_store(state))
     if report.ok:
         typer.echo("check: OK")

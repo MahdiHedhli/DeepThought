@@ -830,6 +830,30 @@ def test_root_default_survives_store_error(tmp_path, monkeypatch):
     assert out.exit_code == 2, (out.exit_code, out.output, out.exception)
 
 
+@pytest.mark.parametrize("argv", [["profiles"], ["check"], ["playbook", "findings"]])
+def test_unknown_env_profile_rejected_by_all_commands(argv, tmp_path, monkeypatch):
+    """codex review (cli.py:76): an unknown DEEPTHOUGHT_PROFILE is rejected
+    uniformly — including by commands without profile behavior (profiles/check/
+    findings) — so a misspelled global profile never appears accepted depending on
+    which command is run."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPTHOUGHT_PROFILE", "does-not-exist")
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 2, (argv, result.exit_code, result.output)
+    assert "does-not-exist" in result.output or "unknown profile" in result.output.lower()
+
+
+def test_explicit_valid_profile_flag_overrides_bad_env(tmp_path, monkeypatch):
+    """A stale invalid DEEPTHOUGHT_PROFILE must NOT block an explicit valid
+    --profile flag (flag-over-env precedence — why validation is per-command, not a
+    blanket env-only callback)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPTHOUGHT_PROFILE", "does-not-exist")
+    result = runner.invoke(app, ["profiles", "--profile", "mostly_harmless"])
+    assert result.exit_code == 0, result.output
+    assert "mostly_harmless" in result.output
+
+
 def test_profile_is_frozen():
     prof = resolve_profile("mostly_harmless")
     import dataclasses
