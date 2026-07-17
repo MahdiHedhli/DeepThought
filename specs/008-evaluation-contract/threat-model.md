@@ -35,6 +35,34 @@ The unifying rule: **every exclusion is a logged, reviewable, versioned event.**
 Any legitimate cohort correction creates a **new cohort version**; it never edits
 history (FR-2).
 
+## Enforcement is in `validate()`, not just the constructors (adversarial audit)
+
+A 4-lens red-team of `validate()` found the leak vectors above were sealed only by
+**constructor helpers** (`attempt_evaluation`, `ExclusionLog.append`,
+`AchievabilityLog.append`, the panel validators) — every one of which is **bypassed
+when a model is rebuilt from storage** — and that `validate()` never consulted
+`ExclusionClass` at all. So a run reconstructed from persisted JSON could present a
+dropped hard case, a cherry-picked blind evaluation, a re-rolled precision sample, or
+a rewritten achievability log and still return `report.ok == True`. The gate now
+re-derives and enforces these invariants itself (regression tests `test_h1`..`test_h9`):
+
+| Hole | Leak it re-opened | Now sealed in `validate()` by |
+|---|---|---|
+| H1 | L1 — a miss/infra/policy event "authorizing" a removal | removal legitimized ONLY by a `COHORT_CORRECTION`-class event (`DENOMINATOR_SHRINK`) |
+| H2 | infra rule — infra exclusion silently ignored | any `INFRASTRUCTURE`-class event ⇒ `RUN_INVALID` |
+| H3 | L8 — run-level reason posing as a per-entry deletion | `POLICY_REFUSAL` / `INFRASTRUCTURE` must carry no `entry_identity` |
+| H4 | L1/L10 — a stale event laundering a later removal | correction events matched to the exact `(identity, from, to)` transition and consumed |
+| H5 | L4 — a from-storage run cherry-picking blind evals | infra-retry invariant mirrored from `attempt_evaluation` (`INFRA_RETRY_REQUIRES_UNCHANGED`) |
+| H6 | L2/L4 — a free-string freeze / a seed inside blind | `run.freeze_hash == bundle hash` (`BAD_FREEZE_BINDING`); seeds disjoint from blind (`SEED_IN_BLIND`) |
+| H7 | L1/L9 — a free-int blind denominator under-reporting | blind total recomputed from the frozen cohort's blind entries (`REPORT_DENOMINATOR_MISMATCH`) |
+| H8 | L6 — dropping unfavorable pairs / re-rolling the sample | coverage + seed/sample bound to `precision_sample_seed` (`PRECISION_SAMPLE_UNBOUND`) |
+| H9 | L8 — a rewritten "unachievable" reclassification | log sealed + append-only; post-freeze registration rejected (`ACHIEVABILITY_NOT_PRE_FREEZE` / `IN_PLACE_EDIT`) |
+
+The new `validate()` parameters (`freeze`, `report`, `precision`, `achievability`,
+`prior_exclusions`, `prior_achievability`) are keyword-only and optional, so the seal
+is additive: existing callers are unaffected, and a caller that passes the artifacts
+gets them checked.
+
 ## Sealing note (for the later cross-model evaluator)
 
 The exposure ledger and freeze manifest are the in-contract guarantees. The OS-level

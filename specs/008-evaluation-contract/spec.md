@@ -214,6 +214,53 @@ wired into `check`, enforcing:
 14. `check` fails on each of: bad entry hash, non-monotone version, silent
     denominator shrink, curator==subject, missing freeze, blind-access > 1. (FR-14)
 
+### Adversarial-audit acceptance criteria (the enforcement floor)
+
+A 4-lens red-team of `validate()` found that the honesty invariants lived only in
+constructor helpers (bypassed when a model is rebuilt from storage) and that
+`validate()` never consulted `ExclusionClass` — so it accepted dishonest
+measurements as `report.ok == True`. These criteria pin the now-enforced behaviour;
+each maps to a threat-model leak vector and has a dedicated regression test
+(`test_h1`..`test_h9` in `benchmarks/tests/test_evaluation_contract.py`). `validate()`
+gained keyword-only, optional params (`freeze`, `report`, `precision`,
+`achievability`, `prior_exclusions`, `prior_achievability`); every prior call site is
+unchanged.
+
+15. **(H1, L1)** A denominator removal is legitimized ONLY by a
+    `COHORT_CORRECTION`-class event. A removal "covered" by an
+    `ANALYSIS_LIMITATION` (e.g. `unsupported-language`), `INFRASTRUCTURE`, or
+    `POLICY_REFUSAL` event still fails `check` with `DENOMINATOR_SHRINK`. (FR-3, FR-8)
+16. **(H2, FR-8 infra rule)** Any `INFRASTRUCTURE`-class exclusion event fails
+    `check` with `RUN_INVALID` — infrastructure failure invalidates the run rather
+    than quietly leaving the denominator.
+17. **(H3, L8)** A run-level reason (`POLICY_REFUSAL` / `INFRASTRUCTURE`) that carries
+    an `entry_identity` is rejected at the type boundary — those reasons are never
+    per-entry deletions.
+18. **(H4, L1/L10)** A `COHORT_CORRECTION` event authorizes exactly its named
+    `(entry_identity, from_version, to_version)` transition; a stale `v1→v2` event
+    cannot launder a later `v3→v4` removal of the same re-added identity
+    (`DENOMINATOR_SHRINK`).
+19. **(H5, L4)** The infra-retry invariant is enforced in `validate()`, not only in
+    `attempt_evaluation`: a run rebuilt from storage whose post-freeze attempts have
+    broken logs or changed artifact/env hashes fails `check` with
+    `INFRA_RETRY_REQUIRES_UNCHANGED`.
+20. **(H6, L2/L4)** A supplied `FreezeManifest` binds the run: `run.freeze_hash` must
+    equal the frozen bundle hash (`BAD_FREEZE_BINDING`), and calibration seeds must be
+    disjoint from the scored cohort's blind entries (`SEED_IN_BLIND`).
+21. **(H7, L1/L9)** A supplied `Report` is bound to the frozen cohort:
+    `blind_recall.total` is recomputed from the cohort's BLIND entries, and the
+    rediscovered set must be a subset of the actual blind identities with a matching
+    count; otherwise `REPORT_DENOMINATOR_MISMATCH`.
+22. **(H8, L6)** Adjudicated precision requires full coverage (every seeded pair
+    adjudicated) and a seed/sample bound to `precision_sample_seed` /
+    `sample_confusion_pairs`; an unfavorable-subset adjudication or a re-rolled sample
+    is rejected, and routing through `validate()` rejects a precision bound to a
+    different run context (`PRECISION_SAMPLE_UNBOUND`).
+23. **(H9, L8)** The achievability log is sealed and append-only enforced by
+    `validate()`: a prediction registered at/after the freeze timestamp
+    (`ACHIEVABILITY_NOT_PRE_FREEZE`) or an in-place rewrite of a sealed log
+    (`IN_PLACE_EDIT`) is rejected even when it bypassed `append`.
+
 ## Open questions
 
 - **Non-blocking.** Does the contract live in a new `benchmarks/harness/contract.py`

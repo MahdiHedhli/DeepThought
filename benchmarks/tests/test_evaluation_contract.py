@@ -514,3 +514,303 @@ def test_ac14_check_fails_on_each_violation_class():
         ledger=ExposureLedger(),
     )
     assert good.ok, _reasons(good)
+
+
+# --------------------------------------------------------------------------- #
+# Adversarial-audit regression floor (H1..H9). Each case dishonestly passed
+# validate() before the fix; validate() must now REJECT it. See
+# scratchpad/contract-fix-spec.md and specs/008-evaluation-contract/threat-model.md.
+# --------------------------------------------------------------------------- #
+
+
+# H1 — a removal is legitimate ONLY when covered by a COHORT_CORRECTION-class event.
+def test_h1_removal_requires_cohort_correction_class():
+    a = _entry(vuln=A40)
+    b = _entry(vuln=C40)  # distinct identity, the case being dropped
+    v1 = _cohort("v1", [a, b])
+    v2 = _cohort("v2", [a], reason="dropped b", parent="v1")
+    hist = CohortHistory(versions=[v1, v2])
+
+    # An ANALYSIS_LIMITATION event referencing b must NOT legitimize the removal
+    # (this is the discriminator: class-blind removed_identities() wrongly did).
+    excl_analysis = ExclusionLog(
+        events=[
+            ExclusionEvent(
+                reason=ExclusionReason.UNSUPPORTED_LANGUAGE,
+                entry_identity=b.identity_hash,
+                from_version="v1",
+                to_version="v2",
+            )
+        ]
+    )
+    rep = validate(history=hist, exclusions=excl_analysis)
+    assert not rep.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(rep)
+
+    # A run-level POLICY_REFUSAL event cannot cover a removal either.
+    excl_policy = ExclusionLog(
+        events=[ExclusionEvent(reason=ExclusionReason.POLICY_REFUSAL, from_version="v1", to_version="v2")]
+    )
+    rep2 = validate(history=hist, exclusions=excl_policy)
+    assert not rep2.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(rep2)
+
+    # Only a COHORT_CORRECTION event matching the transition legitimizes it.
+    excl_ok = ExclusionLog(
+        events=[
+            ExclusionEvent(
+                reason=ExclusionReason.ALIAS_DUPE,
+                entry_identity=b.identity_hash,
+                from_version="v1",
+                to_version="v2",
+            )
+        ]
+    )
+    assert validate(history=hist, exclusions=excl_ok).ok
+
+
+# H2 — any INFRASTRUCTURE-class exclusion invalidates the run.
+def test_h2_infrastructure_exclusion_invalidates_run():
+    excl = ExclusionLog(events=[ExclusionEvent(reason=ExclusionReason.CRASH)])
+    rep = validate(exclusions=excl)
+    assert not rep.ok and ViolationReason.RUN_INVALID in _reasons(rep)
+
+
+# H3 — POLICY_REFUSAL / INFRASTRUCTURE reasons are run-level: no entry_identity.
+def test_h3_run_level_reasons_forbid_entry_identity():
+    with pytest.raises(ValidationError):
+        ExclusionEvent(reason=ExclusionReason.POLICY_REFUSAL, entry_identity="x")
+    with pytest.raises(ValidationError):
+        ExclusionEvent(reason=ExclusionReason.CRASH, entry_identity="x")
+    # analysis-limitation and correction reasons MAY carry an entry identity
+    ExclusionEvent(reason=ExclusionReason.UNSUPPORTED_LANGUAGE, entry_identity="x")
+    ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity="x")
+
+
+# H4 — a stale event cannot launder a later same-identity removal (exact transition).
+def test_h4_stale_event_cannot_launder_later_transition():
+    x = _entry(vuln=A40)
+    anchor = _entry(vuln=B40, probe="other.call()")  # keeps cohorts non-empty across versions
+    v1 = _cohort("v1", [x, anchor])
+    v2 = _cohort("v2", [anchor], reason="drop x", parent="v1")
+    v3 = _cohort("v3", [x, anchor], reason="re-add x", parent="v2")
+    v4 = _cohort("v4", [anchor], reason="silently drop x again", parent="v3")
+    hist = CohortHistory(versions=[v1, v2, v3, v4])
+    # one event authorizes exactly the v1->v2 removal, NOT the later v3->v4 one
+    excl = ExclusionLog(
+        events=[
+            ExclusionEvent(
+                reason=ExclusionReason.ALIAS_DUPE,
+                entry_identity=x.identity_hash,
+                from_version="v1",
+                to_version="v2",
+            )
+        ]
+    )
+    rep = validate(history=hist, exclusions=excl)
+    assert not rep.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(rep)
+
+
+# H5 — the infra-retry invariant is enforced in validate(), not just attempt_evaluation().
+def test_h5_infra_retry_invariant_enforced_in_validate():
+    run = EvaluationRun(
+        run_id="r",
+        subject="s",
+        cohort_content_hash="H",
+        freeze_hash="fz",
+        attempts=[
+            EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", logs_intact=False),
+            EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A2", env_hash="E2"),
+            EvalAttempt(phase="post_freeze", produced_results=True, artifact_hash="A3", env_hash="E3"),
+        ],
+    )
+    rep = validate(run=run)
+    assert not rep.ok and ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED in _reasons(rep)
+
+
+# H6 — the freeze must bind a real bundle; calibration seeds disjoint from blind.
+def test_h6_freeze_binding_and_seed_disjointness():
+    blind = _entry(vuln=A40, role="blind")
+    v1 = _cohort("v1", [blind])
+    hist = CohortHistory(versions=[v1])
+
+    bundle = DetectorBundle(detector_id="d", lockfile_hash="L")
+    freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
+    run = EvaluationRun(run_id="r", subject="s", cohort_content_hash=v1.content_hash, freeze_hash="fabricated")
+    rep = validate(history=hist, run=run, freeze=freeze)
+    assert not rep.ok and ViolationReason.BAD_FREEZE_BINDING in _reasons(rep)
+
+    # a calibration seed that is also a blind entry identity is rejected
+    bundle2 = DetectorBundle(detector_id="d", lockfile_hash="L", calibration_seed_ids=[blind.identity_hash])
+    freeze2 = FreezeManifest(bundle=bundle2, timestamp="2026-07-16T10:00:00Z")
+    run2 = EvaluationRun(run_id="r2", subject="s", cohort_content_hash=v1.content_hash, freeze_hash=freeze2.freeze_hash)
+    rep2 = validate(history=hist, run=run2, freeze=freeze2)
+    assert not rep2.ok and ViolationReason.SEED_IN_BLIND in _reasons(rep2)
+
+    # a correctly-bound freeze with a disjoint seed passes
+    bundle3 = DetectorBundle(detector_id="d", lockfile_hash="L")
+    freeze3 = FreezeManifest(bundle=bundle3, timestamp="2026-07-16T10:00:00Z")
+    run3 = EvaluationRun(run_id="r3", subject="s", cohort_content_hash=v1.content_hash, freeze_hash=freeze3.freeze_hash)
+    assert validate(history=hist, run=run3, freeze=freeze3).ok
+
+
+# H7 — the Report's blind denominator is recomputed from the frozen cohort's blind entries.
+def test_h7_report_bound_to_cohort_denominator():
+    blinds = [_entry(vuln=letter * 40, role="blind") for letter in ("a", "b", "c")]
+    v1 = _cohort("v1", blinds)
+    hist = CohortHistory(versions=[v1])
+
+    rep_under = Report(
+        blind_recall=RecallReport(rediscovered=2, total=2),  # true blind count is 3
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v1.content_hash,
+    )
+    out = validate(history=hist, report=rep_under)
+    assert not out.ok and ViolationReason.REPORT_DENOMINATOR_MISMATCH in _reasons(out)
+
+    # a report whose per-entry rediscovered set and total match the cohort passes
+    rep_ok = Report(
+        blind_recall=RecallReport(rediscovered=2, total=3),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v1.content_hash,
+        rediscovered_blind_ids=[blinds[0].identity_hash, blinds[1].identity_hash],
+    )
+    assert validate(history=hist, report=rep_ok).ok
+
+    # a rediscovered set that disagrees with the reported count is rejected
+    rep_bad_set = rep_ok.model_copy(update={"rediscovered_blind_ids": [blinds[0].identity_hash]})
+    out2 = validate(history=hist, report=rep_bad_set)
+    assert not out2.ok and ViolationReason.REPORT_DENOMINATOR_MISMATCH in _reasons(out2)
+
+
+# H8 — precision requires full coverage and a seed/sample bound to precision_sample_seed.
+def test_h8_precision_coverage_and_sample_binding():
+    seed = precision_sample_seed("cohortH", "freezeF", "run1")
+    pool = [f"p{i}" for i in range(20)]
+    sample = sample_confusion_pairs(pool, 3, seed)
+
+    # coverage: adjudicating only a favorable subset is rejected
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(
+            seed=seed,
+            sampled_pairs=sample,
+            pool=pool,
+            k=3,
+            cohort_hash="cohortH",
+            freeze_hash="freezeF",
+            run_id="run1",
+            adjudications=[_good_panel(sample[0], "true-positive")],
+        )
+
+    # arbitrary seed unbound from precision_sample_seed is rejected
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(
+            seed=12345,
+            sampled_pairs=sample,
+            pool=pool,
+            k=3,
+            cohort_hash="cohortH",
+            freeze_hash="freezeF",
+            run_id="run1",
+            adjudications=[_good_panel(s, "true-positive") for s in sample],
+        )
+
+    # arbitrary sample not drawn by sample_confusion_pairs(pool, k, seed) is rejected
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(
+            seed=seed,
+            sampled_pairs=["p0", "p1", "p2"],
+            pool=pool,
+            k=3,
+            cohort_hash="cohortH",
+            freeze_hash="freezeF",
+            run_id="run1",
+            adjudications=[_good_panel(s, "true-positive") for s in ["p0", "p1", "p2"]],
+        )
+
+    # full coverage with a correctly-bound seed and sample passes
+    ap = AdjudicatedPrecision(
+        seed=seed,
+        sampled_pairs=sample,
+        pool=pool,
+        k=3,
+        cohort_hash="cohortH",
+        freeze_hash="freezeF",
+        run_id="run1",
+        adjudications=[_good_panel(s, "true-positive") for s in sample],
+    )
+    assert ap.precision == 1.0
+
+    # routing through validate(): a precision bound to a different run context is rejected
+    bundle = DetectorBundle(detector_id="d")
+    freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
+    run = EvaluationRun(run_id="rp", subject="s", cohort_content_hash="CH", freeze_hash=freeze.freeze_hash)
+    seed_rp = precision_sample_seed("CH", freeze.freeze_hash, "rp")
+    ap_bound = AdjudicatedPrecision(
+        seed=seed_rp,
+        sampled_pairs=sample_confusion_pairs(pool, 3, seed_rp),
+        pool=pool,
+        k=3,
+        cohort_hash="CH",
+        freeze_hash=freeze.freeze_hash,
+        run_id="rp",
+        adjudications=[_good_panel(s, "true-positive") for s in sample_confusion_pairs(pool, 3, seed_rp)],
+    )
+    assert validate(run=run, freeze=freeze, precision=ap_bound).ok
+
+    seed_other = precision_sample_seed("CH", freeze.freeze_hash, "other")
+    ap_mismatch = AdjudicatedPrecision(
+        seed=seed_other,
+        sampled_pairs=sample_confusion_pairs(pool, 3, seed_other),
+        pool=pool,
+        k=3,
+        cohort_hash="CH",
+        freeze_hash=freeze.freeze_hash,
+        run_id="other",
+        adjudications=[_good_panel(s, "true-positive") for s in sample_confusion_pairs(pool, 3, seed_other)],
+    )
+    outp = validate(run=run, freeze=freeze, precision=ap_mismatch)
+    assert not outp.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(outp)
+
+
+# H9 — the achievability log is sealed and append-only, enforced by validate().
+def test_h9_achievability_sealed_and_append_only():
+    # direct construction bypasses append()'s guard; validate must still reject hindsight
+    log = AchievabilityLog(
+        freeze_timestamp="2026-07-16T12:00:00Z",
+        predictions=[
+            AchievabilityPrediction(
+                entry_identity="E1", predicted_achievable=False, registered_at="2026-07-16T13:00:00Z"
+            )
+        ],
+    )
+    rep = validate(achievability=log)
+    assert not rep.ok and ViolationReason.ACHIEVABILITY_NOT_PRE_FREEZE in _reasons(rep)
+
+    # an in-place rewrite after sealing trips the seal
+    good = AchievabilityLog(
+        freeze_timestamp="2026-07-16T12:00:00Z",
+        predictions=[
+            AchievabilityPrediction(
+                entry_identity="E1", predicted_achievable=False, registered_at="2026-07-16T09:00:00Z"
+            )
+        ],
+    ).sealed()
+    tampered = good.model_copy(
+        update={
+            "predictions": [
+                AchievabilityPrediction(
+                    entry_identity="E2", predicted_achievable=True, registered_at="2026-07-16T09:00:00Z"
+                )
+            ]
+        }
+    )
+    rep2 = validate(achievability=tampered)
+    assert not rep2.ok and ViolationReason.IN_PLACE_EDIT in _reasons(rep2)
+
+    # a sealed, pre-freeze, append-only log passes
+    assert validate(achievability=good).ok

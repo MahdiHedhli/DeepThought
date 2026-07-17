@@ -28,6 +28,7 @@ import hashlib
 import json
 import random
 import re
+from collections import Counter
 from enum import Enum
 from typing import Any, Optional
 
@@ -151,6 +152,13 @@ class ViolationReason(str, Enum):
     INFRA_RETRY_REQUIRES_UNCHANGED = "infra-retry-requires-unchanged-hashes"
     ACHIEVABILITY_NOT_PRE_FREEZE = "achievability-not-pre-freeze"
     SYNTHETIC_IN_REAL_AGGREGATE = "synthetic-in-real-cve-aggregate"
+    # Adversarial-audit seals (H1..H9): validate() enforces these, not only the
+    # constructor helpers a from-storage rebuild bypasses.
+    RUN_INVALID = "infrastructure-exclusion-invalidates-run"
+    BAD_FREEZE_BINDING = "freeze-hash-not-bound-to-frozen-bundle"
+    SEED_IN_BLIND = "calibration-seed-is-a-blind-entry"
+    REPORT_DENOMINATOR_MISMATCH = "report-recall-not-bound-to-frozen-cohort"
+    PRECISION_SAMPLE_UNBOUND = "precision-sample-not-bound-to-seed"
 
 
 class ContractViolation(Exception):
@@ -431,6 +439,18 @@ class ExclusionEvent(BaseModel):
     to_version: str = ""
     detail: str = ""
 
+    @model_validator(mode="after")
+    def _run_level_reasons_carry_no_entry(self) -> "ExclusionEvent":
+        # POLICY_REFUSAL and INFRASTRUCTURE are RUN-level outcomes, never per-entry
+        # deletions (H3). An event carrying an entry_identity for one of them would
+        # masquerade as a denominator removal — refuse it at the type boundary.
+        if _EXCLUSION_CLASS[self.reason] in (ExclusionClass.POLICY_REFUSAL, ExclusionClass.INFRASTRUCTURE):
+            if self.entry_identity:
+                raise ValueError(
+                    f"{self.reason.value} is a run-level exclusion and must not carry an entry_identity"
+                )
+        return self
+
     @property
     def classification(self) -> ExclusionClass:
         return _EXCLUSION_CLASS[self.reason]
@@ -468,6 +488,28 @@ class ExclusionLog(BaseModel):
 
     def removed_identities(self) -> set[str]:
         return {e.entry_identity for e in self.events if e.entry_identity}
+
+    def correction_removed_identities(self) -> set[str]:
+        """Identities whose removal is legitimized by a COHORT_CORRECTION-class
+        event (H1). A miss (ANALYSIS_LIMITATION) or a run-level outcome
+        (INFRASTRUCTURE / POLICY_REFUSAL) can never authorize a denominator
+        removal — only a logged, versioned structural correction may."""
+        return {
+            e.entry_identity
+            for e in self.events
+            if e.entry_identity and _EXCLUSION_CLASS[e.reason] is ExclusionClass.COHORT_CORRECTION
+        }
+
+    def correction_transitions(self) -> "Counter[tuple[str, str, str]]":
+        """A multiset of the exact (entry_identity, from_version, to_version)
+        transitions authorized by COHORT_CORRECTION events (H4). One event
+        authorizes exactly its named removal at its named transition — a stale
+        v1->v2 event cannot launder a later v3->v4 removal of the same identity."""
+        return Counter(
+            (e.entry_identity, e.from_version, e.to_version)
+            for e in self.events
+            if e.entry_identity and _EXCLUSION_CLASS[e.reason] is ExclusionClass.COHORT_CORRECTION
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -651,11 +693,28 @@ class AdjudicatedPrecision(BaseModel):
     sampled_pairs: list[str]
     adjudications: list[Adjudication]
 
+    # Optional binding context (H8). When supplied, the sample is checked to be the
+    # exact deterministic draw for this (cohort, freeze, run) — so an operator
+    # cannot re-roll the sample until it flatters the detector, and cannot drop the
+    # unfavorable pairs.
+    pool: Optional[list[str]] = None  # the full confusion-pair pool the sample is drawn from
+    k: Optional[int] = None  # the sample size
+    cohort_hash: Optional[str] = None
+    freeze_hash: Optional[str] = None
+    run_id: Optional[str] = None
+
     @model_validator(mode="after")
     def _panel_and_sample_are_valid(self) -> "AdjudicatedPrecision":
         if not self.sampled_pairs:
             raise ValueError("precision requires a non-empty blind confusion-pair sample")
         sampled = set(self.sampled_pairs)
+        # COVERAGE (H8): every seeded pair must be adjudicated. A subset lets the
+        # unfavorable pairs be silently dropped to inflate precision.
+        adjudicated = {a.pair_id for a in self.adjudications}
+        if adjudicated != sampled:
+            raise ValueError(
+                f"every seeded pair must be adjudicated: sampled={sorted(sampled)} adjudicated={sorted(adjudicated)}"
+            )
         for adj in self.adjudications:
             if adj.pair_id not in sampled:
                 raise ValueError(f"adjudicated pair {adj.pair_id!r} is not in the seeded sample")
@@ -665,6 +724,17 @@ class AdjudicatedPrecision(BaseModel):
                 raise ValueError("adjudicators must be non-builders")
             if not any(not v.is_curator for v in adj.verdicts):
                 raise ValueError("at least one adjudicator must be a non-curator")
+        # SAMPLE BINDING (H8): if a pool/k are declared, the sample must be exactly
+        # sample_confusion_pairs(pool, k, seed); if the full seed context is declared,
+        # the seed must be exactly precision_sample_seed(cohort, freeze, run).
+        if self.cohort_hash is not None and self.freeze_hash is not None and self.run_id is not None:
+            expected_seed = precision_sample_seed(self.cohort_hash, self.freeze_hash, self.run_id)
+            if self.seed != expected_seed:
+                raise ValueError("seed is not bound to precision_sample_seed(cohort_hash, freeze_hash, run_id)")
+        if self.pool is not None and self.k is not None:
+            expected_sample = sample_confusion_pairs(self.pool, self.k, self.seed)
+            if list(self.sampled_pairs) != list(expected_sample):
+                raise ValueError("sampled_pairs is not the deterministic sample_confusion_pairs(pool, k, seed) draw")
         return self
 
     @property
@@ -796,6 +866,35 @@ class AchievabilityLog(BaseModel):
     freeze_timestamp: str  # the unseal boundary
     predictions: list[AchievabilityPrediction] = Field(default_factory=list)
 
+    # The content hash SEALED at creation (H9). Set, ``validate`` recomputes and
+    # rejects a mismatch — catching an in-place rewrite of the predictions that
+    # ``append`` (with its pre-freeze guard) never saw.
+    declared_content_hash: Optional[str] = None
+
+    @property
+    def computed_content_hash(self) -> str:
+        return _content_hash(
+            {
+                "freeze_timestamp": self.freeze_timestamp,
+                "predictions": [
+                    {
+                        "entry_identity": p.entry_identity,
+                        "predicted_achievable": p.predicted_achievable,
+                        "registered_at": p.registered_at,
+                        "note": p.note,
+                    }
+                    for p in self.predictions
+                ],
+            }
+        )
+
+    @property
+    def content_hash(self) -> str:
+        return self.declared_content_hash or self.computed_content_hash
+
+    def sealed(self) -> "AchievabilityLog":
+        return self.model_copy(update={"declared_content_hash": self.computed_content_hash})
+
     def append(self, prediction: AchievabilityPrediction) -> None:
         # Pre-registered means BEFORE unseal: a prediction registered at/after the
         # freeze timestamp is not a prediction, it is hindsight — refuse it.
@@ -833,6 +932,14 @@ class Report(BaseModel):
     patched_alert_density: float = Field(ge=0.0)  # flags/KLOC on the fixed tree
     adjudicated_precision: float = Field(ge=0.0, le=1.0)
     achievable_recall: Optional[float] = None  # labelled diagnostic secondary only
+
+    # Optional cohort/freeze binding (H7). When supplied and validate() is given the
+    # history, the blind denominator is recomputed from the frozen cohort's BLIND
+    # entries — a free-int total can no longer under-report the true denominator, and
+    # the rediscovered set must be a subset of the actual blind identities.
+    cohort_content_hash: Optional[str] = None
+    freeze_hash: Optional[str] = None
+    rediscovered_blind_ids: Optional[list[str]] = None  # blind entry-identity hashes rediscovered
 
     @property
     def authoritative_recall(self) -> RecallReport:
@@ -872,34 +979,67 @@ def validate(
     exclusions: Optional[ExclusionLog] = None,
     ledger: Optional[ExposureLedger] = None,
     run: Optional[EvaluationRun] = None,
+    freeze: Optional[FreezeManifest] = None,
+    report: Optional["Report"] = None,
+    precision: Optional[AdjudicatedPrecision] = None,
+    achievability: Optional[AchievabilityLog] = None,
+    prior_exclusions: Optional[ExclusionLog] = None,
+    prior_achievability: Optional[AchievabilityLog] = None,
 ) -> ContractReport:
     """Validate the Evaluation Contract (FR-14). Checks entry-hash integrity,
     version monotonicity, denominator preservation, blind-reuse, the exposure
     ledger (curator != subject), freeze-before-evaluation, and the blind-access
-    counter. Every violation is collected with a typed reason; ``report.ok`` is
+    counter. Every violation is collected with a typed reason; ``result.ok`` is
     True only when there are none. A ``check`` that raises is itself a failed check
-    (Constitution VII), so unexpected errors are captured, not propagated."""
-    report = ContractReport()
+    (Constitution VII), so unexpected errors are captured, not propagated.
+
+    The optional parameters (``freeze``, ``report``, ``precision``,
+    ``achievability``, and the ``prior_*`` baselines) let ``validate`` enforce the
+    adversarial-audit seals (H1..H9) that previously lived only in constructor
+    helpers — bypassed whenever a model is rebuilt from storage. They are
+    keyword-only and default to ``None`` so every existing call site keeps working
+    unchanged."""
+    result = ContractReport()
 
     try:
         if history is not None:
-            _check_entry_hash_integrity(history, report)
-            _check_content_seals(history, report)
-            _check_version_monotonicity(history, report)
-            _check_denominator_preservation(history, exclusions, report)
-            _check_blind_reuse(history, report)
+            _check_entry_hash_integrity(history, result)
+            _check_content_seals(history, result)
+            _check_version_monotonicity(history, result)
+            _check_denominator_preservation(history, exclusions, result)
+            _check_blind_reuse(history, result)
+
+        if exclusions is not None:
+            _check_exclusion_run_validity(exclusions, result)
+            if prior_exclusions is not None and not exclusions.is_extension_of(prior_exclusions):
+                result.add(
+                    ViolationReason.IN_PLACE_EDIT,
+                    "exclusion log is not an append-only extension of its prior baseline",
+                )
 
         if run is not None:
-            _check_freeze_before_evaluation(run, report)
-            _check_blind_access(run, report)
+            _check_freeze_before_evaluation(run, result)
+            _check_blind_access(run, result)
             if ledger is not None:
-                _check_exposure(run, ledger, report)
-    except ContractViolation as exc:  # a guard that raised mid-check is a failure
-        report.violations.append(exc)
-    except Exception as exc:  # noqa: BLE001 - any crash in check IS a failed check
-        report.add(ViolationReason.IN_PLACE_EDIT, f"unexpected check error: {exc}")
+                _check_exposure(run, ledger, result)
 
-    return report
+        if freeze is not None:
+            _check_freeze_binding(freeze, run, history, result)
+
+        if report is not None:
+            _check_report(report, history, run, freeze, result)
+
+        if precision is not None:
+            _check_precision_binding(precision, run, freeze, result)
+
+        if achievability is not None:
+            _check_achievability(achievability, prior_achievability, result)
+    except ContractViolation as exc:  # a guard that raised mid-check is a failure
+        result.violations.append(exc)
+    except Exception as exc:  # noqa: BLE001 - any crash in check IS a failed check
+        result.add(ViolationReason.IN_PLACE_EDIT, f"unexpected check error: {exc}")
+
+    return result
 
 
 def _check_entry_hash_integrity(history: CohortHistory, report: ContractReport) -> None:
@@ -940,15 +1080,38 @@ def _check_version_monotonicity(history: CohortHistory, report: ContractReport) 
 def _check_denominator_preservation(
     history: CohortHistory, exclusions: Optional[ExclusionLog], report: ContractReport
 ) -> None:
-    logged = exclusions.removed_identities() if exclusions is not None else set()
+    # A removal is legitimate ONLY when a COHORT_CORRECTION-class event names the
+    # EXACT (identity, from_version, to_version) transition (H1 + H4). A class-blind
+    # or flat-identity check let a miss/infra/policy event — or a stale v1->v2 event
+    # — launder a later removal. Events are consumed per transition: one event
+    # authorizes exactly its named removal.
+    available: "Counter[tuple[str, str, str]]" = (
+        exclusions.correction_transitions() if exclusions is not None else Counter()
+    )
     for prev, curr in zip(history.versions, history.versions[1:]):
         removed = prev.identities() - curr.identities()
         for identity in sorted(removed):
-            if identity not in logged:
+            key = (identity, prev.version, curr.version)
+            if available.get(key, 0) > 0:
+                available[key] -= 1  # consume the one event that authorizes this removal
+            else:
                 report.add(
                     ViolationReason.DENOMINATOR_SHRINK,
-                    f"{prev.version}->{curr.version}: entry {identity[:12]} left the denominator with no exclusion event",
+                    f"{prev.version}->{curr.version}: entry {identity[:12]} left the denominator "
+                    "with no matching cohort-correction event",
                 )
+
+
+def _check_exclusion_run_validity(exclusions: ExclusionLog, report: ContractReport) -> None:
+    # An INFRASTRUCTURE-class exclusion is a failed measurement, not a detector
+    # verdict: it INVALIDATES the run rather than quietly shrinking the denominator
+    # (H2; threat-model L-vectors "infrastructure failure INVALIDATES the run").
+    for event in exclusions.events:
+        if event.invalidates_run:
+            report.add(
+                ViolationReason.RUN_INVALID,
+                f"infrastructure exclusion {event.reason.value!r} invalidates the run",
+            )
 
 
 def _check_blind_reuse(history: CohortHistory, report: ContractReport) -> None:
@@ -979,6 +1142,29 @@ def _check_blind_access(run: EvaluationRun, report: ContractReport) -> None:
             ViolationReason.BLIND_ACCESS_EXCEEDED,
             f"run {run.run_id}: {run.semantic_evaluation_count} post-freeze semantic evaluations (>1)",
         )
+    # Mirror the infra-retry invariant that ``attempt_evaluation`` enforces at
+    # record-time, so a run REBUILT FROM STORAGE cannot launder several blind
+    # evaluations as "retries" (H5). Across the post-freeze attempts: every
+    # non-producing attempt must have intact logs and the SAME artifact/env hashes
+    # as the first post-freeze attempt; any post-freeze attempt with broken logs is
+    # itself a violation.
+    post = run.post_freeze_attempts
+    if post:
+        first = post[0]
+        for attempt in post:
+            if not attempt.logs_intact:
+                report.add(
+                    ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED,
+                    f"run {run.run_id}: a post-freeze attempt has logs_intact=False",
+                )
+                break
+        for attempt in post[1:]:
+            if attempt.artifact_hash != first.artifact_hash or attempt.env_hash != first.env_hash:
+                report.add(
+                    ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED,
+                    f"run {run.run_id}: post-freeze artifact/env hashes changed across attempts",
+                )
+                break
 
 
 def _check_exposure(run: EvaluationRun, ledger: ExposureLedger, report: ContractReport) -> None:
@@ -989,5 +1175,175 @@ def _check_exposure(run: EvaluationRun, ledger: ExposureLedger, report: Contract
         )
 
 
+def _cohort_by_content_hash(history: Optional[CohortHistory], content_hash: Optional[str]) -> Optional[Cohort]:
+    if history is None:
+        return None
+    if content_hash is not None:
+        for cohort in history.versions:
+            if cohort.content_hash == content_hash:
+                return cohort
+    return None
+
+
+def _blind_identities(cohort: Cohort) -> set[str]:
+    return {e.computed_identity_hash for e in cohort.by_role(Role.BLIND)}
+
+
+def _check_freeze_binding(
+    freeze: FreezeManifest,
+    run: Optional[EvaluationRun],
+    history: Optional[CohortHistory],
+    report: ContractReport,
+) -> None:
+    """A freeze must bind a real bundle (H6). The run's ``freeze_hash`` must equal
+    the freeze's content hash — a free string can no longer stand in for a frozen
+    bundle — and the calibration seeds must be disjoint from the scored cohort's
+    BLIND entries (a seed sitting in the blind set would tune on the denominator)."""
+    if run is not None and run.freeze_hash is not None and run.freeze_hash != freeze.freeze_hash:
+        report.add(
+            ViolationReason.BAD_FREEZE_BINDING,
+            f"run freeze_hash {run.freeze_hash!r} does not equal the frozen bundle hash {freeze.freeze_hash[:12]}",
+        )
+
+    cohort = None
+    if run is not None:
+        cohort = _cohort_by_content_hash(history, run.cohort_content_hash)
+    if cohort is None and history is not None:
+        cohort = history.latest()
+    if cohort is not None:
+        blind = _blind_identities(cohort)
+        overlap = blind & set(freeze.bundle.calibration_seed_ids)
+        for identity in sorted(overlap):
+            report.add(
+                ViolationReason.SEED_IN_BLIND,
+                f"calibration seed {identity[:12]} is also a BLIND entry in the scored cohort",
+            )
+
+
+def _check_report(
+    report_view: "Report",
+    history: Optional[CohortHistory],
+    run: Optional[EvaluationRun],
+    freeze: Optional[FreezeManifest],
+    report: ContractReport,
+) -> None:
+    """Bind the Report's blind recall to the frozen cohort (H7). ``blind_recall.total``
+    is recomputed from the cohort's BLIND entries, so a free int can no longer
+    under-report the true denominator; the rediscovered set (when supplied) must be a
+    subset of the actual blind identities and its size must equal the reported count."""
+    cohort = _cohort_by_content_hash(history, report_view.cohort_content_hash)
+    if cohort is None and run is not None:
+        cohort = _cohort_by_content_hash(history, run.cohort_content_hash)
+    if cohort is None and history is not None:
+        cohort = history.latest()
+    if cohort is None:
+        return  # nothing to bind against
+
+    blind = _blind_identities(cohort)
+    if report_view.blind_recall.total != len(blind):
+        report.add(
+            ViolationReason.REPORT_DENOMINATOR_MISMATCH,
+            f"reported blind total {report_view.blind_recall.total} != frozen cohort blind count {len(blind)}",
+        )
+
+    if freeze is not None and report_view.freeze_hash is not None and report_view.freeze_hash != freeze.freeze_hash:
+        report.add(
+            ViolationReason.REPORT_DENOMINATOR_MISMATCH,
+            "report freeze_hash does not equal the frozen bundle hash",
+        )
+
+    if report_view.rediscovered_blind_ids is not None:
+        rediscovered = set(report_view.rediscovered_blind_ids)
+        extraneous = rediscovered - blind
+        if extraneous:
+            report.add(
+                ViolationReason.REPORT_DENOMINATOR_MISMATCH,
+                f"rediscovered set contains {len(extraneous)} identity(ies) that are not BLIND entries",
+            )
+        if report_view.blind_recall.rediscovered != len(rediscovered & blind):
+            report.add(
+                ViolationReason.REPORT_DENOMINATOR_MISMATCH,
+                f"reported rediscovered {report_view.blind_recall.rediscovered} != "
+                f"|rediscovered ∩ blind| {len(rediscovered & blind)}",
+            )
+
+
+def _check_precision_binding(
+    precision: AdjudicatedPrecision,
+    run: Optional[EvaluationRun],
+    freeze: Optional[FreezeManifest],
+    report: ContractReport,
+) -> None:
+    """Route precision through validate (H8). The seed must be the deterministic
+    ``precision_sample_seed`` over THIS run's (cohort, freeze, run_id); a precision
+    computed over some other context — a re-rolled sample — is rejected."""
+    if run is None or freeze is None:
+        return
+    if precision.cohort_hash is not None and precision.cohort_hash != run.cohort_content_hash:
+        report.add(
+            ViolationReason.PRECISION_SAMPLE_UNBOUND,
+            "precision cohort_hash does not match the run's cohort",
+        )
+    if precision.run_id is not None and precision.run_id != run.run_id:
+        report.add(
+            ViolationReason.PRECISION_SAMPLE_UNBOUND,
+            f"precision run_id {precision.run_id!r} does not match run {run.run_id!r}",
+        )
+    if precision.freeze_hash is not None and precision.freeze_hash != freeze.freeze_hash:
+        report.add(
+            ViolationReason.PRECISION_SAMPLE_UNBOUND,
+            "precision freeze_hash does not equal the frozen bundle hash",
+        )
+    expected_seed = precision_sample_seed(run.cohort_content_hash, freeze.freeze_hash, run.run_id)
+    if precision.seed != expected_seed:
+        report.add(
+            ViolationReason.PRECISION_SAMPLE_UNBOUND,
+            "precision seed is not precision_sample_seed(cohort, freeze, run_id) for this run",
+        )
+
+
+def _check_achievability(
+    achievability: AchievabilityLog,
+    prior: Optional[AchievabilityLog],
+    report: ContractReport,
+) -> None:
+    """Enforce the achievability seals in validate (H9). Every prediction must be
+    pre-registered before the freeze timestamp (a direct construction bypasses
+    ``append``'s guard); the declared seal must match a recompute (an in-place
+    rewrite trips it); and, when a baseline is supplied, the log must be an
+    append-only extension of it."""
+    for prediction in achievability.predictions:
+        if prediction.registered_at >= achievability.freeze_timestamp:
+            report.add(
+                ViolationReason.ACHIEVABILITY_NOT_PRE_FREEZE,
+                f"prediction for {prediction.entry_identity!r} registered at/after the freeze timestamp",
+            )
+    if achievability.declared_content_hash is not None and achievability.declared_content_hash != achievability.computed_content_hash:
+        report.add(
+            ViolationReason.IN_PLACE_EDIT,
+            "achievability log content changed in place after its seal",
+        )
+    if prior is not None and achievability.predictions[: len(prior.predictions)] != prior.predictions:
+        report.add(
+            ViolationReason.IN_PLACE_EDIT,
+            "achievability log is not an append-only extension of its prior baseline",
+        )
+
+
 # A convenience alias: the contract's `check` (FR-14) reads as `check(...)` too.
 check = validate
+
+
+def check_report(
+    report: "Report",
+    history: Optional[CohortHistory],
+    *,
+    run: Optional[EvaluationRun] = None,
+    freeze: Optional[FreezeManifest] = None,
+) -> ContractReport:
+    """Standalone Report/recall binding check (H7), also reachable through
+    ``validate(report=...)``. Recomputes the blind denominator from the frozen
+    cohort's BLIND entries and returns a typed ``ContractReport``."""
+    result = ContractReport()
+    _check_report(report, history, run, freeze, result)
+    return result
