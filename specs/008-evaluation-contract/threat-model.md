@@ -277,6 +277,27 @@ validator can recompute is recomputed on the EXACT committed pinned bytes, the p
 committed rather than grindable, and no scoring number or N/A escapes signed certification; nothing
 code-closable remains at the per-cohort level.
 
+## Ninth wave (round-9): the last per-cohort survivors before ship
+
+A ninth audit — with the denominator, taxonomy, and forgery/crypto lenses all HOLDING — found four
+residual per-cohort holes, each a place where a committed binding still left the OPERATOR one degree
+of freedom. All are now closed; after them the per-cohort contract is terminal and the ONLY residual
+is the irreducible two-part floor named above. (Regression tests `test_r9_1_*` … `test_r9_4_*`, the
+updated `test_r2_*`, and smoke guards 15–16.)
+
+| Hole | Bypass it left open | Now sealed by |
+|---|---|---|
+| R9-1 (HIGH) | R8-2 committed the precision sample into the bundle, but the OPERATOR still chose WHICH pairs to commit — the sample seed was a free operator input: cherry-pick a favorable draw, commit its `sample_root`, present a precision that reproduces it, and R8-2's reproduce-the-committed-root check passes | the sample is DERIVED from committed, non-grindable state: `canonical_sample_seed(cohort_content_hash, pool_root, k)` and `canonical_sample_root(...) = sample_root_of(sample_confusion_pairs(sorted(pool), k, seed))`. The cohort is genesis-anchored and the pool + `k` are committed at freeze time, so the sample is a total function of committed state with NO operator choice. Strict certification RECOMPUTES the canonical sample and requires the committed freeze `sample_root` to EQUAL it — else `PRECISION_SAMPLE_UNBOUND` |
+| R9-2 (MEDIUM) | in `_check_exposure`, a record whose `actor == subject` with a non-empty `curated_entry_ids` that missed the presented head short-circuited (via `continue`) the `cohort_content_hash` fallback — laundering a curator into a subject through a version bump (same entries, new content hash) | BOTH bars run for every actor==subject record: after the `curated_entry_ids & scored_blind` bar, the record's cohort is STILL resolved by content hash (via history) and the subject is barred on ANY overlap with the scored cohort's identities; a record resolvable by NEITHER mechanism (empty `curated_entry_ids` + an unresolvable content hash) is a HARD FAIL — `CURATOR_IS_SUBJECT`, never a silent skip |
+| R9-3 (MEDIUM) | the freeze binding inspected only `attempts[0]` (A4) and the producing attempt(s) (R5-5), so a from-storage run could present a NON-first, NON-producing "retry" carrying a FORGED `freeze_hash` (a hidden second evaluation of an unrelated bundle B') that slipped through both | `_check_freeze_binding` binds EVERY post-freeze attempt's `freeze_hash` to the frozen bundle hash — else `BAD_FREEZE_BINDING`; and `_check_blind_access` anchors the retry invariant (identical `artifact_hash` + `env_hash`, empty `results_hash`) to THE PRODUCING attempt rather than `attempts[0]` — a retry that differs from the scored evaluation is `INFRA_RETRY_REQUIRES_UNCHANGED` |
+| R9-4 (defense-in-depth) | ROLE_DOWNGRADE was the ONE correction reason legitimizing a blind departure without any other precondition, but FR-4 authorizes blind→regression ONLY for an entry that GUIDED A FIX — so a downgrade of a real MISS (`guided_fix == False`) inflated the rate behind a logged trail | `_check_denominator_preservation` additionally requires a ROLE_DOWNGRADE that moves an identity out of the blind set to have carried `guided_fix == True` in the `from_version` cohort — else `DENOMINATOR_SHRINK`. (`guided_fix` is not part of entry identity, so the event's `entry_identity` matches either way; the flag is read from the from_version entry) |
+
+**The FINAL per-cohort residual is UNCHANGED and is exactly the two-part floor named above: (i)
+genesis-commit completeness [git-reviewable, plus the feature-009 AGGREGATE class-manifest]; and
+(ii) ed25519 private-key custody [curator ≠ subject, organizational].** After round-9 every
+per-cohort binding is a total function of committed state; nothing code-closable remains at the
+per-cohort level, and the aggregate class-manifest completeness is the sole follow-on (feature 009).
+
 ## Sealing note (for the later cross-model evaluator)
 
 The exposure ledger and freeze manifest are the in-contract guarantees. The OS-level

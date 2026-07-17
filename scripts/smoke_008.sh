@@ -18,9 +18,13 @@
 # produced+reported run with no certification (F3, UNANCHORED), the round-7 structural
 # seals — the default `check` REFUSING an unanchored Report headline (R7-1, UNANCHORED)
 # and a certified report carrying a FREE secondary numeric failing closed (R7-2,
-# COVERAGE_UNBOUND), and the round-8 seals — a DOCTORED fetch whose bytes do not reproduce the
+# COVERAGE_UNBOUND), the round-8 seals — a DOCTORED fetch whose bytes do not reproduce the
 # committed per-target blob sha256 (R8-1, INPUT_BYTES_UNVERIFIED) and a re-rolled precision
-# sample that does not reproduce the committed freeze sample_root (R8-2, PRECISION_SAMPLE_UNBOUND).
+# sample that does not reproduce the committed freeze sample_root (R8-2, PRECISION_SAMPLE_UNBOUND),
+# and the round-9 final per-cohort seals — an operator-CHERRY-PICKED precision sample that is not
+# the CANONICAL draw from committed state (R9-1, PRECISION_SAMPLE_UNBOUND) and a version-bumped
+# curator whose non-empty curated_entry_ids miss the head yet whose cohort shares entries with the
+# scored head (R9-2, CURATOR_IS_SUBJECT).
 # Finally prints the Report with blind recall as the headline plus the four labelled secondaries.
 # Exit 0 on success (all positives pass AND all guards trip with the expected reason).
 set -euo pipefail
@@ -491,6 +495,73 @@ expect("a re-rolled precision sample trips PRECISION_SAMPLE_UNBOUND", ViolationR
 print(f"        -> {rep14.summary()}")
 
 print()
+print("== guard 15: R9-1 canonical precision sample — an operator-CHERRY-PICKED sample fails closed ==")
+# the committed precision sample must be the CANONICAL draw from committed, non-grindable state
+# (cohort identity + committed pool_root + committed k), with NO operator degree of freedom. A
+# cherry-picked sample (a favorable operator-chosen draw whose sample_root is committed inside the
+# bundle AND reproduced by the presented precision) passes R8-2's reproduce-the-committed-root check
+# but is NOT the canonical draw -> R9-1 rejects it (PRECISION_SAMPLE_UNBOUND). We rebuild the freeze
+# (its hash changes with the sample), the canonical run_id, precision, and a signed attestation.
+from contract import canonical_sample_root  # R9-1 canonical recompute
+_cherry_seed = precision_sample_seed(v1.content_hash, pool_root_of(pool), "cherry-picked-favorable-salt")
+_cherry_sampled = sample_confusion_pairs(pool, COMMITTED_K, _cherry_seed)
+_cherry_sample_root = sample_root_of(_cherry_sampled)
+assert _cherry_sample_root != COMMITTED_SAMPLE_ROOT, "the cherry-picked draw must differ from the canonical one"
+assert _cherry_sample_root != canonical_sample_root(v1.content_hash, pool, COMMITTED_K), "cherry != canonical"
+cherry_bundle = bundle.model_copy(update={"committed_sample_root": _cherry_sample_root})
+cherry_freeze = FreezeManifest(bundle=cherry_bundle, timestamp="2026-07-16T10:00:00Z")
+cherry_run_id = _canonical_run_id(v1.content_hash, cherry_freeze.freeze_hash, "codex")
+cherry_run = EvaluationRun(
+    run_id=cherry_run_id, subject="codex", cohort_content_hash=v1.content_hash, freeze_hash=cherry_freeze.freeze_hash
+)
+cherry_run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", results_hash="R1")
+cherry_precision = AdjudicatedPrecision(
+    seed=_cherry_seed, sampled_pairs=_cherry_sampled, pool=pool, k=COMMITTED_K,
+    adjudications=[
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=True, decision="true-positive"),
+            ],
+        )
+        for p in _cherry_sampled
+    ],
+)
+cherry_att = build_attestation(
+    history=history, freeze=cherry_freeze, run=cherry_run, report=report_view,
+    evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=SIGNING_KEY,
+    prior_attestation_root=load_committed_genesis_root(),
+    exclusions=None, ledger=ledger, evaluation_ledger=evaluations, achievability=None,
+)
+rep15 = validate(
+    history=history, ledger=ledger, run=cherry_run, freeze=cherry_freeze, report=report_view,
+    precision=cherry_precision, prior_evaluations=evaluations, attestation=cherry_att, strict=True,
+)
+expect("cherry-picked precision sample trips PRECISION_SAMPLE_UNBOUND", ViolationReason.PRECISION_SAMPLE_UNBOUND in rep15.reasons())
+print(f"        -> {rep15.summary()}")
+
+print()
+print("== guard 16: R9-2 exposure fallback — a non-empty curated_entry_ids does not skip the content-hash bar ==")
+# a version bump (same entries, new content hash) must not launder a curator into a subject: even
+# when the curated_entry_ids miss the presented head, the content-hash fallback still bars the
+# subject (the record's cohort resolves in history and shares an entry identity with the scored head).
+v2_bump = Cohort(version="v2", entries=[e1, e2], reason="version bump, same entries", parent_version="v1").sealed()
+hist_bump = CohortHistory(versions=[v1, v2_bump])
+ledger_fallback = ExposureLedger()
+ledger_fallback.record(
+    cohort_content_hash=v1.content_hash, actor="codex", activity="curated",
+    curated_entry_ids=["an-unrelated-identity"],  # disjoint from the scored blind set
+)
+run_fallback_id = _canonical_run_id(v2_bump.content_hash, "fz", "codex")
+run_fallback = EvaluationRun(
+    run_id=run_fallback_id, subject="codex", cohort_content_hash=v2_bump.content_hash, freeze_hash="fz"
+)
+rep16 = validate(history=hist_bump, run=run_fallback, ledger=ledger_fallback)
+expect("version-bumped curated record trips CURATOR_IS_SUBJECT", ViolationReason.CURATOR_IS_SUBJECT in rep16.reasons())
+print(f"        -> {rep16.summary()}")
+
+print()
 print("== report: blind recall is the headline, four labelled secondaries ==")
 rep = Report(
     blind_recall=RecallReport(rediscovered=3, total=4, patched_alert_density=1.2),
@@ -512,5 +583,5 @@ print()
 if failures:
     print(f"SMOKE FAILED: {len(failures)} check(s) failed: {failures}")
     sys.exit(1)
-print("SMOKE 008 OK: contract certifies the ed25519-signed run and every guard (anchoring + round-6/7/8 floor) trips with a typed reason.")
+print("SMOKE 008 OK: contract certifies the ed25519-signed run and every guard (anchoring + round-6/7/8/9 floor) trips with a typed reason.")
 PYEOF

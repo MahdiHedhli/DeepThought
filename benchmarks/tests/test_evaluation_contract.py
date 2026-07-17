@@ -964,7 +964,9 @@ def test_r1_inplace_role_flip_breaks_content_seal():
 def test_r2_blind_role_downgrade_needs_correction_event():
     a = _entry(vuln=A40, role="blind")
     b = _entry(vuln=B40, role="blind")
-    c = _entry(vuln=C40, role="blind")
+    # R9-4: a legitimate blind->regression ROLE_DOWNGRADE is authorized for an entry that GUIDED A
+    # FIX (FR-4); c carries guided_fix=True in v1 (its from_version) so the downgrade is allowed.
+    c = _entry(vuln=C40, role="blind", guided_fix=True)
     v1 = _cohort("v1", [a, b, c])
     c_reg = c.model_copy(update={"role": "regression"}).sealed()  # identity preserved
     assert c_reg.identity_hash == c.identity_hash
@@ -1598,6 +1600,7 @@ def _anchored(
     evln=None,
     committed_evaluation_root=None,
     regression=None,
+    cherry_pick_sample=False,
 ):
     """A fully honest, anchored evaluation bundle plus its signed Attestation, with the
     COMMITTED state + committed detector/fetcher installed to match it. Reused by the B5
@@ -1623,9 +1626,17 @@ def _anchored(
     hist = CohortHistory(versions=[v1])
     pool = _pool(12)
     committed_k = 3
-    # R8-2: draw + commit the precision sample at freeze time (decoupled from the grindable
-    # freeze_hash) and put its sample_root inside the frozen bundle.
-    sample_seed, sampled, committed_sample_root = _committed_sample(pool, committed_k, v1.content_hash)
+    # R8-2/R9-1: draw + commit the precision sample at freeze time. The CANONICAL sample is derived
+    # from committed, non-grindable state (cohort identity + committed pool_root + k). When
+    # ``cherry_pick_sample`` is set the builder instead commits an OPERATOR-CHOSEN draw (a different
+    # seed) whose sample_root is still committed + reproduced by the presented precision — R8-2's
+    # reproduce-the-committed-root check passes, but R9-1's canonical recompute rejects it.
+    if cherry_pick_sample:
+        sample_seed = precision_sample_seed(v1.content_hash, pool_root_of(pool), "cherry-picked-salt")
+        sampled = sample_confusion_pairs(pool, committed_k, sample_seed)
+        committed_sample_root = sample_root_of(sampled)
+    else:
+        sample_seed, sampled, committed_sample_root = _committed_sample(pool, committed_k, v1.content_hash)
     bundle = DetectorBundle(
         detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k,
         committed_sample_root=committed_sample_root,
@@ -2629,3 +2640,140 @@ def test_r8_6_genesis_fails_closed_on_inert_history_root(tmp_path):
     bad_latest = {**good, "latest": {**good["latest"], "history_root": contract._EMPTY_ROOT}}
     with pytest.raises(ValueError):
         contract.load_committed_genesis_state(_write(bad_latest))
+
+
+# --------------------------------------------------------------------------- #
+# Round-9 final per-cohort survivors (R9-1..R9-4). The last audit holes before
+# 008 ships: an operator-chosen precision sample, an exposure fallback a curated
+# record could skip, an unbound non-producing post-freeze attempt, and a
+# ROLE_DOWNGRADE not backed by a guided_fix precondition.
+# --------------------------------------------------------------------------- #
+
+
+# R9-1 — the certified precision sample must be the CANONICAL draw from committed, non-grindable
+# state (cohort_content_hash + committed pool_root + committed k), NOT an operator-chosen sample.
+def test_r9_1_precision_sample_must_be_canonical(monkeypatch):
+    # the canonical bundle certifies (sample derived from committed cohort + pool + k)
+    assert _certify(_anchored(monkeypatch)).ok
+
+    # a CHERRY-PICKED committed sample (a favorable operator-chosen draw whose sample_root is
+    # committed inside the bundle AND reproduced by the presented precision) is rejected: it is not
+    # the canonical draw from committed state -> PRECISION_SAMPLE_UNBOUND
+    a = _anchored(monkeypatch, cherry_pick_sample=True)
+    canonical_root = contract.canonical_sample_root(a["hist"].versions[0].content_hash, _pool(12), 3)
+    assert a["freeze"].sample_root != canonical_root  # sanity: the committed sample is non-canonical
+    rep = _certify(a)
+    assert not rep.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep)
+
+
+# R9-2 — a NON-EMPTY curated_entry_ids must NOT short-circuit the content-hash exposure fallback: a
+# version bump (same entries, new hash) cannot launder a curator into a subject.
+def test_r9_2_curated_ids_do_not_skip_content_hash_fallback():
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=B40, role="blind")
+    v1 = _cohort("v1", [a, b])
+    v2 = _cohort("v2", [a, b], reason="version bump, same entries", parent="v1")  # new content hash
+    hist = CohortHistory(versions=[v1, v2])
+
+    # the subject curated v1 (recorded by its content hash) with curated_entry_ids that are DISJOINT
+    # from the presented head's blind set — but v1 shares entry identities with the scored head v2.
+    # The curated_entry_ids bar (Bar 1) clears, yet the content-hash fallback (Bar 2) must STILL bar.
+    ledger = ExposureLedger()
+    ledger.record(
+        cohort_content_hash=v1.content_hash,
+        actor="claude",
+        activity="curated",
+        curated_entry_ids=["an-unrelated-identity"],  # disjoint from the scored blind set
+    )
+    run = _run("claude", v2.content_hash, "fz")
+    rep = validate(history=hist, run=run, ledger=ledger)
+    assert not rep.ok and ViolationReason.CURATOR_IS_SUBJECT in _reasons(rep)
+
+    # a curated record whose identities AND cohort are both disjoint from the scored cohort clears
+    other = _entry(vuln=C40, role="blind")
+    v_other = _cohort("v9", [other])  # not in the presented history
+    ledger_ok = ExposureLedger()
+    ledger_ok.record(
+        cohort_content_hash=v_other.content_hash,  # unresolvable in this history
+        actor="codex",
+        activity="curated",
+        curated_entry_ids=[other.identity_hash],  # resolvable by identity, disjoint
+    )
+    run_ok = _run("codex", v2.content_hash, "fz")
+    assert validate(history=hist, run=run_ok, ledger=ledger_ok).ok
+
+
+# R9-3 — EVERY post-freeze attempt is bound to the freeze, not just the first + producing one. A
+# non-first, non-producing "retry" carrying a forged freeze_hash (a hidden second eval of an
+# unrelated bundle) is caught.
+def test_r9_3_every_post_freeze_attempt_bound_to_freeze():
+    a = _entry(vuln=A40, role="blind")
+    v1 = _cohort("v1", [a])
+    hist = CohortHistory(versions=[v1])
+    freeze = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z"
+    )
+    fz = freeze.freeze_hash
+
+    # a honest bound retry, THEN a NON-first, NON-producing retry carrying a FORGED freeze_hash
+    # (unbound to the frozen bundle — a hidden second evaluation), then the producing terminal. The
+    # first-only + producing-only binding never inspected the middle attempt -> now BAD_FREEZE_BINDING.
+    run = _run("s", v1.content_hash, fz)
+    run.attempts.append(EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", freeze_hash=fz))
+    run.attempts.append(EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", freeze_hash="forged"))
+    run.attempts.append(
+        EvalAttempt(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", freeze_hash=fz, results_hash="R1")
+    )
+    rep = validate(history=hist, run=run, freeze=freeze)
+    assert not rep.ok and ViolationReason.BAD_FREEZE_BINDING in _reasons(rep)
+
+    # a non-producing retry whose artifact_hash differs from the PRODUCING evaluation is an
+    # INFRA_RETRY_REQUIRES_UNCHANGED (the retry does not match the scored run)
+    run2 = _run("s", v1.content_hash, fz)
+    run2.attempts.append(EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="DIFF", env_hash="E", freeze_hash=fz))
+    run2.attempts.append(
+        EvalAttempt(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", freeze_hash=fz, results_hash="R1")
+    )
+    rep2 = validate(history=hist, run=run2, freeze=freeze)
+    assert not rep2.ok and ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED in _reasons(rep2)
+
+    # honest: every attempt bound to the freeze with matching artifact/env -> no binding/retry error
+    run3 = _run("s", v1.content_hash, fz)
+    run3.attempts.append(EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", freeze_hash=fz))
+    run3.attempts.append(
+        EvalAttempt(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", freeze_hash=fz, results_hash="R1")
+    )
+    rep3 = validate(history=hist, run=run3, freeze=freeze)
+    assert ViolationReason.BAD_FREEZE_BINDING not in _reasons(rep3)
+    assert ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED not in _reasons(rep3)
+
+
+# R9-4 — a ROLE_DOWNGRADE that moves an identity out of the blind set additionally requires that
+# entry to have carried guided_fix==True in the from_version cohort (FR-4).
+def test_r9_4_role_downgrade_requires_guided_fix_in_from_version():
+    a = _entry(vuln=A40, role="blind")
+
+    # a blind entry that NEVER guided a fix, downgraded out of blind WITH a matched ROLE_DOWNGRADE
+    # event, still drops a hard case out of the denominator -> DENOMINATOR_SHRINK
+    c = _entry(vuln=C40, role="blind", guided_fix=False)
+    v1 = _cohort("v1", [a, c])
+    c_reg = c.model_copy(update={"role": "regression"}).sealed()
+    v2 = _cohort("v2", [a, c_reg], reason="downgrade c", parent="v1")
+    excl = ExclusionLog(
+        events=[ExclusionEvent(reason=ExclusionReason.ROLE_DOWNGRADE, entry_identity=c.identity_hash, from_version="v1", to_version="v2")]
+    )
+    rep = validate(history=CohortHistory(versions=[v1, v2]), exclusions=excl)
+    assert not rep.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(rep)
+
+    # the SAME downgrade of a guided_fix=True blind entry is allowed (a legitimate blind->regression
+    # move after the entry guided a fix). guided_fix is NOT part of identity, so the event's
+    # entry_identity matches either way — only the from_version guided_fix flag differs.
+    cg = _entry(vuln=C40, role="blind", guided_fix=True)
+    assert cg.identity_hash == c.identity_hash
+    v1g = _cohort("v1", [a, cg])
+    cg_reg = cg.model_copy(update={"role": "regression"}).sealed()
+    v2g = _cohort("v2", [a, cg_reg], reason="downgrade c after it guided a fix", parent="v1")
+    excl_g = ExclusionLog(
+        events=[ExclusionEvent(reason=ExclusionReason.ROLE_DOWNGRADE, entry_identity=cg.identity_hash, from_version="v1", to_version="v2")]
+    )
+    assert validate(history=CohortHistory(versions=[v1g, v2g]), exclusions=excl_g).ok

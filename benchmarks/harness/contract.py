@@ -1223,6 +1223,38 @@ def sample_confusion_pairs(pairs: list[str], k: int, seed: int) -> list[str]:
     return rng.sample(canonical, min(k, len(canonical)))
 
 
+def canonical_sample_seed(cohort_content_hash: str, pool_root: str, k: int) -> int:
+    """R9-1: the seed for the CANONICAL precision draw — a pure function of COMMITTED,
+    non-grindable state: the cohort identity, the committed confusion-pair ``pool_root``, and the
+    committed sample size ``k``. Unlike :func:`precision_sample_seed` (whose ``freeze_hash`` input
+    is GRINDABLE — tweak an inert bundle param until the seed-derived sample flatters the
+    detector), NONE of these inputs carries an operator degree of freedom: the cohort is
+    genesis-anchored, the pool is committed at freeze time (B4), and ``k`` is committed at freeze
+    time (P1d). So once ``(cohort, pool, k)`` are committed the sample is FIXED, with no operator
+    choice left."""
+    return int(_sha256("\x1f".join([cohort_content_hash, pool_root, str(k)])), 16)
+
+
+def canonical_sampled_pairs(cohort_content_hash: str, pool: list[str], k: int) -> list[str]:
+    """R9-1: the CANONICAL precision draw — ``sample_confusion_pairs(sorted(pool), k, seed)`` with
+    ``seed = canonical_sample_seed(cohort_content_hash, pool_root_of(pool), k)``. The operator
+    cannot cherry-pick which pairs to commit: the draw is a total function of committed state
+    ``(cohort_content_hash, pool_root, k)``."""
+    seed = canonical_sample_seed(cohort_content_hash, pool_root_of(pool), k)
+    return sample_confusion_pairs(pool, k, seed)
+
+
+def canonical_sample_root(cohort_content_hash: str, pool: list[str], k: int) -> str:
+    """R9-1: the CANONICAL committed precision-sample root — ``sample_root_of`` the canonical draw.
+    The strict certify path RECOMPUTES this from committed state (the HEAD cohort_content_hash +
+    the committed ``pool_root`` + the committed ``k``) and requires the committed freeze
+    ``sample_root`` to EQUAL it; an operator-chosen (cherry-picked) sample is thereby
+    ``PRECISION_SAMPLE_UNBOUND``. R8-2 committed the sample into the bundle but the operator still
+    CHOSE which pairs to commit (the seed was a free operator input); R9-1 removes that last degree
+    of freedom by deriving the sample from committed, non-grindable state."""
+    return sample_root_of(canonical_sampled_pairs(cohort_content_hash, pool, k))
+
+
 class AdjudicatorVerdict(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2026,6 +2058,38 @@ def _check_denominator_preservation(
                     "(removed or role-downgraded) with no matching cohort-correction event",
                 )
 
+    # R9-4 (defense-in-depth): a ROLE_DOWNGRADE (blind -> regression/calibration) is the ONLY
+    # correction reason that legitimizes a blind departure WITHOUT any other precondition — but
+    # FR-4 only authorizes blind->regression for an entry that actually GUIDED A FIX. A downgrade of
+    # a blind entry that never guided a fix just drops a hard case out of the authoritative
+    # denominator behind a logged trail. So a ROLE_DOWNGRADE that moves an identity out of the blind
+    # set ADDITIONALLY requires that identity to have carried ``guided_fix == True`` in the
+    # from_version cohort → else DENOMINATOR_SHRINK. (guided_fix is NOT part of entry identity, so
+    # the event's ``entry_identity`` matches whether or not the entry guided a fix; the flag is read
+    # from the from_version entry.)
+    if exclusions is not None:
+        for event in exclusions.events:
+            if event.reason is not ExclusionReason.ROLE_DOWNGRADE or not event.entry_identity:
+                continue
+            prev = history.get(event.from_version)
+            curr = history.get(event.to_version)
+            if prev is None or curr is None:
+                continue
+            prev_blind = {e.computed_identity_hash for e in prev.by_role(Role.BLIND)}
+            curr_blind = {e.computed_identity_hash for e in curr.by_role(Role.BLIND)}
+            if event.entry_identity not in (prev_blind - curr_blind):
+                continue  # this event does not authorize a blind departure at its named transition
+            guided_blind = {
+                e.computed_identity_hash for e in prev.by_role(Role.BLIND) if e.guided_fix
+            }
+            if event.entry_identity not in guided_blind:
+                report.add(
+                    ViolationReason.DENOMINATOR_SHRINK,
+                    f"{event.from_version}->{event.to_version}: ROLE_DOWNGRADE of blind entry "
+                    f"{event.entry_identity[:12]} that never guided a fix (guided_fix=False); a blind "
+                    "downgrade is legitimate only for a guided_fix entry (FR-4)",
+                )
+
 
 def _history_extends(history: CohortHistory, prior: CohortHistory) -> bool:
     """P1a: True iff ``history`` is an APPEND-ONLY extension of ``prior`` — every prior
@@ -2130,7 +2194,13 @@ def _check_blind_access(run: EvaluationRun, report: ContractReport) -> None:
     # itself a violation.
     post = run.post_freeze_attempts
     if post:
-        first = post[0]
+        # R9-3: anchor the retry invariant to THE PRODUCING attempt (the real evaluation) when one
+        # exists — every non-producing "retry" must carry identical artifact_hash + env_hash to it.
+        # Fall back to post[0] for an all-retry run that never produced. Anchoring to the producing
+        # attempt makes the intent explicit: a retry that differs from the scored evaluation is a
+        # concealed second run.
+        producing = next((a for a in post if a.produced_results), None)
+        anchor = producing or post[0]
         for attempt in post:
             if not attempt.logs_intact:
                 report.add(
@@ -2138,11 +2208,14 @@ def _check_blind_access(run: EvaluationRun, report: ContractReport) -> None:
                     f"run {run.run_id}: a post-freeze attempt has logs_intact=False",
                 )
                 break
-        for attempt in post[1:]:
-            if attempt.artifact_hash != first.artifact_hash or attempt.env_hash != first.env_hash:
+        for attempt in post:
+            if attempt is anchor:
+                continue
+            if attempt.artifact_hash != anchor.artifact_hash or attempt.env_hash != anchor.env_hash:
                 report.add(
                     ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED,
-                    f"run {run.run_id}: post-freeze artifact/env hashes changed across attempts",
+                    f"run {run.run_id}: post-freeze artifact/env hashes changed across attempts "
+                    "(a retry does not match the producing evaluation)",
                 )
                 break
         # R8-5: bind produced_results to results_hash. A producing attempt MUST carry a
@@ -2193,33 +2266,42 @@ def _check_exposure(
     for record in ledger.records:
         if record.actor != run.subject:
             continue
-        # B3: entry-identity resolution via curated_entry_ids — no old version needed.
         curated = set(record.curated_entry_ids)
-        if curated:
-            if scored_blind and (curated & scored_blind):
+        # Bar 1 (B3): entry-identity resolution via curated_entry_ids — a subject whose scored
+        # blind identities intersect this record's curated identities is barred, no old version
+        # needed.
+        if curated and scored_blind and (curated & scored_blind):
+            report.add(
+                ViolationReason.CURATOR_IS_SUBJECT,
+                f"run {run.run_id}: subject {run.subject!r} curated an entry identity in the scored blind set",
+            )
+            return
+        # Bar 2 (R9-2): a NON-EMPTY curated_entry_ids must NOT short-circuit the content-hash
+        # fallback. STILL resolve the record's cohort by content hash (via history) and bar the
+        # subject on ANY overlap with the scored cohort's identities — a version bump (new content
+        # hash, SAME entries) can otherwise launder a curator into a subject whenever
+        # curated_entry_ids happens to miss the presented head.
+        record_cohort = _cohort_by_content_hash(history, record.cohort_content_hash)
+        if record_cohort is not None:
+            if scored_ids & record_cohort.identities():
                 report.add(
                     ViolationReason.CURATOR_IS_SUBJECT,
-                    f"run {run.run_id}: subject {run.subject!r} curated an entry identity in the scored blind set",
+                    f"run {run.run_id}: subject {run.subject!r} curated/inspected a cohort version "
+                    "sharing an entry identity with the scored cohort",
                 )
                 return
-            # Resolvable by identity and disjoint from the scored blind set → cleared.
+            # Resolved by content hash and disjoint from the scored cohort → this record is cleared.
             continue
-        # No curated_entry_ids: fall back to resolving the record's cohort via history.
-        record_cohort = _cohort_by_content_hash(history, record.cohort_content_hash)
-        if record_cohort is None:
-            # B3: an unresolvable exposure record for THIS subject cannot be cleared —
-            # fail closed rather than silently skip it.
+        # The content hash is UNRESOLVABLE. Cleared ONLY if curated_entry_ids resolved it by
+        # identity (non-empty, and checked disjoint from the scored blind set in Bar 1). An
+        # actor==subject record resolvable by NEITHER mechanism is a HARD FAIL (fail closed) — a
+        # bare cohort_content_hash exposure that no presented history can resolve is never silently
+        # skipped.
+        if not curated:
             report.add(
                 ViolationReason.CURATOR_IS_SUBJECT,
                 f"run {run.run_id}: subject {run.subject!r} has an unresolvable exposure record "
                 f"({record.cohort_content_hash[:12]!r}); fail closed",
-            )
-            return
-        if scored_ids & record_cohort.identities():
-            report.add(
-                ViolationReason.CURATOR_IS_SUBJECT,
-                f"run {run.run_id}: subject {run.subject!r} curated/inspected a cohort version "
-                "sharing an entry identity with the scored cohort",
             )
             return
 
@@ -2311,27 +2393,25 @@ def _check_freeze_binding(
             f"run freeze_hash {run.freeze_hash!r} does not equal the frozen bundle hash {freeze.freeze_hash[:12]}",
         )
 
-    # A4: bind the evaluated artifact — the first post-freeze attempt — to the freeze.
-    if run is not None and run.post_freeze_attempts:
-        first_post = run.post_freeze_attempts[0]
-        if first_post.freeze_hash != freeze.freeze_hash:
-            report.add(
-                ViolationReason.BAD_FREEZE_BINDING,
-                f"run {run.run_id}: the first post-freeze attempt's freeze_hash "
-                f"{first_post.freeze_hash!r} is not the frozen bundle hash {freeze.freeze_hash[:12]}",
-            )
-
-    # R5-5: bind the PRODUCING post-freeze attempt(s) — the ones that actually generated
-    # the scored detector results — to the freeze, not just attempts[0]. A from-storage run
-    # whose first attempt is honestly bound but whose producing attempt carries a forged
-    # freeze_hash (evaluated an unrelated bundle) is caught here.
+    # A4 + R5-5 + R9-3: bind EVERY post-freeze attempt to the freeze — not just the first (A4) or
+    # the producing one (R5-5). A from-storage run can present a NON-first, NON-producing "retry"
+    # carrying a FORGED freeze_hash (a hidden second evaluation of an unrelated bundle B') that the
+    # first-only + producing-only binding never inspected. Require each post-freeze attempt's
+    # freeze_hash to equal the frozen bundle hash so no attempt — producing or not — evaluates an
+    # unrelated bundle.
     if run is not None:
-        for attempt in run.post_freeze_attempts:
-            if attempt.produced_results and attempt.freeze_hash != freeze.freeze_hash:
+        for i, attempt in enumerate(run.post_freeze_attempts):
+            if attempt.freeze_hash != freeze.freeze_hash:
+                if i == 0:
+                    which = "first post-freeze attempt"
+                elif attempt.produced_results:
+                    which = "producing post-freeze attempt"
+                else:
+                    which = f"non-producing post-freeze attempt #{i}"
                 report.add(
                     ViolationReason.BAD_FREEZE_BINDING,
-                    f"run {run.run_id}: the producing post-freeze attempt's freeze_hash "
-                    f"{attempt.freeze_hash!r} is not the frozen bundle hash {freeze.freeze_hash[:12]}",
+                    f"run {run.run_id}: the {which}'s freeze_hash {attempt.freeze_hash!r} is not "
+                    f"the frozen bundle hash {freeze.freeze_hash[:12]}",
                 )
 
     cohort = None
@@ -2688,6 +2768,28 @@ def _check_certification(
                 "certification requires a non-empty committed freeze sample_root (the precision "
                 "sample must be committed at freeze time, not derived from the grindable freeze_hash)",
             )
+        else:
+            # R9-1: the committed sample must be the CANONICAL draw from COMMITTED, non-grindable
+            # state — the HEAD cohort_content_hash + the committed pool_root + the committed k — NOT
+            # an operator-chosen sample. R8-2 pinned the sample to the committed sample_root, but the
+            # OPERATOR still chose WHICH pairs to commit (the seed was a free input); R9-1 removes
+            # that last degree of freedom. RECOMPUTE the canonical sample root from committed state
+            # and require the committed freeze sample_root to EQUAL it; a cherry-picked (favorable)
+            # sample is PRECISION_SAMPLE_UNBOUND. ``precision.pool`` is bound to the committed
+            # pool_root by ``_check_precision_binding`` (B4), so the recompute is anchored to
+            # committed membership; combined with that check (presented sampled_pairs reproduce the
+            # committed sample_root), the presented sample is forced to BE the canonical draw.
+            _head = history.latest() if history is not None else None
+            if _head is not None and precision is not None:
+                if freeze.sample_root != canonical_sample_root(
+                    _head.content_hash, precision.pool, freeze.committed_k
+                ):
+                    result.add(
+                        ViolationReason.PRECISION_SAMPLE_UNBOUND,
+                        "committed freeze sample_root is not the canonical draw from "
+                        "(cohort_content_hash, pool_root, k); an operator-chosen precision sample is "
+                        "not bound to committed state",
+                    )
 
     # ----------------------------------------------------------------------- #
     # Round-4/5 — attack the irreducible floor a pure validator cannot reach.

@@ -393,12 +393,58 @@ wired into `check`, enforcing:
     prefix. (The attestation/evaluation chain BASES are legitimately their inert bootstrap
     sentinels until the first certify, so they are not rejected.)
 
+- **FR-22 — Round-9: the LAST per-cohort survivors before ship (one high, two medium, one
+  defense-in-depth).** A ninth audit — with the denominator, taxonomy, and forgery/crypto lenses
+  all HOLDING — found four residual per-cohort holes, each a place where a committed binding still
+  left the OPERATOR one degree of freedom. Closing them makes the per-cohort contract terminal; the
+  only remaining residual is the documented irreducible floor below.
+  - **R9-1 (HIGH) — the certified precision sample must be CANONICAL, not operator-chosen.** R8-2
+    committed the sample into the bundle, but the operator still CHOSE which pairs to commit (the
+    sample seed was a free operator input — cherry-pick a favorable draw, commit its `sample_root`,
+    present a precision that reproduces it, and R8-2's reproduce-the-committed-root check passes).
+    The sample is now DERIVED from committed, non-grindable state: `canonical_sample_seed(cohort
+    _content_hash, pool_root, k)` and `canonical_sample_root(cohort_content_hash, pool, k) =
+    sample_root_of(sample_confusion_pairs(sorted(pool), k, seed))`. The cohort is genesis-anchored,
+    the pool + `k` are committed at freeze time — so the sample is a total function of committed
+    state with NO operator choice. Strict certification RECOMPUTES the canonical sample and requires
+    the committed freeze `sample_root` to EQUAL it — else `PRECISION_SAMPLE_UNBOUND`. (`precision
+    .pool` is already bound to the committed `pool_root` by `_check_precision_binding`, so the
+    recompute is anchored to committed membership.)
+  - **R9-2 (MEDIUM) — a non-empty `curated_entry_ids` must not skip the content-hash exposure
+    fallback.** In `_check_exposure`, a record whose `actor == subject` with a non-empty
+    `curated_entry_ids` that missed the presented head short-circuited (via `continue`) the
+    `cohort_content_hash` fallback — laundering a curator into a subject through a version bump (same
+    entries, new content hash). Both bars now run for every actor==subject record: after the
+    `curated_entry_ids & scored_blind` bar, the record's cohort is STILL resolved by content hash
+    (via history) and the subject is barred on ANY overlap with the scored cohort's identities; an
+    exposure record resolvable by NEITHER mechanism (empty `curated_entry_ids` and an unresolvable
+    content hash) is a HARD FAIL — `CURATOR_IS_SUBJECT`, never a silent skip.
+  - **R9-3 (MEDIUM) — bind EVERY post-freeze attempt, not just the first and producing ones.** The
+    freeze binding inspected only `attempts[0]` (A4) and the producing attempt(s) (R5-5), so a
+    from-storage run could present a NON-first, NON-producing "retry" carrying a FORGED `freeze_hash`
+    (a hidden second evaluation of an unrelated bundle B') that slipped through both. `_check_freeze
+    _binding` now binds EVERY post-freeze attempt's `freeze_hash` to the frozen bundle hash — else
+    `BAD_FREEZE_BINDING`; and `_check_blind_access` anchors the retry invariant (identical
+    `artifact_hash` + `env_hash`, empty `results_hash`) to THE PRODUCING attempt (the real
+    evaluation) rather than `attempts[0]` — a retry that differs from the scored evaluation is
+    `INFRA_RETRY_REQUIRES_UNCHANGED`.
+  - **R9-4 (defense-in-depth) — a ROLE_DOWNGRADE `left_blind` departure requires a `guided_fix`
+    precondition.** ROLE_DOWNGRADE is the ONE correction reason that legitimized a blind departure
+    without any other precondition, but FR-4 authorizes blind→regression ONLY for an entry that
+    actually GUIDED A FIX. A downgrade of a real MISS (`guided_fix == False`) inflated the rate
+    behind a logged trail. `_check_denominator_preservation` now additionally requires a ROLE_DOWN
+    GRADE that moves an identity out of the blind set to have carried `guided_fix == True` in the
+    `from_version` cohort — else `DENOMINATOR_SHRINK`. (`guided_fix` is not part of entry identity,
+    so the event's `entry_identity` matches either way; the flag is read from the from_version
+    entry.)
+
 - **The FINAL per-cohort residual is exactly (i) genesis-commit completeness — that what the
   curator committed at genesis is itself complete (and, from feature 009, the AGGREGATE
   class-manifest — that no whole class is silently omitted from the mean) — which is
   git-reviewable, not validator-checkable; and (ii) ed25519 private-key custody — that the private
   signing key is held by a party that is NOT the scored subject (curator ≠ subject) — which is
-  organizational.** Everything else a validator can run, it now runs from committed state on the
+  organizational.** After Round-9 every per-cohort binding is a total function of committed state.
+  Everything else a validator can run, it now runs from committed state on the
   EXACT committed pinned bytes. In this repo the committed public key corresponds to a fixed
   test/smoke signing seed held in the test/build helpers so the smoke and unit tests can produce
   honest attestations; a production deployment commits the curator's real public key while the
@@ -735,6 +781,26 @@ the committed-state form, never by weakening a check.
     real non-inert committed state (with the legitimately-inert bootstrap attestation/evaluation
     bases) loads.
 
+### Round-9 acceptance criteria (the last per-cohort survivors before ship)
+
+68. **(R9-1/FR-22)** The certified precision sample must be the CANONICAL draw from committed,
+    non-grindable state (`cohort_content_hash` + committed `pool_root` + committed `k`), not
+    operator-chosen. A cherry-picked committed sample whose `sample_root` is reproduced by the
+    presented precision (passing R8-2) but is NOT the canonical draw is `PRECISION_SAMPLE_UNBOUND`;
+    the canonical sample certifies.
+69. **(R9-2/FR-22)** A non-empty `curated_entry_ids` does NOT skip the content-hash exposure
+    fallback. A version-bumped curator (same entries, new content hash) whose `curated_entry_ids`
+    miss the presented head but whose recorded cohort shares an entry identity with the scored head
+    is `CURATOR_IS_SUBJECT`; a record disjoint by both identity and cohort clears.
+70. **(R9-3/FR-22)** EVERY post-freeze attempt is bound to the freeze. A non-first, non-producing
+    attempt carrying a forged `freeze_hash` is `BAD_FREEZE_BINDING`; a non-producing retry whose
+    `artifact_hash`/`env_hash` differs from the PRODUCING evaluation is
+    `INFRA_RETRY_REQUIRES_UNCHANGED`; an all-bound honest run passes.
+71. **(R9-4/FR-22)** A ROLE_DOWNGRADE that moves an identity out of the blind set requires that
+    identity to have carried `guided_fix == True` in the `from_version` cohort. A downgrade of a
+    `guided_fix == False` blind entry (with a matched ROLE_DOWNGRADE event) is `DENOMINATOR_SHRINK`;
+    the same downgrade of a `guided_fix == True` entry is allowed.
+
 ## Open questions
 
 - **Non-blocking.** Does the contract live in a new `benchmarks/harness/contract.py`
@@ -776,9 +842,13 @@ REFUSING an unanchored Report headline (`UNANCHORED`, R7-1) and a certified repo
 FREE secondary numeric (a free `coverage`) failing closed (`COVERAGE_UNBOUND`, R7-2) — plus the
 round-8 seals: a DOCTORED fetch whose bytes do not reproduce the committed per-target blob sha256
 (`INPUT_BYTES_UNVERIFIED`, R8-1) and a re-rolled precision sample that does not reproduce the
-committed freeze `sample_root` (`PRECISION_SAMPLE_UNBOUND`, R8-2) — each fail
+committed freeze `sample_root` (`PRECISION_SAMPLE_UNBOUND`, R8-2) — plus the round-9 final
+per-cohort seals: an operator-CHERRY-PICKED precision sample that is not the CANONICAL draw from
+committed state (`PRECISION_SAMPLE_UNBOUND`, R9-1) and a version-bumped curator whose non-empty
+`curated_entry_ids` miss the head yet whose recorded cohort shares an entry identity with the scored
+head (`CURATOR_IS_SUBJECT`, R9-2) — each fail
 `check` with a typed reason. The blind entry now commits its per-target `vuln_blob_sha256` /
 `patched_blob_sha256` (so the numerator recompute runs on the exact committed pinned bytes) and the
-freeze commits the precision `sample_root`. The `report` view prints blind recall as the headline
-alongside the four labeled secondaries. Only after this gate is green does the shared-kernel work in
-the tranche begin.
+freeze commits the precision `sample_root` (now the canonical draw from committed state). The
+`report` view prints blind recall as the headline alongside the four labeled secondaries. Only after
+this gate is green does the shared-kernel work in the tranche begin.
