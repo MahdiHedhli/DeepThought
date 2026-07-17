@@ -137,6 +137,43 @@ attestation: the party that can *mint* a certified score is separated from the p
 being *scored*. The `attestation` / `verify_key` / `strict` parameters are keyword-only
 and additive; the non-strict path is unchanged, so every prior caller is unaffected.
 
+## Fourth wave (round-4): out-of-contract verification — attack the irreducible floor
+
+A fourth audit proved a floor a pure validator cannot reach: it can verify that the
+presented state reproduces a committed root, but it **cannot verify (i) genesis
+completeness** — that the committed baseline was not itself a truncated, self-serving
+starting point; **(ii) input truthfulness of the numerator** — whether the reported
+rediscoveries are TRUE, since the validator never sees the detector run on the real
+code; or **(iii) key custody** — that the private signing key is held by a non-subject.
+Round-4 attacks each with a measure OUTSIDE the pure validator (FR-16, FR-17;
+regression tests `test_p1a`..`test_p1e`, `test_part2_*`, `test_part3_*`, and the
+verifier's own `benchmarks/tests/test_verifier.py`):
+
+| Seal | Floor it attacks | Now closed by |
+|---|---|---|
+| P1a | genesis re-anchoring — present a truncated predecessor | `Attestation.prior_attestation_root` folded into the root; a chain extension must append-only-extend the prior committed history ⇒ `ATTESTATION_NOT_EXTENDING` |
+| P1b | a certified headline with no measurement behind it | certification requires exactly one producing evaluation ⇒ `CERTIFY_WITHOUT_EVALUATION` |
+| P1c | a free `adjudicated_precision` float nobody adjudicated | the headline precision must equal a bound, panel-validated `AdjudicatedPrecision` ⇒ `PRECISION_UNBOUND` |
+| P1d | choosing the precision `k` that flatters the sample | `k` committed inside the freeze bundle before the seed is derivable ⇒ `PRECISION_SAMPLE_UNBOUND` |
+| P1e | the certifier scoring its own subject (key custody, in-band half) | `attestation.evaluator_id != run.subject` ⇒ `CURATOR_IS_SUBJECT` |
+| PART 2 (FR-16) | **input truthfulness** — CLAIM a rediscovery the detector never produced, or OMIT a real one | the numerator is RECOMPUTED by re-running the frozen detector on the real pinned SHAs (`verifier.recompute_rediscovered`, `corpus_measure`'s line-precise rule); `set(report.rediscovered_blind_ids)` must equal it ⇒ `NUMERATOR_UNVERIFIED` |
+| PART 3 (FR-17) | **genesis completeness** — re-anchor to a fresh, private genesis | a git-committed `genesis_root.json` (reviewable, git-timestamped) that the chain base must root in ⇒ `GENESIS_UNANCHORED` |
+
+**The numerator is now RECOMPUTED, not trusted, and the genesis is git-anchored.** The
+verifier re-runs OUR static analyzer over the fetched target files as **DATA**
+(`scan_source` parses them, e.g. `ast.parse`); no target code is executed, so Article
+III stays intact — the module never `eval`/`exec`/imports fetched content.
+
+**The ONLY residual is now documented, not code-closable:** (i) the completeness of
+what the curator commits at genesis — moved into git, where it is timestamped and
+reviewable in history rather than asserted by the validator; and (ii) key custody —
+that the *private* signing key is held by a party that is **not** the scored subject.
+The in-band half of custody (`evaluator_id != subject`) is enforced; the physical
+key-holding boundary is organizational, the same custody separation the exposure
+ledger enforces for cohorts. This is the honest trust boundary: everything a validator
+*can* check is checked; the two things it structurally cannot are pushed onto git
+review and organizational key custody rather than silently assumed.
+
 ## Sealing note (for the later cross-model evaluator)
 
 The exposure ledger and freeze manifest are the in-contract guarantees. The OS-level

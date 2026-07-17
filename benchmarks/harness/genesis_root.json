@@ -1,0 +1,5 @@
+{
+  "genesis_history_root": "4a0fcca3f3bf31f937077c8fc8019d82ae6ea42c6c6e204311190c6feba2e296",
+  "committed_at": "2026-07-17T00:00:00Z",
+  "note": "The git-anchored genesis root for the EvaluationContract attestation chain (feature 008, round 4). Value is chain_root([]) — the domain-separated empty-history genesis (sha256 of 'deepthought/evaluation-contract/chain-genesis/v1'), the honest 'nothing' root that every real cohort history append-only-extends. Committing it here makes the chain BASE immutable and reviewable: git history supplies the external timestamp and review a pure validator cannot, so no operator can silently re-anchor the chain to a fresh, private, truncated genesis. Strict certification requires the first attestation's prior_attestation_root to equal this value (else GENESIS_UNANCHORED). To rotate the genesis (a deliberate, reviewable act) commit a new value here; the change is visible in git history."
+}

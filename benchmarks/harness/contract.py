@@ -31,6 +31,7 @@ import random
 import re
 from collections import Counter
 from enum import Enum
+from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -117,6 +118,34 @@ def chain_root(entries: list[str]) -> str:
 
 # The reproducible "nothing" root shared by an empty history / ledger / log.
 _EMPTY_ROOT = chain_root([])
+
+
+# --------------------------------------------------------------------------- #
+# PART 3 — the git-anchored genesis root (an immutable, reviewable chain base)
+# --------------------------------------------------------------------------- #
+#
+# A pure validator cannot verify GENESIS COMPLETENESS — that the committed
+# baseline was not itself a truncated, self-serving starting point. We move that
+# out of the validator and into GIT: ``benchmarks/harness/genesis_root.json`` is a
+# committed, reviewable file whose git history supplies the external timestamp and
+# review the validator cannot. The strict certify path requires the attestation
+# chain's BASE to root in this committed genesis (``GENESIS_UNANCHORED``), so an
+# operator can no longer re-anchor a chain to a fresh, private genesis.
+
+_GENESIS_ROOT_PATH = Path(__file__).resolve().parent / "genesis_root.json"
+
+
+def load_committed_genesis_root(path: Optional[Path] = None) -> str:
+    """Read the git-committed genesis history root. Tests monkeypatch this loader
+    (or pass ``path``) with a hermetic fixture so they never depend on the real
+    committed file's value; production reads the reviewable, version-controlled
+    ``genesis_root.json``."""
+    p = path or _GENESIS_ROOT_PATH
+    data = json.loads(p.read_text(encoding="utf-8"))
+    root = data.get("genesis_history_root")
+    if not isinstance(root, str) or not root:
+        raise ValueError(f"{p}: genesis_history_root must be a non-empty string")
+    return root
 
 
 def sign(root: str, key: bytes) -> str:
@@ -251,6 +280,14 @@ class ViolationReason(str, Enum):
     ATTESTATION_INCOMPLETE = "attestation-references-a-component-that-was-not-presented"
     ATTESTATION_UNSIGNED = "certification-requires-a-verify-key"
     UNANCHORED = "certification-requires-a-signed-attestation"
+    # Round-4 out-of-contract verification seals (P1a..P1e, PART 2, PART 3): the
+    # certify path now attacks the irreducible floor a pure validator could not reach —
+    # genesis completeness, numerator input-truthfulness, and key custody.
+    ATTESTATION_NOT_EXTENDING = "certification-history-does-not-append-only-extend-the-prior-committed-root"
+    CERTIFY_WITHOUT_EVALUATION = "certification-without-exactly-one-producing-evaluation"
+    PRECISION_UNBOUND = "certified-precision-not-bound-to-a-real-adjudication"
+    NUMERATOR_UNVERIFIED = "reported-rediscoveries-do-not-match-the-recomputed-detector-run"
+    GENESIS_UNANCHORED = "attestation-chain-base-not-rooted-in-the-committed-genesis"
 
 
 class ContractViolation(Exception):
@@ -482,6 +519,14 @@ class DetectorBundle(BaseModel):
     # alongside everything else. Combined with A6's canonical draw, the precision
     # sample becomes a pure function of committed membership.
     pool_root: str = ""
+    # P1d: the precision sample size ``k``, committed at freeze time BEFORE the seed is
+    # derivable. Because it rides inside the bundle it is part of ``bundle_hash`` /
+    # ``freeze_hash``. Combined with B4's committed ``pool_root`` and A6's canonical
+    # draw, the ENTIRE precision sample (membership + size + draw) is fixed before the
+    # seed exists — closing k-choice inflation ("pick the k that flatters the sample").
+    # Left 0 the check is inert (backwards-compatible); set, precision binding requires
+    # ``precision.k == committed_k``.
+    committed_k: int = 0
 
     @property
     def bundle_hash(self) -> str:
@@ -516,6 +561,11 @@ class FreezeManifest(BaseModel):
     def pool_root(self) -> str:
         """B4: the confusion-pair pool root committed inside the frozen bundle."""
         return self.bundle.pool_root
+
+    @property
+    def committed_k(self) -> int:
+        """P1d: the precision sample size ``k`` committed inside the frozen bundle."""
+        return self.bundle.committed_k
 
 
 # --------------------------------------------------------------------------- #
@@ -1280,6 +1330,14 @@ class Attestation(BaseModel):
     report_hash: str
     evaluator_id: str
     attested_at: str  # ISO-8601, supplied by the caller (never datetime.now)
+    # P1a: the root of the PRIOR committed attestation this one chains from (the
+    # committed genesis root for the first attestation). Folding it into
+    # ``attestation_root`` makes the chain cryptographically linked: the strict
+    # certify path requires the presented history to append-only-EXTEND the prior
+    # committed root and the chain base to root in the git-committed genesis — so an
+    # operator cannot re-anchor to a truncated genesis relative to a committed
+    # predecessor.
+    prior_attestation_root: str
     signature: str
 
     @property
@@ -1299,6 +1357,7 @@ class Attestation(BaseModel):
             self.report_hash,
             self.evaluator_id,
             self.attested_at,
+            self.prior_attestation_root,
         ]
 
     @property
@@ -1317,6 +1376,7 @@ def build_attestation(
     evaluator_id: str,
     attested_at: str,
     key: bytes,
+    prior_attestation_root: Optional[str] = None,
     exclusions: Optional[ExclusionLog] = None,
     ledger: Optional[ExposureLedger] = None,
     evaluation_ledger: Optional[EvaluationLedger] = None,
@@ -1325,13 +1385,20 @@ def build_attestation(
     """Compute every component root from the honest objects and sign the Merkle
     ``attestation_root``. Absent components fold in the reproducible empty root, so
     the attestation is a total function of exactly what was presented. Deterministic:
-    ``attested_at`` and ``key`` are passed in."""
+    ``attested_at`` and ``key`` are passed in.
+
+    P1a: ``prior_attestation_root`` chains this attestation to its committed
+    predecessor. Left ``None`` it defaults to the git-committed genesis root
+    (:func:`load_committed_genesis_root`) — i.e. this is the chain BASE — so an honest
+    first attestation is always anchored without the caller re-typing the constant."""
     history_root = history.history_root if history is not None else _EMPTY_ROOT
     exclusion_root = exclusions.root if exclusions is not None else _EMPTY_ROOT
     exposure_root = ledger.root if ledger is not None else _EMPTY_ROOT
     evaluation_root = evaluation_ledger.root if evaluation_ledger is not None else _EMPTY_ROOT
     achievability_root = achievability.root if achievability is not None else _EMPTY_ROOT
     report_hash = leaf_hash(report.model_dump(mode="json"))
+    if prior_attestation_root is None:
+        prior_attestation_root = load_committed_genesis_root()
 
     unsigned = Attestation(
         history_root=history_root,
@@ -1345,6 +1412,7 @@ def build_attestation(
         report_hash=report_hash,
         evaluator_id=evaluator_id,
         attested_at=attested_at,
+        prior_attestation_root=prior_attestation_root,
         signature="",
     )
     return unsigned.model_copy(update={"signature": sign(unsigned.attestation_root, key)})
@@ -1371,6 +1439,7 @@ def validate(
     prior_evaluations: Optional[EvaluationLedger] = None,
     attestation: Optional[Attestation] = None,
     verify_key: Optional[bytes] = None,
+    recomputed_rediscovered: Optional[set[str]] = None,
     strict: bool = False,
 ) -> ContractReport:
     """Validate the Evaluation Contract (FR-14). Checks entry-hash integrity,
@@ -1473,6 +1542,9 @@ def validate(
                 freeze=freeze,
                 run=run,
                 report=report,
+                precision=precision,
+                prior_history=prior_history,
+                recomputed_rediscovered=recomputed_rediscovered,
                 result=result,
             )
     except ContractViolation as exc:  # a guard that raised mid-check is a failure
@@ -1557,6 +1629,19 @@ def _check_denominator_preservation(
                     f"{prev.version}->{curr.version}: entry {identity[:12]} left the blind denominator "
                     "(removed or role-downgraded) with no matching cohort-correction event",
                 )
+
+
+def _history_extends(history: CohortHistory, prior: CohortHistory) -> bool:
+    """P1a: True iff ``history`` is an APPEND-ONLY extension of ``prior`` — every prior
+    version appears at the same index with an identical content_hash. The boolean form
+    of :func:`_check_history_extension`, used by the certify chain check."""
+    if len(history.versions) < len(prior.versions):
+        return False
+    for i, prior_cohort in enumerate(prior.versions):
+        curr = history.versions[i]
+        if curr.version != prior_cohort.version or curr.content_hash != prior_cohort.content_hash:
+            return False
+    return True
 
 
 def _check_history_extension(
@@ -1968,6 +2053,15 @@ def _check_precision_binding(
                 ViolationReason.PRECISION_SAMPLE_UNBOUND,
                 "precision pool does not reproduce the committed freeze pool_root",
             )
+    # P1d: when the freeze committed a sample size k, the precision MUST use exactly it.
+    # k is frozen alongside pool membership BEFORE the seed is derivable, so an operator
+    # can no longer choose the k that flatters the sample after seeing the draw.
+    if freeze.committed_k:
+        if precision.k != freeze.committed_k:
+            report.add(
+                ViolationReason.PRECISION_SAMPLE_UNBOUND,
+                f"precision k ({precision.k}) does not equal the committed freeze k ({freeze.committed_k})",
+            )
 
 
 def _check_achievability(
@@ -2011,16 +2105,29 @@ def _check_certification(
     freeze: Optional[FreezeManifest],
     run: Optional[EvaluationRun],
     report: Optional["Report"],
+    precision: Optional[AdjudicatedPrecision] = None,
+    prior_history: Optional[CohortHistory] = None,
+    recomputed_rediscovered: Optional[set[str]] = None,
     result: ContractReport,
 ) -> None:
-    """B5: the fail-closed CERTIFY path. A certified score is bound to a single
-    committed, signed attestation root — so it cannot be fabricated even by an
+    """B5 + Round-4: the fail-closed CERTIFY path. A certified score is bound to a
+    single committed, signed attestation root — so it cannot be fabricated even by an
     operator who controls storage. Every component root is RECOMPUTED from the
     presented objects and must equal the attestation's committed root
     (``ATTESTATION_MISMATCH``); the signature must verify (``ATTESTATION_INVALID`` /
     ``ATTESTATION_UNSIGNED``); every referenced component must be present
     (``ATTESTATION_INCOMPLETE``). A certification requested with no signed
-    attestation + verify_key is ``UNANCHORED``."""
+    attestation + verify_key is ``UNANCHORED``.
+
+    Round-4 additionally attacks the irreducible floor a pure validator cannot reach:
+    P1a the presented history must append-only-EXTEND the prior committed root and the
+    chain base must root in the git-committed genesis (``ATTESTATION_NOT_EXTENDING`` /
+    ``GENESIS_UNANCHORED``); P1b a certification requires exactly one producing
+    evaluation (``CERTIFY_WITHOUT_EVALUATION``); P1c the headline
+    ``adjudicated_precision`` must be bound to a real ``AdjudicatedPrecision``
+    (``PRECISION_UNBOUND``); P1e the evaluator must not be the scored subject
+    (``CURATOR_IS_SUBJECT``); and PART 2 the reported rediscoveries must MATCH a
+    recompute of the frozen detector on the real pinned SHAs (``NUMERATOR_UNVERIFIED``)."""
     # Certification requires BOTH a signed attestation and a verify_key. Without
     # them there is nothing to reproduce — fail closed rather than pass silently.
     if attestation is None or verify_key is None:
@@ -2078,6 +2185,94 @@ def _check_certification(
         result.add(ViolationReason.ATTESTATION_INCOMPLETE, "no Report presented for certification")
     elif attestation.report_hash != leaf_hash(report.model_dump(mode="json")):
         result.add(ViolationReason.ATTESTATION_MISMATCH, "presented report does not reproduce the attested report_hash")
+
+    # ----------------------------------------------------------------------- #
+    # Round-4 — attack the irreducible floor a pure validator cannot reach.
+    # ----------------------------------------------------------------------- #
+
+    # P1e — key custody, the code-checkable half: the evaluator that MINTED this
+    # attestation must not be the subject it scores. (The remaining custody guarantee
+    # — that the private signing key is held by that non-subject party — is
+    # organizational and documented; this closes the in-band half.)
+    if run is not None and attestation.evaluator_id == run.subject:
+        result.add(
+            ViolationReason.CURATOR_IS_SUBJECT,
+            f"attestation evaluator_id {attestation.evaluator_id!r} equals the scored subject; "
+            "the certifier must not be the subject",
+        )
+
+    # P1b — a certification must stand on exactly ONE producing post-freeze evaluation.
+    # A Report certified against a run that never produced results (attempts==[] or an
+    # all-crash run) is a headline with no measurement behind it.
+    if run is None or run.semantic_evaluation_count != 1:
+        produced = run.semantic_evaluation_count if run is not None else 0
+        result.add(
+            ViolationReason.CERTIFY_WITHOUT_EVALUATION,
+            f"certification requires exactly one producing post-freeze evaluation (found {produced})",
+        )
+
+    # P1c — the headline precision must be BOUND to a real adjudication, not a free
+    # float. A certified ``report.adjudicated_precision`` must equal the precision of a
+    # presented, panel-validated ``AdjudicatedPrecision`` (itself seed/pool/k-bound by
+    # ``_check_precision_binding``).
+    if report is not None:
+        if precision is None:
+            result.add(
+                ViolationReason.PRECISION_UNBOUND,
+                "certification requires a bound AdjudicatedPrecision; a free adjudicated_precision float "
+                "is not verifiable",
+            )
+        elif abs(report.adjudicated_precision - precision.precision) > 1e-9:
+            result.add(
+                ViolationReason.PRECISION_UNBOUND,
+                f"report.adjudicated_precision ({report.adjudicated_precision}) does not equal the bound "
+                f"AdjudicatedPrecision.precision ({precision.precision})",
+            )
+
+    # P1a + PART 3 — attestation chaining and git-anchored genesis. The chain must
+    # either be a BASE rooted in the committed genesis, or an EXTENSION that
+    # append-only-extends its prior committed history.
+    genesis_root = load_committed_genesis_root()
+    if prior_history is None:
+        # Chain base: the committed predecessor is the genesis itself. The base
+        # attestation's prior_attestation_root MUST equal the git-committed genesis
+        # root — otherwise the chain roots in a fresh, private, possibly-truncated
+        # starting point the validator cannot see.
+        if attestation.prior_attestation_root != genesis_root:
+            result.add(
+                ViolationReason.GENESIS_UNANCHORED,
+                "chain-base prior_attestation_root does not equal the committed genesis root; "
+                "re-anchoring to an unreviewable genesis is refused",
+            )
+    else:
+        # Chain extension: the presented history must append-only-extend the prior
+        # committed history. A truncated / rewritten / reordered baseline breaks it.
+        if history is None or not _history_extends(history, prior_history):
+            result.add(
+                ViolationReason.ATTESTATION_NOT_EXTENDING,
+                "presented history does not append-only-extend the prior committed history",
+            )
+
+    # PART 2 — the numerator VERIFIER. The reported rediscoveries must MATCH a
+    # recompute of the frozen detector re-run on the real pinned SHAs. The operator can
+    # no longer CLAIM a rediscovery the detector did not actually produce (nor OMIT a
+    # real one). The recompute is injected (computed by ``verifier.recompute_rediscovered``
+    # with the corpus fetcher + the frozen detector's ``scan_source``); certification
+    # without it is fail-closed unverified.
+    if report is not None and report.rediscovered_blind_ids is not None:
+        claimed = set(report.rediscovered_blind_ids)
+        if recomputed_rediscovered is None:
+            result.add(
+                ViolationReason.NUMERATOR_UNVERIFIED,
+                "certification requires the recomputed rediscovery set (re-run the frozen detector on the "
+                "pinned SHAs); none supplied",
+            )
+        elif claimed != set(recomputed_rediscovered):
+            result.add(
+                ViolationReason.NUMERATOR_UNVERIFIED,
+                "reported rediscovered_blind_ids do not match the recomputed detector run on the real "
+                f"pinned code (claimed {len(claimed)}, recomputed {len(set(recomputed_rediscovered))})",
+            )
 
 
 # A convenience alias: the contract's `check` (FR-14) reads as `check(...)` too.

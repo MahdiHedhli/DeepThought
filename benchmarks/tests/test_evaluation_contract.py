@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "harness"))
 
+import contract  # noqa: E402  (module handle for monkeypatching load_committed_genesis_root)
 from contract import (  # noqa: E402
     AchievabilityLog,
     AchievabilityPrediction,
@@ -46,6 +47,7 @@ from contract import (  # noqa: E402
     candidates_from_adjudications,
     chain_root,
     leaf_hash,
+    load_committed_genesis_root,
     merkle_root,
     pool_root_of,
     precision_sample_seed,
@@ -62,6 +64,11 @@ C40 = "c" * 40
 
 # A fixed evaluator key (deterministic tests never read os.urandom).
 KEY = b"deepthought-test-evaluator-key-0123456789"
+
+# The real git-committed genesis root, the honest chain base for the B5 / Round-4
+# certify helpers (the Round-4 genesis tests monkeypatch the loader with a hermetic
+# fixture instead of depending on this value).
+GENESIS_ROOT = load_committed_genesis_root()
 
 
 def _pool(n):
@@ -1433,14 +1440,21 @@ def test_b4_precision_pool_must_reproduce_committed_pool_root():
     assert not rep.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep)
 
 
-def _anchored():
+def _anchored(prior_attestation_root=GENESIS_ROOT):
     """A fully honest, anchored evaluation bundle plus its signed Attestation.
-    Reused by the B5 fail-closed cases (each tampers exactly one thing)."""
+    Reused by the B5 fail-closed cases and the Round-4 certify cases (each tampers
+    exactly one thing). Round-4: the freeze commits ``committed_k`` (P1d), the certify
+    binds a real ``AdjudicatedPrecision`` (P1c), the chain roots in the committed
+    genesis (P1a/PART3, overridable via ``prior_attestation_root``), and the numerator
+    is recomputed (PART2)."""
     blinds = [_entry(vuln=x * 40, role="blind") for x in ("a", "b")]
     v1 = _cohort("v1", blinds)
     hist = CohortHistory(versions=[v1])
     pool = _pool(12)
-    bundle = DetectorBundle(detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool))
+    committed_k = 3
+    bundle = DetectorBundle(
+        detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k
+    )
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     run = _run("codex", v1.content_hash, freeze.freeze_hash)
     run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
@@ -1452,6 +1466,20 @@ def _anchored():
         adjudicated_precision=1.0,
         cohort_content_hash=v1.content_hash,
         rediscovered_blind_ids=[blinds[0].identity_hash],
+    )
+    # P1c: a real, panel-adjudicated precision bound to (cohort, freeze, run). All-TP →
+    # precision 1.0, matching report.adjudicated_precision.
+    seed = precision_sample_seed(v1.content_hash, freeze.freeze_hash, run.run_id)
+    sampled = sample_confusion_pairs(pool, committed_k, seed)
+    precision = AdjudicatedPrecision(
+        seed=seed,
+        sampled_pairs=sampled,
+        pool=pool,
+        k=committed_k,
+        cohort_hash=v1.content_hash,
+        freeze_hash=freeze.freeze_hash,
+        run_id=run.run_id,
+        adjudications=[_good_panel(p, "true-positive") for p in sampled],
     )
     ledger = ExposureLedger()
     ledger.record(
@@ -1472,12 +1500,20 @@ def _anchored():
         evaluator_id="curator-not-subject",
         attested_at="2026-07-16T12:00:00Z",
         key=KEY,
+        prior_attestation_root=prior_attestation_root,  # P1a/PART3: chain base roots in the committed genesis
         exclusions=excl,
         ledger=ledger,
         evaluation_ledger=evln,
         achievability=None,
     )
-    return dict(hist=hist, freeze=freeze, run=run, report=report, ledger=ledger, excl=excl, evln=evln, blinds=blinds, att=att)
+    # PART2: the honest recompute — the frozen detector confirms exactly the claimed
+    # rediscovery set on the real code (here injected directly; the verifier's own
+    # tests exercise recompute_rediscovered end-to-end).
+    recomputed = {blinds[0].computed_identity_hash}
+    return dict(
+        hist=hist, freeze=freeze, run=run, report=report, precision=precision, ledger=ledger,
+        excl=excl, evln=evln, blinds=blinds, att=att, recomputed=recomputed,
+    )
 
 
 def _certify(a, **overrides):
@@ -1486,11 +1522,13 @@ def _certify(a, **overrides):
         freeze=a["freeze"],
         run=a["run"],
         report=a["report"],
+        precision=a["precision"],
         exclusions=a["excl"],
         ledger=a["ledger"],
         prior_evaluations=a["evln"],
         attestation=a["att"],
         verify_key=KEY,
+        recomputed_rediscovered=a["recomputed"],
         strict=True,
     )
     kw.update(overrides)
@@ -1570,3 +1608,190 @@ def test_b5_certify_without_attestation_unanchored():
         strict=True,  # no attestation, no verify_key
     )
     assert not rep.ok and ViolationReason.UNANCHORED in _reasons(rep)
+
+
+# --------------------------------------------------------------------------- #
+# Round-4 out-of-contract verification (P1a..P1e + PART 3). An audit proved the
+# irreducible floor a pure validator cannot verify: genesis completeness, input
+# truthfulness, and key custody. These attack it with measures OUTSIDE the pure
+# validator — the certify path now RECOMPUTES the numerator (test_verifier.py),
+# CHAINS attestations to a git-committed genesis, and demands a producing eval, a
+# bound precision, a committed k, and a certifier that is not the subject.
+# --------------------------------------------------------------------------- #
+
+
+# P1a — the certification history must append-only-EXTEND the prior committed root.
+def _chain_certify(presented_versions, scored_cohort, scored_blinds, *, rediscovered, prior,
+                   prior_attestation_root=None):
+    """A fully honest, anchored strict-certify whose run/report/attestation bind to
+    ``scored_cohort`` and whose presented history is ``presented_versions``, validated
+    against a ``prior`` committed history (the chain predecessor)."""
+    hist = CohortHistory(versions=presented_versions)
+    pool = _pool(12)
+    committed_k = 3
+    bundle = DetectorBundle(
+        detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k
+    )
+    freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
+    run = _run("codex", scored_cohort.content_hash, freeze.freeze_hash)
+    run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+    report = Report(
+        blind_recall=RecallReport(rediscovered=len(rediscovered), total=len(scored_blinds)),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=scored_cohort.content_hash,
+        rediscovered_blind_ids=[e.identity_hash for e in rediscovered],
+    )
+    seed = precision_sample_seed(scored_cohort.content_hash, freeze.freeze_hash, run.run_id)
+    sampled = sample_confusion_pairs(pool, committed_k, seed)
+    precision = AdjudicatedPrecision(
+        seed=seed, sampled_pairs=sampled, pool=pool, k=committed_k,
+        cohort_hash=scored_cohort.content_hash, freeze_hash=freeze.freeze_hash, run_id=run.run_id,
+        adjudications=[_good_panel(p, "true-positive") for p in sampled],
+    )
+    par = prior_attestation_root if prior_attestation_root is not None else prior.history_root
+    evln = EvaluationLedger()
+    att = build_attestation(
+        history=hist, freeze=freeze, run=run, report=report,
+        evaluator_id="curator-not-subject", attested_at="2026-07-16T12:00:00Z", key=KEY,
+        prior_attestation_root=par, evaluation_ledger=evln,
+    )
+    recomputed = {e.computed_identity_hash for e in rediscovered}
+    return validate(
+        history=hist, freeze=freeze, run=run, report=report, precision=precision,
+        prior_evaluations=evln, prior_history=prior, attestation=att, verify_key=KEY,
+        recomputed_rediscovered=recomputed, strict=True,
+    )
+
+
+def test_p1a_certify_history_must_extend_prior_committed_root():
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=B40, role="blind")
+    c = _entry(vuln=C40, role="blind")
+    v1 = _cohort("v1", [a, b])
+    v2 = _cohort("v2", [a, b, c], reason="append c", parent="v1")  # superset extension
+    prior = CohortHistory(versions=[v1])
+
+    # honest append-only extension: presented [v1, v2] extends prior [v1]
+    ok = _chain_certify([v1, v2], v2, [a, b, c], rediscovered=[a], prior=prior)
+    assert ok.ok, _reasons(ok)
+
+    # a from-storage rebuild that DROPS v1 and re-anchors on a fresh single version
+    # (its content does not append-only-extend the committed prior) is rejected
+    v2_solo = _cohort("v2", [a, b], reason="rebuild dropping v1", parent="v1")
+    bad = _chain_certify([v2_solo], v2_solo, [a, b], rediscovered=[a], prior=prior)
+    assert not bad.ok and ViolationReason.ATTESTATION_NOT_EXTENDING in _reasons(bad)
+
+
+# P1b — certification requires exactly one producing post-freeze evaluation.
+def test_p1b_certify_requires_a_producing_evaluation():
+    a = _anchored()
+    ch = a["hist"].versions[0].content_hash
+    # a run with the SAME canonical run_id but NO producing evaluation (attempts == [])
+    no_eval = _run("codex", ch, a["freeze"].freeze_hash)
+    assert no_eval.semantic_evaluation_count == 0
+    rep = _certify(a, run=no_eval)
+    assert not rep.ok and ViolationReason.CERTIFY_WITHOUT_EVALUATION in _reasons(rep)
+    # the honest bundle (one producing evaluation) certifies
+    assert _certify(a).ok
+
+
+# P1c — the headline precision must be bound to a real AdjudicatedPrecision.
+def test_p1c_certify_requires_bound_adjudicated_precision():
+    a = _anchored()
+    # (1) a free adjudicated_precision float with NO bound AdjudicatedPrecision
+    rep = _certify(a, precision=None)
+    assert not rep.ok and ViolationReason.PRECISION_UNBOUND in _reasons(rep)
+
+    # (2) a bound precision whose value disagrees with the report's headline (1.0)
+    ch = a["hist"].versions[0].content_hash
+    fz = a["freeze"].freeze_hash
+    rid = a["run"].run_id
+    pool = _pool(12)
+    seed = precision_sample_seed(ch, fz, rid)
+    sampled = sample_confusion_pairs(pool, 3, seed)
+    low = AdjudicatedPrecision(
+        seed=seed, sampled_pairs=sampled, pool=pool, k=3,
+        cohort_hash=ch, freeze_hash=fz, run_id=rid,
+        adjudications=[
+            _good_panel(sampled[0], "true-positive"),
+            _good_panel(sampled[1], "true-positive"),
+            _good_panel(sampled[2], "ambiguous"),  # drags precision to 2/3
+        ],
+    )
+    assert low.precision == 0.667  # 2/3, rounded to 3 decimals; != the report's 1.0
+    rep2 = _certify(a, precision=low)
+    assert not rep2.ok and ViolationReason.PRECISION_UNBOUND in _reasons(rep2)
+
+
+# P1d — the precision sample size k must equal the k committed inside the freeze.
+def test_p1d_precision_k_must_equal_committed_freeze_k():
+    a = _anchored()  # committed_k == 3
+    ch = a["hist"].versions[0].content_hash
+    fz = a["freeze"].freeze_hash
+    rid = a["run"].run_id
+    pool = _pool(12)
+    seed = precision_sample_seed(ch, fz, rid)
+    # a valid all-TP precision (value 1.0 matches the report) but k == 4 != committed 3
+    sampled4 = sample_confusion_pairs(pool, 4, seed)
+    p4 = AdjudicatedPrecision(
+        seed=seed, sampled_pairs=sampled4, pool=pool, k=4,
+        cohort_hash=ch, freeze_hash=fz, run_id=rid,
+        adjudications=[_good_panel(x, "true-positive") for x in sampled4],
+    )
+    assert p4.precision == 1.0
+    rep = _certify(a, precision=p4)
+    assert not rep.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep)
+    # the committed k passes
+    assert _certify(a).ok
+
+
+# P1e — the certifier (attestation.evaluator_id) must not be the scored subject.
+def test_p1e_certifier_must_not_be_the_scored_subject():
+    a = _anchored()
+    self_att = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=a["report"],
+        evaluator_id=a["run"].subject,  # == "codex", the scored subject
+        attested_at="2026-07-16T12:00:00Z", key=KEY, prior_attestation_root=GENESIS_ROOT,
+        exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep = _certify(a, attestation=self_att)
+    assert not rep.ok and ViolationReason.CURATOR_IS_SUBJECT in _reasons(rep)
+
+
+# PART 3 — the attestation chain base must root in the git-committed genesis.
+def test_part3_certify_chain_base_must_root_in_committed_genesis(monkeypatch):
+    # a hermetic fixture genesis so the test never depends on the committed file's value
+    fixture_genesis = "f" * 64
+    monkeypatch.setattr(contract, "load_committed_genesis_root", lambda *args, **kw: fixture_genesis)
+
+    # a chain base whose prior_attestation_root is NOT the committed genesis is refused
+    unrooted = _anchored(prior_attestation_root="deadbeef" * 8)
+    rep = _certify(unrooted)
+    assert not rep.ok and ViolationReason.GENESIS_UNANCHORED in _reasons(rep)
+
+    # the honest chain, rooted in the committed genesis, is accepted
+    rooted = _anchored(prior_attestation_root=fixture_genesis)
+    assert _certify(rooted).ok, _reasons(_certify(rooted))
+
+
+# PART 2 — the certify path RECOMPUTES the numerator: a claimed set the recompute does
+# not confirm, or that omits a real rediscovery, is NUMERATOR_UNVERIFIED. (The verifier
+# itself is exercised end-to-end in test_verifier.py.)
+def test_part2_numerator_must_match_the_recompute():
+    a = _anchored()
+    confirmed = a["blinds"][0].computed_identity_hash
+    other = a["blinds"][1].computed_identity_hash
+    # the recompute confirms exactly the claim -> certifies
+    assert _certify(a, recomputed_rediscovered={confirmed}).ok
+    # the detector produced NOTHING on the real code (claim unconfirmed) -> reject
+    rep = _certify(a, recomputed_rediscovered=set())
+    assert not rep.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep)
+    # the recompute confirms a DIFFERENT entry than claimed -> reject
+    rep2 = _certify(a, recomputed_rediscovered={other})
+    assert not rep2.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep2)
+    # no recompute supplied at all -> fail closed
+    rep3 = _certify(a, recomputed_rediscovered=None)
+    assert not rep3.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep3)

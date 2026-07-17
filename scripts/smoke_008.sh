@@ -2,12 +2,16 @@
 # Smoke test for feature 008 — the typed EvaluationContract.
 #
 # Builds a 2-entry cohort v1, freezes a dummy detector (committing the confusion
-# pool root), records exactly one blind evaluation, binds a Report, builds and
-# SIGNS an Attestation, and passes strict certification. Then demonstrates each
-# guard FAILING with a typed reason: an in-place entry edit, a silent denominator
-# shrink, a second blind evaluation, a curator==subject score, plus the
-# cryptographic-anchoring fail-closed cases — a forged signature, an omitted
-# component, and a certify path with no attestation. Finally prints the Report
+# pool root AND the precision sample size k), records exactly one blind evaluation,
+# binds a Report + a panel-adjudicated precision, RECOMPUTES the numerator with a
+# (fake, deterministic) frozen detector re-run, builds and SIGNS an Attestation
+# chained to the git-committed genesis root, and passes strict certification. Then
+# demonstrates each guard FAILING with a typed reason: an in-place entry edit, a
+# silent denominator shrink, a second blind evaluation, a curator==subject score,
+# the cryptographic-anchoring fail-closed cases (forged signature, omitted
+# component, no attestation), a PART-2 numerator claim the frozen detector does not
+# reproduce (NUMERATOR_UNVERIFIED, via a fake detector), and a PART-3 chain base not
+# rooted in the committed genesis (GENESIS_UNANCHORED). Finally prints the Report
 # with blind recall as the headline plus the four labelled secondaries. Exit 0 on
 # success (all positives pass AND all guards trip with the expected reason).
 set -euo pipefail
@@ -25,6 +29,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path.cwd() / "benchmarks" / "harness"))
 
 from contract import (
+    Adjudication,
+    AdjudicatedPrecision,
+    AdjudicatorVerdict,
     Attestation,
     Cohort,
     CohortEntry,
@@ -44,9 +51,13 @@ from contract import (
     ContractViolation,
     _canonical_run_id,
     build_attestation,
+    load_committed_genesis_root,
     pool_root_of,
+    precision_sample_seed,
+    sample_confusion_pairs,
     validate,
 )
+from verifier import recompute_rediscovered
 
 # A fixed evaluator key — DETERMINISTIC (never read from os.urandom). PRODUCTION
 # swaps HMAC for ed25519 with the private key held by a party != the scored builder.
@@ -82,8 +93,9 @@ v1 = Cohort(version="v1", entries=[e1, e2], reason="initial cohort").sealed()
 history = CohortHistory(versions=[v1])
 
 # B4: the confusion-pair pool membership is committed in the freeze, BEFORE the seed
-# is derivable, as a Merkle pool_root.
+# is derivable, as a Merkle pool_root. P1d: the sample size k is committed alongside it.
 pool = [f"p{i:02d}" for i in range(12)]
+COMMITTED_K = 3
 bundle = DetectorBundle(
     detector_id="DT-SSRF-TAINT",
     module_hashes={"ssrf_detector.py": "deadbeef"},
@@ -95,6 +107,7 @@ bundle = DetectorBundle(
     params={"budget": 100},
     calibration_seed_ids=[e1.identity_hash],
     pool_root=pool_root_of(pool),
+    committed_k=COMMITTED_K,
 )
 freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
 
@@ -118,7 +131,51 @@ report_view = Report(
 )
 evaluations = EvaluationLedger()  # an empty, honest evaluate-once ledger
 
-# B5: bind every component root into one signed Attestation.
+# P1c/P1d: a real, panel-adjudicated precision bound to (cohort, freeze, run), drawn
+# with the committed k. All-TP -> precision 1.0, matching the report's headline.
+seed = precision_sample_seed(v1.content_hash, freeze.freeze_hash, run.run_id)
+sampled = sample_confusion_pairs(pool, COMMITTED_K, seed)
+precision_view = AdjudicatedPrecision(
+    seed=seed,
+    sampled_pairs=sampled,
+    pool=pool,
+    k=COMMITTED_K,
+    cohort_hash=v1.content_hash,
+    freeze_hash=freeze.freeze_hash,
+    run_id=run.run_id,
+    adjudications=[
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=True, decision="true-positive"),
+            ],
+        )
+        for p in sampled
+    ],
+)
+
+# PART 2: RECOMPUTE the numerator by re-running a (here fake, deterministic) frozen
+# detector on the pinned SHAs. A marker-driven fake detector flags the blind sink in
+# the vuln tree and not in the patched tree, so the recompute confirms e2 -> the
+# claimed rediscovery is VERIFIED, not trusted. (Article III: the detector parses the
+# fetched source as DATA; it is never executed.)
+_FILES = {
+    (e2.vuln_ref, "api/core/rag/extractor/word_extractor.py"): "def f(url_spec):\n    client.get(url_spec.geturl(), timeout=5)  # FLAG\n",
+    (e2.patched_ref, "api/core/rag/extractor/word_extractor.py"): "def f(url_spec):\n    ssrf_proxy.validate(url_spec)\n    client.get(url_spec.geturl(), timeout=5)\n",
+}
+def _fake_fetch(repo, ref, path):
+    return _FILES[(ref, path)]
+def _fake_scan(source, uri):
+    return [
+        {"locations": [{"physicalLocation": {"region": {"startLine": i}}}]}
+        for i, line in enumerate(source.splitlines(), 1) if "FLAG" in line
+    ]
+def _fake_scan_blind(source, uri):
+    return []  # a fake detector that produces NOTHING -> confirms no rediscovery
+recomputed = recompute_rediscovered([e2], fetch_fn=_fake_fetch, scan_fn=_fake_scan)
+
+# B5: bind every component root into one signed Attestation (chained to the committed genesis).
 attestation = build_attestation(
     history=history,
     freeze=freeze,
@@ -127,6 +184,7 @@ attestation = build_attestation(
     evaluator_id="curator-not-subject",
     attested_at="2026-07-16T12:00:00Z",
     key=KEY,
+    prior_attestation_root=load_committed_genesis_root(),  # P1a/PART3: chain base roots in the committed genesis
     exclusions=None,
     ledger=ledger,
     evaluation_ledger=evaluations,
@@ -140,13 +198,16 @@ certified = validate(
     run=run,
     freeze=freeze,
     report=report_view,
+    precision=precision_view,
     prior_evaluations=evaluations,
     attestation=attestation,
     verify_key=KEY,
+    recomputed_rediscovered=recomputed,
     strict=True,
 )
 expect("honest signed attestation certifies (strict)", certified.ok)
 expect("exactly one semantic evaluation recorded", run.semantic_evaluation_count == 1)
+expect("numerator recompute confirms the claimed rediscovery", recomputed == {e2.identity_hash})
 
 print()
 print("== guard 1: in-place entry edit without a version bump ==")
@@ -211,6 +272,37 @@ rep5c = validate(
 )
 expect("certify with no attestation trips UNANCHORED", ViolationReason.UNANCHORED in rep5c.reasons())
 print(f"        -> {rep5c.summary()}")
+
+print()
+print("== guard 6: PART 2 numerator verifier — a claim the frozen detector does not reproduce ==")
+# a fake frozen detector that produces NOTHING on the real code: the report still
+# CLAIMS e2 rediscovered, but the recompute does not confirm it -> NUMERATOR_UNVERIFIED
+recomputed_blind = recompute_rediscovered([e2], fetch_fn=_fake_fetch, scan_fn=_fake_scan_blind)
+rep6 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    precision=precision_view, prior_evaluations=evaluations, attestation=attestation,
+    verify_key=KEY, recomputed_rediscovered=recomputed_blind, strict=True,
+)
+expect("unconfirmed rediscovery trips NUMERATOR_UNVERIFIED", ViolationReason.NUMERATOR_UNVERIFIED in rep6.reasons())
+expect("the fake detector reproduced nothing", recomputed_blind == set())
+print(f"        -> {rep6.summary()}")
+
+print()
+print("== guard 7: PART 3 genesis anchoring — a chain base not rooted in the committed genesis ==")
+# an attestation whose prior_attestation_root is NOT the committed genesis root
+unrooted_att = build_attestation(
+    history=history, freeze=freeze, run=run, report=report_view,
+    evaluator_id="curator-not-subject", attested_at="2026-07-16T12:00:00Z", key=KEY,
+    prior_attestation_root="deadbeef" * 8,  # a fresh, unreviewable, un-anchored genesis
+    exclusions=None, ledger=ledger, evaluation_ledger=evaluations, achievability=None,
+)
+rep7 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    precision=precision_view, prior_evaluations=evaluations, attestation=unrooted_att,
+    verify_key=KEY, recomputed_rediscovered=recomputed, strict=True,
+)
+expect("un-anchored chain base trips GENESIS_UNANCHORED", ViolationReason.GENESIS_UNANCHORED in rep7.reasons())
+print(f"        -> {rep7.summary()}")
 
 print()
 print("== report: blind recall is the headline, four labelled secondaries ==")

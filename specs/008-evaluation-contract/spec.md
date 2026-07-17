@@ -205,6 +205,47 @@ wired into `check`, enforcing:
   root"; the signature adds non-repudiation and tamper-evidence. The non-strict path is
   unchanged, so every prior call site is unaffected.
 
+- **FR-16 — Numerator verification (the reported rediscoveries are RECOMPUTED, not
+  trusted).** A pure validator cannot check that the reported numerator is TRUE — it
+  never sees the detector run on the real code. `benchmarks/harness/verifier.py`
+  closes this for the numerator: `recompute_rediscovered(blind_entries, *, fetch_fn,
+  scan_fn)` re-runs the frozen detector's `scan_source` over the vulnerable AND patched
+  target files (fetched at the pinned SHAs) and applies `corpus_measure.py`'s EXACT
+  line-precise rule — a FLAGGED line whose own text contains the `sink_probe` in the
+  vulnerable tree and NOT in the patched tree — returning the set of rediscovered blind
+  entry identities. It is a pure function of the injected `fetch_fn` / `scan_fn`
+  (deterministic unit tests inject fakes; one net-gated test re-runs a real detector on
+  a real pinned pair, reusing `corpus_measure.py`'s GitHub-raw fetcher + cache). Strict
+  certification requires `set(report.rediscovered_blind_ids) == recompute_rediscovered(…)`
+  → else `NUMERATOR_UNVERIFIED`: the operator can no longer CLAIM a rediscovery the
+  frozen detector did not produce on the real code, nor OMIT a real one. **SAFETY
+  (Article III):** the detector reads fetched files as DATA (`scan_source` parses them,
+  e.g. `ast.parse`); no target code is executed — the module never `eval`/`exec`/imports
+  fetched content.
+
+- **FR-17 — Git-anchored genesis + attestation chaining (genesis completeness moves to
+  git).** A pure validator cannot verify GENESIS COMPLETENESS — that the committed
+  baseline is not itself a truncated, self-serving starting point. That check moves OUT
+  of the validator and into git: `benchmarks/harness/genesis_root.json`
+  (`{genesis_history_root, committed_at, note}`) is a committed, reviewable file whose
+  git history supplies the external timestamp and review the validator cannot;
+  `load_committed_genesis_root()` reads it. `Attestation` gains a required
+  `prior_attestation_root` folded into `attestation_root`, chaining each certification
+  to its committed predecessor. Strict certification requires the chain BASE (no
+  `prior_history`) to root in the committed genesis → else `GENESIS_UNANCHORED`, and a
+  chain EXTENSION (with `prior_history`) to append-only-EXTEND the prior committed
+  history → else `ATTESTATION_NOT_EXTENDING` — so no operator can silently re-anchor a
+  chain to a fresh, private genesis. Certification additionally requires a producing
+  evaluation (`semantic_evaluation_count == 1`, else `CERTIFY_WITHOUT_EVALUATION`), the
+  headline `adjudicated_precision` to be bound to a real `AdjudicatedPrecision` (else
+  `PRECISION_UNBOUND`) whose `k` equals the freeze-committed `committed_k` (else
+  `PRECISION_SAMPLE_UNBOUND`), and the certifier `evaluator_id` to differ from the
+  scored subject (else `CURATOR_IS_SUBJECT`). **The remaining residual is documented,
+  not code-closable:** the completeness of what the curator commits at genesis
+  (reviewable in git) and key custody — that the private signing key is held by a party
+  that is not the subject (organizational; the in-band `evaluator_id != subject` half is
+  enforced).
+
 ## Acceptance criteria
 
 1. An entry whose canonical fields change without a new identity hash fails `check`.
@@ -390,6 +431,42 @@ check.
     `UNANCHORED`. A forged signature, an omitted/tampered history version, a rewritten ledger
     entry, and a swapped pool are each rejected; a fully honest signed attestation is accepted.
 
+### Round-4 acceptance criteria (out-of-contract verification — attack the irreducible floor)
+
+An audit proved the residual an in-contract validator cannot reach: it cannot verify
+genesis completeness, input truthfulness (is the reported numerator TRUE?), or key
+custody. Round-4 attacks that floor with measures OUTSIDE the pure validator (FR-16
+verifier, FR-17 git-anchored genesis). Each maps to a dedicated regression test
+(`test_p1a`..`test_p1e`, `test_part2_*`, `test_part3_*` in
+`test_evaluation_contract.py`; the verifier's own tests in `test_verifier.py`). The
+honest object-builders and `scripts/smoke_008.sh` were updated to construct the new
+bound form, never by weakening a check.
+
+43. **(P1a/FR-17)** `Attestation` carries a required `prior_attestation_root` folded into
+    `attestation_root`. On the strict certify path a chain EXTENSION (with `prior_history`)
+    must append-only-extend the prior committed history, else `ATTESTATION_NOT_EXTENDING`;
+    an honest superset extension is accepted.
+44. **(P1b/FR-17)** Certification requires exactly one producing post-freeze evaluation
+    (`semantic_evaluation_count == 1`); a Report certified against a run with no producing
+    evaluation is `CERTIFY_WITHOUT_EVALUATION`.
+45. **(P1c/FR-17)** The certified `report.adjudicated_precision` must be bound to a presented,
+    panel-validated `AdjudicatedPrecision` with an equal `precision`; a free float with no
+    adjudication, or a bound value that disagrees, is `PRECISION_UNBOUND`.
+46. **(P1d/FR-17)** The freeze commits the precision sample size `committed_k` (inside the
+    bundle hash, before the seed is derivable); a precision whose `k` differs is
+    `PRECISION_SAMPLE_UNBOUND`.
+47. **(P1e/FR-17)** The certifier `attestation.evaluator_id` must differ from the scored
+    `run.subject`, else `CURATOR_IS_SUBJECT` (the code-checkable half of key custody; the
+    private-key holder remains an organizational, documented boundary).
+48. **(PART 2/FR-16)** The numerator is RECOMPUTED, not trusted: strict certification requires
+    `set(report.rediscovered_blind_ids)` to equal `recompute_rediscovered(blind, fetch_fn,
+    scan_fn)` (the frozen detector re-run on the real pinned SHAs, line-precise rule); a claim
+    the recompute does not confirm, an omission of a real rediscovery, or a missing recompute is
+    `NUMERATOR_UNVERIFIED`. The detector reads fetched files as DATA only (Article III intact).
+49. **(PART 3/FR-17)** `benchmarks/harness/genesis_root.json` is a git-committed genesis root;
+    `load_committed_genesis_root()` reads it. A chain BASE whose `prior_attestation_root` is not
+    the committed genesis is `GENESIS_UNANCHORED`; the honest chain rooted in it is accepted.
+
 ## Open questions
 
 - **Non-blocking.** Does the contract live in a new `benchmarks/harness/contract.py`
@@ -408,13 +485,17 @@ check.
 ## Success criteria
 
 A smoke (`scripts/smoke_008.sh`) builds a two-entry cohort `v1`, freezes a dummy
-detector (committing the confusion `pool_root`), records exactly one blind
-evaluation, binds a `Report`, builds and SIGNS an `Attestation`, and passes strict
-certification; then demonstrates each guard failing: an in-place entry edit, a
-silent denominator shrink, a second blind evaluation, and a curator==subject score,
-plus the cryptographic-anchoring fail-closed cases — a forged signature
+detector (committing the confusion `pool_root` and the precision `committed_k`),
+records exactly one blind evaluation, binds a `Report` and a panel-adjudicated
+precision, RECOMPUTES the numerator with a fake frozen detector re-run (FR-16), builds
+and SIGNS an `Attestation` chained to the git-committed genesis root (FR-17), and
+passes strict certification; then demonstrates each guard failing: an in-place entry
+edit, a silent denominator shrink, a second blind evaluation, and a curator==subject
+score, plus the cryptographic-anchoring fail-closed cases — a forged signature
 (`ATTESTATION_INVALID`), an omitted component (`ATTESTATION_INCOMPLETE`), and a
-certify path with no attestation (`UNANCHORED`) — each fail `check` with a typed
-reason. The `report` view prints blind recall as the headline alongside the four
-labeled secondaries. Only after this gate is green does the shared-kernel work in
-the tranche begin.
+certify path with no attestation (`UNANCHORED`) — plus the Round-4 out-of-contract
+guards: a numerator the frozen detector does not reproduce (`NUMERATOR_UNVERIFIED`, via
+a fake detector) and a chain base not rooted in the committed genesis
+(`GENESIS_UNANCHORED`) — each fail `check` with a typed reason. The `report` view
+prints blind recall as the headline alongside the four labeled secondaries. Only after
+this gate is green does the shared-kernel work in the tranche begin.
