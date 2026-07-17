@@ -38,12 +38,13 @@ from deepthought.schema import (
 from deepthought.schema.loop import ActionKind, LoopAction, LoopBudget
 from deepthought.store import FileStore
 
-from .conftest import make_finding, make_project
+from .conftest import make_coverage, make_finding, make_project
 
 runner = CliRunner()
 
-# The concise, truthful default the profile substitutes for a clean read-only
-# session's next steps. A distinctive phrase the tests key off.
+# The canned default the (removed) auto_next_steps streamline used to substitute.
+# It must NEVER appear now — the profile does not suppress a session's own next
+# steps. Tests key off this phrase as the string that must be ABSENT.
 AUTO_NEXT_SENTINEL = "No human action is required"
 
 
@@ -357,7 +358,7 @@ def test_ac9_no_executing_backend_referenced():
     from pathlib import Path
 
     for mod in (cli_mod, profile_mod):
-        path = Path(mod.__file__)
+        path = Path(mod.__file__).with_suffix(".py")
         imported, referenced, modules = _imports_and_names(path)
         # Never IMPORT the executing backend or its module.
         assert "DockerSandbox" not in imported, mod.__name__
@@ -481,7 +482,7 @@ def test_ac12_profile_has_no_field_that_registers_a_session_kind():
     # The exact, fixed field set — none of which names or registers a session kind.
     assert field_names == {
         "name", "low_ceremony_bases", "default_loop_budget",
-        "terse_output", "auto_next_steps", "default_root_from_local_path",
+        "terse_output", "default_root_from_local_path",
     }, field_names
 
 
@@ -729,7 +730,7 @@ def test_ac18_profiles_command_lists_exact_defaults(tmp_path, monkeypatch):
     budget = resolve_profile("mostly_harmless").default_loop_budget
     assert str(budget.max_sessions) in out
     assert "1800" in out and "200000" in out
-    assert "terse" in out.lower() and "auto_next_steps" in out.lower()
+    assert "terse" in out.lower()
     assert "root" in out.lower()
     # It documents the refusals it does NOT streamline.
     low = out.lower()
@@ -757,14 +758,13 @@ def _dataclass_fields(obj):
     return dataclasses.fields(obj)
 
 
-def test_terse_and_auto_next_steps_applied_to_clean_read_only(tmp_path):
-    """Positive: a clean, finding-neutral read-only session under the profile gets
-    the compact header (terse_output) and the truthful default next steps
-    (auto_next_steps). The persisted record keeps its own next steps (display-only
-    substitution — Article VI)."""
+def test_terse_applied_to_clean_read_only(tmp_path):
+    """A clean read-only session under the profile gets the compact one-line header
+    (terse_output). The body — including the session's own next steps — renders in
+    full; the profile never substitutes a canned default."""
     state = tmp_path / "state"
     repo = _repo(tmp_path)
-    store = _seed_project(
+    _seed_project(
         state, local_path=str(repo), git_url=None, scope_allowlist=["src"]
     )
 
@@ -776,12 +776,35 @@ def test_terse_and_auto_next_steps_applied_to_clean_read_only(tmp_path):
     # Terse: the compact one-liner header, NOT the four-field block.
     assert "gate=proceed" in on.output
     assert "gate    : proceed" not in on.output
-    # Auto next steps: the truthful default is displayed.
-    assert AUTO_NEXT_SENTINEL in on.output
-    # But the PERSISTED session keeps its own next steps (never rewritten).
-    sess = [s for s in store.list_sessions(project="php-src")
-            if s.type is SessionType.status][-1]
-    assert AUTO_NEXT_SENTINEL not in sess.body
+    # The profile NEVER substitutes a canned "no action required" default.
+    assert AUTO_NEXT_SENTINEL not in on.output
+
+
+def test_profile_status_preserves_verify_escalation(tmp_path):
+    """Regression (PR #37, codex review): a status run on a project that already has
+    a candidate finding is read-only (touches nothing this session), but its real
+    next step is to queue a VERIFY. The profile must NOT replace that guidance with
+    a canned default — a pending human escalation is never suppressed."""
+    state = tmp_path / "state"
+    repo = _repo(tmp_path)
+    store = _seed_project(
+        state, local_path=str(repo), git_url=None, scope_allowlist=["src"]
+    )
+    # Coverage present + a candidate → status suggests a VERIFY escalation (not MAP).
+    store.save_coverage(make_coverage())
+    store.save_finding(
+        make_finding(id="F-0001", project="php-src", status="candidate")
+    )
+
+    out = runner.invoke(
+        app, ["playbook", "status", "--state", str(state), "--project", "php-src",
+              "--profile", "mostly_harmless"]
+    )
+    assert out.exit_code == 0, out.output
+    # The real remediation guidance survives in full ...
+    assert "VERIFY" in out.output
+    # ... and the removed canned default never appears.
+    assert AUTO_NEXT_SENTINEL not in out.output
 
 
 def test_profile_is_frozen():

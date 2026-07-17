@@ -62,8 +62,6 @@ A named, opt-in, **purely ergonomic** `mostly_harmless` profile.
 - Defaulting `--root` to `project.local_path` on the read-only verbs.
 - `terse_output` for purely-informational post-work banners on the read-only
   verbs only.
-- `auto_next_steps` truthful default `## Next steps` for read-only,
-  finding-neutral clean sessions only.
 - A read-only `deepthought profiles` introspection command.
 - The full invariant test battery in [Acceptance criteria](#acceptance-criteria).
 
@@ -163,13 +161,14 @@ A named, opt-in, **purely ergonomic** `mostly_harmless` profile.
   references `DockerSandbox` or any executing backend. The `Profile` type carries
   no sandbox or execution field (Constitution III).
 
-- **FR-9 — Auto next-steps, read-only clean sessions only.** `auto_next_steps`
-  fills a truthful default `## Next steps` only for a read-only session
-  (`status`/`map`/`discover`/`sibling-hunt`) that did in-scope work and changed no
-  finding state. It is structurally inapplicable to `DISCLOSURE`, to any session
-  with non-empty `findings_touched`, and to the loop teach-back; those retain
-  their full human-gate text. An interrupted/exception path still leaves the
-  session interrupted (Constitution VI, V).
+- **FR-9 — The profile never suppresses a session's next steps.** A session's own
+  `## Next steps` — including a pending VERIFY escalation reported by a
+  candidate-bearing `status` — always renders in full; the profile only trims the
+  informational header (FR-7). An `auto_next_steps` streamline was specced but
+  **dropped in v1**: because a clean close requires a next-steps section
+  (`session.py`), the substitution could only ever override a session's real
+  guidance, which PR review confirmed suppressed a pending escalation. See Open
+  questions (Constitution VI, V).
 
 - **FR-10 — No output-path default.** The `Profile` type carries no `state_path`
   or output-directory default; drafts and artifacts are never written to a
@@ -231,10 +230,10 @@ Every test below must pass. Tests marked (RT) trace to a red-team finding in
 13. **Loop escalates, never executes** — the flag-free profile loop routes a
     candidate to `verify_escalation` and stops `hard_stop`; never runs a
     `VerifySession`; `VerifySession` stays out of the loop import closure. (FR-11, RT)
-14. **Auto-next-steps never touches disclosure/loop teach-back** — a profile-
-    active `disclose` still emits the full human-gate `## Next steps` (naming
-    "Sending is a human action"); a session with non-empty `findings_touched` is
-    never auto-closed; the loop teach-back still lists `disclosure_send`. (FR-9, RT)
+14. **Profile never suppresses a pending escalation** — a `status` on a project
+    with a candidate finding still shows its VERIFY guidance in full under the
+    profile; the canned "no action required" default never appears anywhere.
+    (FR-9, RT — PR #37 codex review)
 15. **Terse banner preserves transmission notice** — `publish` and `disclose`
     output under `terse_output` still contain "nothing was transmitted" and an
     explicit "human must review and send." (FR-7, RT)
@@ -264,9 +263,11 @@ Every test below must pass. Tests marked (RT) trace to a red-team finding in
 - **Non-blocking.** Should `check` gain an optional assertion that `--out`/
   `--state` resolve to a local, non-synced, non-symlink directory, backstopping
   the (now dropped) synced-path exfiltration risk for all modes?
-- **Non-blocking.** Is auto-filling `## Next steps` acceptable under Article VI's
-  durable-state discipline, or should the profile emit a template the operator
-  confirms? This is the most debatable streamline.
+- **Resolved (PR #37 review).** The `auto_next_steps` streamline was dropped in v1.
+  Because a clean close requires a next-steps section, the substitution could only
+  override a session's real guidance — codex and CodeRabbit both showed it
+  suppressed a pending VERIFY escalation / remediation step. The profile now never
+  substitutes next steps at all; a session's own guidance always renders.
 
 ## Success criteria
 
@@ -276,8 +277,8 @@ An end-to-end smoke (`scripts/smoke_007.sh`) demonstrates:
 2. With `DEEPTHOUGHT_PROFILE=mostly_harmless`: register an `own_code` project with
    an explicit `--scope`, run a flag-free `loop` that bounds itself with the
    profile default budget (printed), auto-advances only read-only sessions,
-   clean-closes them with truthful next-steps, surfaces any candidate as a human
-   `verify_escalation`, and transmits nothing.
+   surfaces any candidate as a human `verify_escalation` with its VERIFY guidance
+   intact, and transmits nothing.
 3. The full invariant battery in [Acceptance criteria](#acceptance-criteria) is
    green — every load-bearing stop behaves identically with the profile on and
    off.

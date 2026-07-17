@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -35,7 +34,7 @@ from .profile import (
 )
 from .protocol import HermesUltraCodeGate, run_session
 from .sandbox import NoopSandbox, SandboxError, SandboxPolicy, SandboxResult, SandboxSpec
-from .schema import CloseState, FindingStatus, GateOutcome, SessionType
+from .schema import FindingStatus, GateOutcome
 from .sessions import (
     DisclosureSession,
     DiscoverSession,
@@ -91,51 +90,9 @@ def _resolve_profile_or_exit(name: Optional[str]) -> Optional[Profile]:
         raise typer.Exit(code=2)
 
 
-# The concise, truthful default the profile substitutes for a clean read-only
-# session's next steps when ``auto_next_steps`` is on. It is a DISPLAY-only
-# substitution: the persisted Session record keeps its own next steps, so
-# durable state is never rewritten (Constitution Article VI; spec Open question 5).
-_AUTO_NEXT_STEPS = (
-    "Read-only recon complete: the gate proceeded, the session closed clean, no "
-    "finding state changed, and nothing was executed or transmitted. No human "
-    "action is required; re-run when the in-scope surface changes."
-)
-
-_NEXT_STEPS_RE = re.compile(r"(##\s+Next steps\s*\n\n).*\Z", re.DOTALL)
-
-
-def _auto_next_applies(record) -> bool:
-    """Whether ``auto_next_steps`` may substitute a truthful default for this
-    read-only session's next steps: only a gate-proceeded, clean-closed,
-    finding-neutral session that actually did in-scope work.
-
-    Structurally inapplicable to DISCLOSURE (never echoed read-only), to any
-    session with non-empty ``findings_touched`` (candidates DO owe a human a
-    verify escalation), and to the loop teach-back (a LoopRun, not a Session)."""
-    if record.gate_outcome is not GateOutcome.proceed:
-        return False
-    if record.close_state is not CloseState.clean:
-        return False
-    if record.findings_touched:
-        return False
-    # A MAP that mapped nothing (no checkout) still owes the operator a real next
-    # action — do not paper over it with a "no action required" default.
-    if record.type is SessionType.map and not record.coverage_changed:
-        return False
-    return True
-
-
-def _with_auto_next_steps(body: str) -> str:
-    """Substitute ONLY the displayed ## Next steps section with the truthful
-    default. Never mutates the persisted record."""
-    if _NEXT_STEPS_RE.search(body):
-        return _NEXT_STEPS_RE.sub(lambda m: m.group(1) + _AUTO_NEXT_STEPS, body)
-    return body.rstrip() + "\n\n## Next steps\n\n" + _AUTO_NEXT_STEPS
-
-
 def _echo_session(record, *, profile: Optional[Profile] = None,
                   read_only: bool = False) -> None:
-    # terse_output and auto_next_steps apply ONLY to the read-only verbs
+    # terse_output applies ONLY to the read-only verbs
     # (status/map/discover/sibling-hunt). verify/disclose pass no profile here, so
     # their sign-off/execution/transmission banners always render in full (FR-7).
     terse = bool(profile and profile.terse_output and read_only)
@@ -156,10 +113,11 @@ def _echo_session(record, *, profile: Optional[Profile] = None,
             typer.echo(f"reason  : {record.gate_reason}")
         typer.echo(f"close   : {record.close_state.value}")
     typer.echo("")
-    body = record.body
-    if profile and profile.auto_next_steps and read_only and _auto_next_applies(record):
-        body = _with_auto_next_steps(body)
-    typer.echo(body)
+    # The body — including the session's OWN next steps — always renders in full.
+    # The profile never substitutes or suppresses a session's guidance (e.g. a
+    # pending VERIFY escalation on a candidate-bearing status); it only trims the
+    # informational header above (terse_output).
+    typer.echo(record.body)
 
 
 def _maybe_scope_hint(profile: Optional[Profile], record) -> None:
@@ -446,6 +404,12 @@ def playbook_verify(
         )
         raise typer.Exit(code=2)
 
+    # Non-signoff path: validate the profile NAME for parity with every other verb
+    # (a typo'd --profile is still rejected), but AFTER the hard stop and WITHOUT
+    # letting the result alter execution posture — verify is a NoopSandbox dry-run
+    # under every profile value (FR-8, RT F2.2).
+    _resolve_profile_or_exit(profile)
+
     # --- default: a NoopSandbox dry-run that executes NOTHING --------------
     # The canned verdict is non-reproducing by default (a true dry-run: the
     # candidate is not promoted). --noop-reproduced flips ONLY the recorded verdict
@@ -603,7 +567,6 @@ def profiles() -> None:
         )
         typer.echo(f"  default_root_from_local_path: {prof.default_root_from_local_path}")
         typer.echo(f"  terse_output: {prof.terse_output}")
-        typer.echo(f"  auto_next_steps: {prof.auto_next_steps}")
         typer.echo(f"  low_ceremony_bases (descriptive only): {bases}")
         typer.echo("  scope: NEVER auto-filled — pass --scope (empty stays a HOLD)")
         typer.echo("  authorization basis: NEVER defaulted or guessed")

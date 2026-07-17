@@ -125,9 +125,15 @@ profile-carried `state_path` / output-directory default.
 With the three rejected streamlines removed and the mitigations above encoded as
 requirements, the profile changes only: a finite default loop budget, a
 read-only `--root` default, terse *informational* banners on read-only verbs,
-truthful auto next-steps for read-only finding-neutral sessions, and a read-only
-introspection command. It writes no scope, defaults no basis, carries no output
-path, adds no gate class, and cannot extend the loop repertoire. The four
+and a read-only introspection command. It writes no scope, defaults no basis,
+carries no output path, adds no gate class, and cannot extend the loop repertoire.
+
+**Update (PR #37 review).** The specced `auto_next_steps` streamline (F2.4 / F3.3)
+was **dropped in v1**. Because a clean close requires a next-steps section, the
+substitution could only override a session's real guidance — codex and CodeRabbit
+independently showed it suppressed a pending VERIFY escalation / remediation step.
+The profile now never substitutes next steps; a session's own guidance always
+renders. This closes F2.4 and F3.3 by removal rather than by guard. The four
 load-bearing stops are asserted to behave identically with the profile on and off
 by the **AC-1 default-mode-byte-for-byte** and the per-stop tests above. Whether
 `local_lab` ever earns its place is left as a gated constitutional decision, not a

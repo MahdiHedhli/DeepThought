@@ -166,10 +166,14 @@ from deepthought.store import FileStore
 FileStore(sys.argv[1]).save_finding(Finding.model_validate({
     "id": "F-9002", "project": sys.argv[2], "summary": "candidate for the verify hard stop"}))
 PY
-if "$DT" playbook verify --state "$STATE_B" --project "$PID" --finding F-9002 --i-have-sandbox-signoff; then
-  fail "verify --i-have-sandbox-signoff did not refuse under the profile"
-fi
-echo "verify hard stop held under the profile (exit non-zero, nothing executed)"
+set +e
+VERIFY_OUT="$("$DT" playbook verify --state "$STATE_B" --project "$PID" --finding F-9002 --i-have-sandbox-signoff 2>&1)"
+VERIFY_RC=$?
+set -e
+[ "$VERIFY_RC" -eq 2 ] || fail "verify --i-have-sandbox-signoff wrong exit ($VERIFY_RC, expected 2) under the profile"
+echo "$VERIFY_OUT" | grep -qi "verify refused"      || fail "verify refusal message missing under the profile"
+echo "$VERIFY_OUT" | grep -qi "Nothing was executed" || fail "verify did not assert nothing executed under the profile"
+echo "verify hard stop held under the profile (exit 2, refusal + 'nothing executed' asserted)"
 
 say "B.8 disclose drafts LOCALLY and transmits nothing (human gate preserved)"
 "$PY" - "$STATE_B" "$PID" <<'PY'

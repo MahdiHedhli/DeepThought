@@ -55,7 +55,7 @@ class Profile:
 
     Every field either fills an UNSET CLI default (``default_loop_budget``,
     ``default_root_from_local_path``) or trims purely-informational display
-    (``terse_output``, ``auto_next_steps``). No field can change a gate decision,
+    (``terse_output``). No field can change a gate decision,
     write scope, default a basis, choose an output path, or register a session
     kind. ``low_ceremony_bases`` is descriptive-only (used by ``profiles``).
     """
@@ -64,7 +64,6 @@ class Profile:
     low_ceremony_bases: frozenset[AuthorizationBasis]
     default_loop_budget: LoopBudget
     terse_output: bool = False
-    auto_next_steps: bool = False
     default_root_from_local_path: bool = False
 
     def __post_init__(self) -> None:
@@ -87,7 +86,6 @@ _MOSTLY_HARMLESS = Profile(
         max_context_tokens=200000,
     ),
     terse_output=True,
-    auto_next_steps=True,
     default_root_from_local_path=True,
 )
 
