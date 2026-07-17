@@ -250,6 +250,33 @@ subject, organizational].** After round-7 every certified numeric a validator ca
 committed state is recomputed, and every Report headline is structurally forced through signed
 certification; nothing code-closable remains.
 
+## Eighth wave (round-8): pin the recompute's INPUT BYTES; commit the sample; close the N-A holes
+
+An eighth audit found six survivors (one critical, one high, two medium, one low, one minor). The
+recompute RAN the committed detector but did not bind the BYTES it ran on; the precision sample was
+DERIVED from the grindable `freeze_hash`; certification was forced only on the blind headline; a
+POLICY_REFUSAL could launder a produced class to N/A when the run object was omitted;
+`produced_results` was unbound to any artifact; and an inert committed history root was not rejected.
+All are now closed. (Regression tests `test_r8_1_*` … `test_r8_6_*` plus the verifier-level
+`test_r8_1_recompute_rejects_doctored_input_bytes`.)
+
+| Hole | Bypass it left open | Now sealed by |
+|---|---|---|
+| R8-1 (CRITICAL) | the numerator recompute ran the committed detector, but `fetch_fn` returned bytes with NOTHING binding them to the pinned SHA — an attacker controlling the fetch source/cache feeds DOCTORED files so the detector "confirms" a false rediscovery | each `CohortEntry` commits per-target `vuln_blob_sha256` / `patched_blob_sha256` (sha256 of the bytes at `vuln_ref` / `patched_ref`), FOLDED INTO its identity hash (so it rides inside `history_root` + the signed attestation); the recompute requires `sha256(fetched bytes) == committed hash` for each (path, ref), and a missing commitment for a scored target is itself a failure — else `INPUT_BYTES_UNVERIFIED`. The detector provably runs on the EXACT committed pinned bytes (Article III: parsed as data, never executed) |
+| R8-2 (HIGH) | `precision_sample_seed = f(cohort, freeze_hash, run_id)` and `freeze_hash` is GRINDABLE (tweak an inert bundle param until the seed-derived sample is favorable, then honestly certify once, no re-eval) | the frozen bundle commits `committed_sample_root = merkle_root(sorted(sampled_pairs))` — drawn BEFORE adjudication from committed, non-grindable inputs (cohort identity, canonical pool, `k`), so it rides inside `bundle_hash` / `freeze_hash` + the attestation; `_check_precision_binding` requires the presented `sampled_pairs` to REPRODUCE it, and strict certification REQUIRES a non-empty committed sample_root — else `PRECISION_SAMPLE_UNBOUND`. Grinding the hash can no longer re-roll the sample |
+| R8-3 (MEDIUM) | R7-1 forced certification only on the blind numerator, so a SECONDARY scoring number (`fixed_cohort_recall`, a set `patched_alert_density`, a set `adjudicated_precision`) could be published via the default `check == validate` with no certification | `_report_asserts_numerator` fires for ANY non-trivial scoring numeric, so any such Report REQUIRES full signed certification (`UNANCHORED` otherwise), where R7-2's recompute/forbid binds each. A genuinely all-zero report asserts nothing |
+| R8-4 (MEDIUM) | the A2 guard fired only inside `if run is not None`, so a class whose committed detector actually RUNS and produces a mediocre result could be dropped to N/A by logging a POLICY_REFUSAL and OMITTING the run | a POLICY_REFUSAL is recompute-checked + certification-forced (symmetric to R7-1): VALID only if the committed detector for the class produces NOTHING on the head blind set (recompute, input-bytes-verified) OR no committed detector exists; else `POLICY_REFUSAL_ON_PRODUCED_RUN`, run object or not; an N/A POLICY_REFUSAL must be inside a signed certification (`UNANCHORED` otherwise). The AGGREGATE class-manifest completeness (no whole class silently omitted from the mean) is a documented follow-on, **feature 009** |
+| R8-5 (LOW) | N-1 real post-freeze evals could hide as `produced_results=False` "infra retries" | `EvalAttempt.results_hash` binds `produced_results`: a producing attempt carries a non-empty one, a non-producing infra retry an empty one (a retry carrying a results_hash is a concealed real eval) — enforced at record time + in `validate` (`INFRA_RETRY_REQUIRES_UNCHANGED`) |
+| R8-6 (minor) | `load_committed_genesis_state` claimed to fail closed on an inert root but only rejected the empty string | it rejects the inert `_CHAIN_GENESIS` / `_EMPTY_ROOT` sentinel for the `genesis_history_root` and `latest.history_root` (the truncation-anchor-critical roots `_history_reproduces_committed` binds against); the attestation/evaluation chain BASES stay their legitimate inert bootstrap sentinels until the first certify |
+
+**The FINAL per-cohort residual is exactly the two-part floor named above: (i) genesis-commit
+completeness — including, from feature 009, the AGGREGATE class-manifest that no whole class is
+silently omitted from the mean — which is git-reviewable, not validator-checkable; and (ii) ed25519
+private-key custody [curator ≠ subject, organizational].** After round-8 every certified numeric a
+validator can recompute is recomputed on the EXACT committed pinned bytes, the precision sample is
+committed rather than grindable, and no scoring number or N/A escapes signed certification; nothing
+code-closable remains at the per-cohort level.
+
 ## Sealing note (for the later cross-model evaluator)
 
 The exposure ledger and freeze manifest are the in-contract guarantees. The OS-level

@@ -44,14 +44,16 @@ from contract import (  # noqa: E402
     Report,
     ViolationReason,
     _canonical_run_id,
+    blob_sha256,
     build_attestation,
     ed25519_public_key,
     pool_root_of,
     precision_sample_seed,
     sample_confusion_pairs,
+    sample_root_of,
     validate,
 )
-from verifier import recompute_rediscovered  # noqa: E402
+from verifier import InputBytesUnverified, recompute_rediscovered  # noqa: E402
 
 # A FIXED test ed25519 keypair (F4): the PRIVATE seed signs, the derived PUBLIC key is what
 # the hermetic committed-state fixture commits and ``validate`` verifies against.
@@ -65,14 +67,21 @@ def _reasons(report):
     return {v.reason for v in report.violations}
 
 
-def _entry(vuln, patched, *, probe="sink(x)", repo="https://github.com/o/r", paths=("f.py",)):
+def _entry(vuln, patched, *, probe="sink(x)", repo="https://github.com/o/r", paths=("f.py",), files=None):
+    paths = list(paths)
+    # R8-1: commit the per-target blob sha256 from the fake corpus so the recompute's blob
+    # verification (default on) has a committed content address to check the fetched bytes against.
+    vuln_blobs = {p: blob_sha256(files[(vuln, p)]) for p in paths} if files is not None else {}
+    patched_blobs = {p: blob_sha256(files[(patched, p)]) for p in paths} if files is not None else {}
     return CohortEntry(
         repo=repo,
         vuln_ref=vuln,
         patched_ref=patched,
-        target_paths=list(paths),
+        target_paths=paths,
         sink_probe=probe,
         status="pinned",
+        vuln_blob_sha256=vuln_blobs,
+        patched_blob_sha256=patched_blobs,
         role="blind",
     ).sealed()
 
@@ -110,9 +119,9 @@ def fake_scan(source, uri):
     return out
 
 
-ENTRY_A = _entry("vulnA", "patchedA")
-ENTRY_B = _entry("vulnB", "patchedB")
-ENTRY_C = _entry("vulnC", "patchedC")
+ENTRY_A = _entry("vulnA", "patchedA", files=FILES)
+ENTRY_B = _entry("vulnB", "patchedB", files=FILES)
+ENTRY_C = _entry("vulnC", "patchedC", files=FILES)
 
 
 # --------------------------------------------------------------------------- #
@@ -128,6 +137,36 @@ def test_recompute_is_deterministic_and_order_independent():
     a = recompute_rediscovered([ENTRY_A, ENTRY_B, ENTRY_C], fetch_fn=fake_fetch, scan_fn=fake_scan)
     b = recompute_rediscovered([ENTRY_C, ENTRY_B, ENTRY_A], fetch_fn=fake_fetch, scan_fn=fake_scan)
     assert a == b == {ENTRY_A.computed_identity_hash}
+
+
+# --------------------------------------------------------------------------- #
+# R8-1 — the recompute runs on the EXACT committed pinned bytes. Each entry commits the
+# per-target blob sha256 (folded into identity); the recompute requires each fetched source to
+# reproduce it, so a doctored fetch source/cache cannot feed the detector altered bytes.
+# --------------------------------------------------------------------------- #
+def test_r8_1_recompute_rejects_doctored_input_bytes():
+    # matching bytes → the recompute proceeds and identifies the confirmed rediscovery
+    assert recompute_rediscovered([ENTRY_A], fetch_fn=fake_fetch, scan_fn=fake_scan) == {
+        ENTRY_A.computed_identity_hash
+    }
+
+    # a doctored fetch that returns bytes NOT reproducing the committed blob → InputBytesUnverified
+    def doctored_fetch(repo, ref, path):
+        return fake_fetch(repo, ref, path) + "\n# attacker-injected tail\n"
+
+    with pytest.raises(InputBytesUnverified):
+        recompute_rediscovered([ENTRY_A], fetch_fn=doctored_fetch, scan_fn=fake_scan)
+
+    # an entry that committed NO blob for a scored target also fails closed — the binding is not
+    # skippable by leaving the committed hash empty
+    naked = _entry("vulnA", "patchedA")  # files=None → no committed blobs
+    with pytest.raises(InputBytesUnverified):
+        recompute_rediscovered([naked], fetch_fn=fake_fetch, scan_fn=fake_scan)
+
+    # verify_blobs=False is the ONLY escape (legacy pure-function use; the certify path never uses it)
+    assert recompute_rediscovered(
+        [naked], fetch_fn=fake_fetch, scan_fn=fake_scan, verify_blobs=False
+    ) == {naked.computed_identity_hash}
 
 
 # --------------------------------------------------------------------------- #
@@ -165,15 +204,22 @@ def _certify_with_claim(monkeypatch, cohort, claimed_entries, *, detector_id="d"
     blind = sorted(e.computed_identity_hash for e in cohort.entries)
     pool = [f"p{i:02d}" for i in range(12)]
     committed_k = 3
+    # R8-2: commit the precision sample_root in the frozen bundle (decoupled from freeze_hash).
+    sample_seed = precision_sample_seed(cohort.content_hash, pool_root_of(pool), str(committed_k))
+    sampled = sample_confusion_pairs(pool, committed_k, sample_seed)
     bundle = DetectorBundle(
-        detector_id=detector_id, lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k
+        detector_id=detector_id, lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k,
+        committed_sample_root=sample_root_of(sampled),
     )
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     rid = _canonical_run_id(cohort.content_hash, freeze.freeze_hash, "codex")
     run = EvaluationRun(
         run_id=rid, subject="codex", cohort_content_hash=cohort.content_hash, freeze_hash=freeze.freeze_hash
     )
-    run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+    # R8-5: a producing attempt carries a non-empty results_hash.
+    run.attempt_evaluation(
+        phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", results_hash="R1"
+    )
     report = Report(
         blind_recall=RecallReport(rediscovered=len(claimed_entries), total=len(blind)),
         fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
@@ -183,16 +229,11 @@ def _certify_with_claim(monkeypatch, cohort, claimed_entries, *, detector_id="d"
         cohort_content_hash=cohort.content_hash,
         rediscovered_blind_ids=[e.identity_hash for e in claimed_entries],
     )
-    seed = precision_sample_seed(cohort.content_hash, freeze.freeze_hash, rid)
-    sampled = sample_confusion_pairs(pool, committed_k, seed)
     precision = AdjudicatedPrecision(
-        seed=seed,
+        seed=sample_seed,
         sampled_pairs=sampled,
         pool=pool,
         k=committed_k,
-        cohort_hash=cohort.content_hash,
-        freeze_hash=freeze.freeze_hash,
-        run_id=rid,
         adjudications=[
             Adjudication(
                 pair_id=p,
@@ -307,6 +348,10 @@ def test_recompute_matches_manifest_on_one_real_pinned_pair():
 
     gradio = heldout["CVE-2024-4325"]
     assert "CVE-2024-4325" in recorded_rediscovered  # manifest records it as rediscovered
+    # R8-1: commit the per-target blob sha256 from the REAL fetched pinned bytes, then recompute
+    # with blob verification ON — proving the real GitHub bytes hash to the committed value.
+    vuln_blobs = {p: blob_sha256(corpus_measure.fetch(gradio["repo"], gradio["vuln_ref"], p)) for p in gradio["target_paths"]}
+    patched_blobs = {p: blob_sha256(corpus_measure.fetch(gradio["repo"], gradio["patched_ref"], p)) for p in gradio["target_paths"]}
     entry = CohortEntry(
         repo=gradio["repo"],
         vuln_ref=gradio["vuln_ref"],
@@ -314,6 +359,8 @@ def test_recompute_matches_manifest_on_one_real_pinned_pair():
         target_paths=gradio["target_paths"],
         sink_probe=gradio["sink_probe"],
         status="pinned",
+        vuln_blob_sha256=vuln_blobs,
+        patched_blob_sha256=patched_blobs,
         role="blind",
     ).sealed()
 

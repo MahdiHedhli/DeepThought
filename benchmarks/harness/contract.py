@@ -62,6 +62,17 @@ def _content_hash(obj: Any) -> str:
     return _sha256(_canonical_json(obj))
 
 
+def blob_sha256(source: str) -> str:
+    """R8-1: the sha256 of a fetched target file's UTF-8 bytes — the per-target CONTENT hash a
+    ``CohortEntry`` commits (``vuln_blob_sha256`` / ``patched_blob_sha256``) and folds into its
+    identity. The numerator recompute (``verifier``) requires each fetched source to reproduce
+    this committed hash, so an attacker controlling the fetch source/cache cannot feed the
+    detector DOCTORED bytes and have it "confirm" a false rediscovery. The fetcher returns text
+    decoded UTF-8, so hashing ``source.encode('utf-8')`` is the machine-independent content
+    address of exactly the bytes the detector parses."""
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
 # --------------------------------------------------------------------------- #
 # Cryptographic anchoring primitives (Part B) — stdlib-only, DETERMINISTIC
 # --------------------------------------------------------------------------- #
@@ -198,8 +209,26 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
     # F2: the committed EvaluationLedger root. An absent value means "no eval has certified
     # yet", i.e. the empty-ledger root — a well-defined, reproducible baseline.
     latest_evaluation = latest.get("evaluation_root") or _EMPTY_ROOT
+    # R8-6: fail closed on an INERT committed HISTORY root. ``_history_reproduces_committed``
+    # anchors any prefix that reproduces the committed prior history root, so an inert root
+    # (the empty ``chain_root([])`` genesis) would let a TRUNCATED cohort "anchor" against the
+    # empty prefix — exactly what the docstring promises to reject. The immutable
+    # ``genesis_history_root`` and the advancing ``latest.history_root`` must therefore be REAL,
+    # non-inert commitments. (The attestation/evaluation chain BASES are legitimately their inert
+    # bootstrap sentinels until the first certify, so they are not rejected here.)
+    _inert_history_roots = {_CHAIN_GENESIS, _EMPTY_ROOT}
+    if genesis in _inert_history_roots:
+        raise ValueError(
+            f"{path or _GENESIS_ROOT_PATH}: genesis_history_root is the inert empty-chain root; a "
+            "truncated cohort would anchor against it (fail closed)"
+        )
     if not isinstance(latest_history, str) or not latest_history:
         raise ValueError("latest.history_root must be a non-empty string")
+    if latest_history in _inert_history_roots:
+        raise ValueError(
+            "latest.history_root is the inert empty-chain root; a truncated cohort would anchor "
+            "against it (fail closed)"
+        )
     if not isinstance(latest_attestation, str) or not latest_attestation:
         raise ValueError("latest.attestation_root must be a non-empty string")
     if not isinstance(latest_evaluation, str) or not latest_evaluation:
@@ -476,6 +505,10 @@ class ViolationReason(str, Enum):
     FIXED_COHORT_UNVERIFIED = "certified-fixed-cohort-recall-does-not-match-the-recomputed-regression-run"
     DENSITY_UNVERIFIED = "certified-patched-alert-density-does-not-match-the-recomputed-patched-tree-flags"
     COVERAGE_UNBOUND = "certified-report-carries-a-free-secondary-numeric-not-recomputable-from-committed-state"
+    # Round-8 input-truthfulness + sample-commitment seals (R8-1, R8-2): the numerator recompute
+    # runs on the EXACT committed pinned bytes, and the precision sample is committed at freeze
+    # time rather than derived from the grindable freeze_hash.
+    INPUT_BYTES_UNVERIFIED = "recomputed-input-bytes-do-not-match-the-committed-per-target-blob-sha256"
 
 
 class ContractViolation(Exception):
@@ -535,6 +568,15 @@ class CohortEntry(BaseModel):
     status: str = "pinned"
     drop_reason: Optional[str] = None
 
+    # R8-1: the per-target CONTENT hash of the pinned bytes — ``{path: sha256(bytes)}`` at
+    # ``vuln_ref`` / ``patched_ref``. Committed here and FOLDED INTO the identity hash (so the
+    # committed bytes ride inside history_root + the signed attestation), the numerator recompute
+    # requires each fetched source to reproduce these, closing the doctored-fetch hole. Left empty
+    # they are omitted from the identity (backwards-compatible for cases with no committed bytes),
+    # but the strict certify recompute REQUIRES them for every scored blind target.
+    vuln_blob_sha256: dict[str, str] = Field(default_factory=dict)
+    patched_blob_sha256: dict[str, str] = Field(default_factory=dict)
+
     role: Role
     guided_fix: bool = False  # has this entry ever guided a fix? (FR-4)
 
@@ -545,17 +587,23 @@ class CohortEntry(BaseModel):
 
     @property
     def computed_identity_hash(self) -> str:
-        return _content_hash(
-            {
-                "repo": self.repo,
-                "vuln_ref": self.vuln_ref,
-                "patched_ref": self.patched_ref,
-                "target_paths": sorted(self.target_paths),
-                "sink_probe": self.sink_probe,
-                "status": self.status,
-                "drop_reason": self.drop_reason or "",
-            }
-        )
+        payload = {
+            "repo": self.repo,
+            "vuln_ref": self.vuln_ref,
+            "patched_ref": self.patched_ref,
+            "target_paths": sorted(self.target_paths),
+            "sink_probe": self.sink_probe,
+            "status": self.status,
+            "drop_reason": self.drop_reason or "",
+        }
+        # R8-1: fold the committed per-target content hashes into identity when present. Included
+        # only when non-empty so a case with no committed bytes keeps its historical identity;
+        # once bytes are committed, editing them (or the pin they were taken at) breaks the seal.
+        if self.vuln_blob_sha256:
+            payload["vuln_blob_sha256"] = dict(sorted(self.vuln_blob_sha256.items()))
+        if self.patched_blob_sha256:
+            payload["patched_blob_sha256"] = dict(sorted(self.patched_blob_sha256.items()))
+        return _content_hash(payload)
 
     @property
     def identity_hash(self) -> str:
@@ -715,6 +763,17 @@ class DetectorBundle(BaseModel):
     # Left 0 the check is inert (backwards-compatible); set, precision binding requires
     # ``precision.k == committed_k``.
     committed_k: int = 0
+    # R8-2: the committed PRECISION SAMPLE root — ``merkle_root`` over the sorted sampled pairs
+    # (see :func:`sample_root_of`). The precision sample was previously derived from
+    # ``precision_sample_seed(cohort, freeze_hash, run_id)`` and ``freeze_hash`` is GRINDABLE
+    # (tweak an inert bundle param until the seed-derived sample is favorable, then certify once
+    # with no re-eval). Committing the sample explicitly INSIDE the frozen bundle — BEFORE any
+    # adjudication — pins it: it rides inside ``bundle_hash`` / ``freeze_hash`` and the signed
+    # attestation, and ``_check_precision_binding`` requires the presented sample to REPRODUCE
+    # it, so grinding the hash can no longer re-roll the sample. Left empty the check is inert
+    # (legacy freeze-derived path); set, it is the authoritative sample commitment and the
+    # strict certify path REQUIRES it (``PRECISION_SAMPLE_UNBOUND`` otherwise).
+    committed_sample_root: str = ""
 
     @property
     def bundle_hash(self) -> str:
@@ -728,6 +787,14 @@ def pool_root_of(pool: list[str]) -> str:
     (sorted, unique) confusion-pair pool. The freeze commits this; the precision
     check later requires the presented pool to reproduce it."""
     return merkle_root([leaf_hash(p) for p in sorted(set(pool))])
+
+
+def sample_root_of(sampled_pairs: list[str]) -> str:
+    """R8-2: the committed precision-sample root — ``merkle_root`` over the sorted sampled
+    pairs. The freeze commits this at freeze time; :func:`_check_precision_binding` later
+    requires the presented ``sampled_pairs`` to reproduce it, so the sample is fixed BEFORE
+    adjudication and cannot be re-derived by grinding the freeze hash."""
+    return merkle_root([leaf_hash(p) for p in sorted(sampled_pairs)])
 
 
 class FreezeManifest(BaseModel):
@@ -754,6 +821,11 @@ class FreezeManifest(BaseModel):
     def committed_k(self) -> int:
         """P1d: the precision sample size ``k`` committed inside the frozen bundle."""
         return self.bundle.committed_k
+
+    @property
+    def sample_root(self) -> str:
+        """R8-2: the precision-sample root committed inside the frozen bundle."""
+        return self.bundle.committed_sample_root
 
 
 # --------------------------------------------------------------------------- #
@@ -932,6 +1004,14 @@ class EvalAttempt(BaseModel):
     # post-freeze attempt's ``freeze_hash`` to equal the FreezeManifest's hash, so
     # you cannot freeze bundle B and then evaluate an unrelated bundle B'.
     freeze_hash: str = ""
+    # R8-5: a content hash BINDING ``produced_results``. A real evaluation produces detector
+    # results and therefore a non-empty ``results_hash``; a non-producing "infra retry" produces
+    # nothing and MUST carry an empty one. So N-1 real post-freeze evals can no longer hide as
+    # ``produced_results=False`` "retries": a non-producing attempt carrying a results_hash is a
+    # concealed real run (``INFRA_RETRY_REQUIRES_UNCHANGED``), and a producing attempt with an
+    # empty results_hash is unbound. Enforced at record time (``attempt_evaluation``) AND in
+    # ``validate`` (``_check_blind_access``) so a from-storage rebuild cannot dodge it.
+    results_hash: str = ""
 
 
 class EvaluationRun(BaseModel):
@@ -971,9 +1051,17 @@ class EvaluationRun(BaseModel):
         artifact_hash: str = "",
         env_hash: str = "",
         logs_intact: bool = True,
+        results_hash: str = "",
     ) -> EvalAttempt:
         """Record one evaluation attempt, refusing anything the contract forbids.
         Raises ``ContractViolation`` (nothing is recorded on refusal)."""
+        # R8-5: a non-producing "infra retry" produced no detector results, so it MUST carry an
+        # empty results_hash — a retry carrying one is a concealed real evaluation.
+        if not produced_results and results_hash:
+            raise ContractViolation(
+                ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED,
+                "a non-producing infra retry must carry an empty results_hash",
+            )
         if phase == "pre_freeze":
             # Zero blind-cohort attempts before freeze — even attempting is a leak.
             raise ContractViolation(
@@ -1011,6 +1099,7 @@ class EvaluationRun(BaseModel):
             logs_intact=logs_intact,
             # A4: bind the attempt to the freeze it ran under.
             freeze_hash=self.freeze_hash or "",
+            results_hash=results_hash,
         )
         self.attempts.append(attempt)
         return attempt
@@ -1672,6 +1761,10 @@ def validate(
     is likewise ``UNANCHORED``. The rest of the non-strict path is unchanged, so existing
     per-check tests are unaffected."""
     result = ContractReport()
+    # Certification is active when strict is set OR a signed attestation is supplied. Computed
+    # up front so the R8-4 POLICY_REFUSAL check and the R7-1/R8-3 structural-report check share
+    # one definition.
+    _certifying = strict or attestation is not None
 
     try:
         if history is not None:
@@ -1721,6 +1814,25 @@ def validate(
                         f"run {run.run_id}: produced results but presents no bound Report",
                     )
 
+        # R8-4: a POLICY_REFUSAL scores a class N/A — but that is only honest when production is
+        # PROVABLY ABSENT. The A2 guard above only fires inside ``if run is not None``, so a class
+        # whose committed detector actually RUNS and produces a mediocre result could be dropped to
+        # N/A by logging a POLICY_REFUSAL and OMITTING the run. Symmetric to R7-1, the refusal is
+        # now recompute-checked AND certification-forced, run object or not: (a) an N/A POLICY_REFUSAL
+        # must be inside a signed certification (else UNANCHORED); (b) it is VALID only if the
+        # committed detector for the class produces NOTHING on the head blind set (recompute) OR no
+        # committed detector exists — else POLICY_REFUSAL_ON_PRODUCED_RUN. (The AGGREGATE class-manifest
+        # completeness — that a whole class cannot be silently omitted from the mean — is feature 009.)
+        if exclusions is not None and any(
+            e.reason is ExclusionReason.POLICY_REFUSAL for e in exclusions.events
+        ):
+            if not _certifying:
+                result.add(
+                    ViolationReason.UNANCHORED,
+                    "a POLICY_REFUSAL that scores a class N/A must be inside a signed certification",
+                )
+            _check_policy_refusal_production(history, freeze, result)
+
         if freeze is not None:
             _check_freeze_binding(freeze, run, history, result)
 
@@ -1734,7 +1846,6 @@ def validate(
             _check_achievability(achievability, prior_achievability, result)
 
         # Part B5 — the certify path. Additive: it runs after every ordinary check.
-        _certifying = strict or attestation is not None
         # R7-1 / F3: certification is STRUCTURAL on the REPORT, not opt-in and not keyed on the
         # run's produced flag. ANY presented Report that asserts a numerator (a rediscovery
         # claim) REQUIRES full, signed certification — so the default ``check = validate`` alias
@@ -1783,18 +1894,65 @@ def _run_produced_results(run: EvaluationRun) -> bool:
     return any(a.produced_results for a in run.post_freeze_attempts)
 
 
+def _check_policy_refusal_production(
+    history: Optional[CohortHistory], freeze: Optional[FreezeManifest], result: ContractReport
+) -> None:
+    """R8-4: a POLICY_REFUSAL that scores a class N/A is valid ONLY if the committed detector for
+    that class produces NOTHING on the head blind set (recompute) OR no committed detector exists
+    (a genuine builder-declined class). If the committed detector produces ANY rediscovery on the
+    real pinned bytes, the run was PRODUCED and cannot be laundered to N/A — even with the run
+    object omitted — so this fails ``POLICY_REFUSAL_ON_PRODUCED_RUN``. The recompute RUNS the
+    committed detector (resolved from the frozen ``detector_id``) from committed state, never a
+    caller argument, and is INPUT-BYTES-verified (R8-1). SAFETY (Article III): the detector parses
+    the fetched source as DATA; no target code is executed."""
+    scored = history.latest() if history is not None else None
+    if freeze is None or scored is None:
+        # No committed detector/cohort to resolve → treat as no committed detector (allowed).
+        return
+    import verifier  # local import: verifier -> corpus_measure, no cycle back to contract
+
+    try:
+        produced = verifier.recompute_certified_numerator(
+            scored.by_role(Role.BLIND), detector_id=freeze.bundle.detector_id
+        )
+    except KeyError:
+        # No committed detector registered for this class → genuine builder-declined (allowed).
+        return
+    except Exception as exc:  # noqa: BLE001 — cannot PROVE absence of production → fail closed
+        result.add(
+            ViolationReason.POLICY_REFUSAL_ON_PRODUCED_RUN,
+            f"a POLICY_REFUSAL scores the class N/A but the committed detector could not be proven "
+            f"to produce nothing (detector_id={freeze.bundle.detector_id!r}): {exc}",
+        )
+        return
+    if produced:
+        result.add(
+            ViolationReason.POLICY_REFUSAL_ON_PRODUCED_RUN,
+            "a POLICY_REFUSAL scores the class N/A, but the committed detector produces a "
+            f"rediscovery on the head blind set ({len(produced)}); the run was produced, not refused",
+        )
+
+
 def _report_asserts_numerator(report: Optional["Report"]) -> bool:
-    """R7-1: True iff a presented Report makes a rediscovery CLAIM — a non-zero blind
-    numerator or denominator, or a non-empty rediscovered set. Certification is STRUCTURAL
-    on the Report: any such claim REQUIRES full, signed certification, so even the default
-    ``check = validate`` alias cannot bless an unanchored/truncated headline. A genuinely
-    empty report (0/0, no rediscovered ids) asserts nothing and stays exempt."""
+    """R7-1 + R8-3: True iff a presented Report makes ANY non-trivial SCORING claim — not only
+    the blind headline (a non-zero blind numerator/denominator or a non-empty rediscovered set)
+    but ALSO any secondary scoring numeric: a non-zero ``fixed_cohort_recall``, a set
+    ``patched_alert_density``, or a set ``adjudicated_precision``. Certification is STRUCTURAL on
+    the Report: any such claim REQUIRES full, signed certification, so even the default
+    ``check = validate`` alias cannot bless an unanchored/truncated number — R7-2's
+    recompute/forbid then binds each certified numeric. A genuinely empty report (all-zero, no
+    rediscovered ids) asserts nothing and stays exempt."""
     if report is None:
         return False
     return bool(
         report.blind_recall.total > 0
         or report.blind_recall.rediscovered > 0
         or report.rediscovered_blind_ids
+        # R8-3: a secondary scoring numeric is just as much a published number as the headline.
+        or report.fixed_cohort_recall.total > 0
+        or report.fixed_cohort_recall.rediscovered > 0
+        or report.patched_alert_density > 0
+        or report.adjudicated_precision > 0
     )
 
 
@@ -1985,6 +2143,24 @@ def _check_blind_access(run: EvaluationRun, report: ContractReport) -> None:
                 report.add(
                     ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED,
                     f"run {run.run_id}: post-freeze artifact/env hashes changed across attempts",
+                )
+                break
+        # R8-5: bind produced_results to results_hash. A producing attempt MUST carry a
+        # non-empty results_hash; a non-producing "infra retry" MUST carry an empty one — else a
+        # from-storage rebuild could hide N-1 real evals as produced_results=False "retries".
+        for attempt in post:
+            if attempt.produced_results and not attempt.results_hash:
+                report.add(
+                    ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED,
+                    f"run {run.run_id}: a producing post-freeze attempt carries an empty results_hash",
+                )
+                break
+        for attempt in post:
+            if not attempt.produced_results and attempt.results_hash:
+                report.add(
+                    ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED,
+                    f"run {run.run_id}: a non-producing infra retry carries a results_hash "
+                    "(a concealed real evaluation)",
                 )
                 break
 
@@ -2270,11 +2446,16 @@ def _check_precision_binding(
     freeze: Optional[FreezeManifest],
     report: ContractReport,
 ) -> None:
-    """Route precision through validate (H8/R8). The seed must be the deterministic
-    ``precision_sample_seed`` over THIS run's (cohort, freeze, run_id); a precision
-    computed over some other context — a re-rolled sample — is rejected. R8 (P1): a
-    precision object presented with no run/freeze to bind to is itself unbound — it is
-    not silently accepted."""
+    """Route precision through validate (H8/R8/R8-2). R8 (P1): a precision object presented with
+    no run/freeze to bind to is itself unbound — it is not silently accepted.
+
+    R8-2 changes the SAMPLE authority. Previously the sample had to be the deterministic draw at
+    ``precision_sample_seed(cohort, freeze_hash, run_id)`` — but ``freeze_hash`` is GRINDABLE, so
+    an operator could tweak an inert bundle param until the seed-derived sample was favorable.
+    When the freeze commits a ``sample_root`` (:attr:`FreezeManifest.sample_root`), the sample is
+    pinned to that committed value INSTEAD: the presented ``sampled_pairs`` must reproduce it, so
+    grinding the hash cannot re-roll the sample. The legacy freeze-derived-seed check is kept only
+    for the backwards-compatible path where no ``sample_root`` was committed."""
     if run is None or freeze is None:
         report.add(
             ViolationReason.PRECISION_SAMPLE_UNBOUND,
@@ -2296,12 +2477,23 @@ def _check_precision_binding(
             ViolationReason.PRECISION_SAMPLE_UNBOUND,
             "precision freeze_hash does not equal the frozen bundle hash",
         )
-    expected_seed = precision_sample_seed(run.cohort_content_hash, freeze.freeze_hash, run.run_id)
-    if precision.seed != expected_seed:
-        report.add(
-            ViolationReason.PRECISION_SAMPLE_UNBOUND,
-            "precision seed is not precision_sample_seed(cohort, freeze, run_id) for this run",
-        )
+    if freeze.sample_root:
+        # R8-2: the committed sample is authoritative. The presented sample must reproduce the
+        # freeze's ``sample_root``; the grindable freeze-derived seed no longer decides it.
+        if sample_root_of(precision.sampled_pairs) != freeze.sample_root:
+            report.add(
+                ViolationReason.PRECISION_SAMPLE_UNBOUND,
+                "precision sampled_pairs do not reproduce the committed freeze sample_root "
+                "(the sample was fixed at freeze time, before adjudication)",
+            )
+    else:
+        # Legacy (no committed sample): the sample must be the freeze-derived deterministic draw.
+        expected_seed = precision_sample_seed(run.cohort_content_hash, freeze.freeze_hash, run.run_id)
+        if precision.seed != expected_seed:
+            report.add(
+                ViolationReason.PRECISION_SAMPLE_UNBOUND,
+                "precision seed is not precision_sample_seed(cohort, freeze, run_id) for this run",
+            )
     # B4: when the freeze committed a pool_root, the presented pool MUST reproduce it.
     # Combined with A6's canonical draw, the sample is then a pure function of the
     # membership frozen BEFORE the seed was derivable — a swapped pool is rejected.
@@ -2488,6 +2680,14 @@ def _check_certification(
                 f"certification requires a committed_k >= min(|pool|, {_MIN_PRECISION_SAMPLE_K}); "
                 f"committed_k={freeze.committed_k} is inert/too small",
             )
+        # R8-2: the precision sample must be COMMITTED in the frozen bundle (not derived from the
+        # grindable freeze_hash). An inert sample_root leaves the sample re-rollable by grinding.
+        if not freeze.sample_root:
+            result.add(
+                ViolationReason.PRECISION_SAMPLE_UNBOUND,
+                "certification requires a non-empty committed freeze sample_root (the precision "
+                "sample must be committed at freeze time, not derived from the grindable freeze_hash)",
+            )
 
     # ----------------------------------------------------------------------- #
     # Round-4/5 — attack the irreducible floor a pure validator cannot reach.
@@ -2624,6 +2824,14 @@ def _check_certification(
                 recomputed = verifier.recompute_certified_numerator(
                     blind_entries, detector_id=freeze.bundle.detector_id
                 )
+            except verifier.InputBytesUnverified as exc:
+                # R8-1: the fetched pinned bytes do not reproduce the committed per-target blob
+                # sha256 — a doctored fetch source/cache. Fail closed on INPUT truthfulness.
+                result.add(
+                    ViolationReason.INPUT_BYTES_UNVERIFIED,
+                    f"the numerator recompute ran on bytes that do not match the committed pinned "
+                    f"content (detector_id={freeze.bundle.detector_id!r}): {exc}",
+                )
             except Exception as exc:  # noqa: BLE001 — an un-recomputable numerator fails closed
                 result.add(
                     ViolationReason.NUMERATOR_UNVERIFIED,
@@ -2666,6 +2874,12 @@ def _check_certification(
                 fixed_rediscovered, fixed_total = verifier.recompute_fixed_cohort_recall(
                     regression_entries, detector_id=freeze.bundle.detector_id
                 )
+            except verifier.InputBytesUnverified as exc:
+                result.add(
+                    ViolationReason.INPUT_BYTES_UNVERIFIED,
+                    f"the fixed_cohort_recall recompute ran on bytes that do not match the committed "
+                    f"pinned content (detector_id={freeze.bundle.detector_id!r}): {exc}",
+                )
             except Exception as exc:  # noqa: BLE001 — an un-recomputable fixed cohort fails closed
                 result.add(
                     ViolationReason.FIXED_COHORT_UNVERIFIED,
@@ -2689,6 +2903,12 @@ def _check_certification(
             try:
                 density = verifier.recompute_patched_alert_density(
                     scored.by_role(Role.BLIND), detector_id=freeze.bundle.detector_id
+                )
+            except verifier.InputBytesUnverified as exc:
+                result.add(
+                    ViolationReason.INPUT_BYTES_UNVERIFIED,
+                    f"the patched_alert_density recompute ran on bytes that do not match the committed "
+                    f"pinned content (detector_id={freeze.bundle.detector_id!r}): {exc}",
                 )
             except Exception as exc:  # noqa: BLE001 — an un-recomputable density fails closed
                 result.add(

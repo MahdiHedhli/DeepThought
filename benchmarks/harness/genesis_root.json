@@ -1,7 +1,7 @@
 {
-  "genesis_history_root": "7587b7366b0d030f9e31050528efea20d4c2cda3dd395ef386f3c90647ab1a71",
+  "genesis_history_root": "f9edd2e23cae437cb2b777ace463b1f13ef602bc573351e66507c21fbac1bc2a",
   "latest": {
-    "history_root": "7587b7366b0d030f9e31050528efea20d4c2cda3dd395ef386f3c90647ab1a71",
+    "history_root": "f9edd2e23cae437cb2b777ace463b1f13ef602bc573351e66507c21fbac1bc2a",
     "attestation_root": "8c526a9d4835abcbc3c33b41411c52b44e7dfbc2ad9146c47e2b54647cd3d327",
     "evaluation_root": "4a0fcca3f3bf31f937077c8fc8019d82ae6ea42c6c6e204311190c6feba2e296"
   },

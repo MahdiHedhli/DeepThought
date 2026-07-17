@@ -18,9 +18,11 @@
 # produced+reported run with no certification (F3, UNANCHORED), the round-7 structural
 # seals — the default `check` REFUSING an unanchored Report headline (R7-1, UNANCHORED)
 # and a certified report carrying a FREE secondary numeric failing closed (R7-2,
-# COVERAGE_UNBOUND). Finally prints the Report with blind recall as the headline plus the
-# four labelled secondaries. Exit 0 on success (all positives pass AND all guards trip with
-# the expected reason).
+# COVERAGE_UNBOUND), and the round-8 seals — a DOCTORED fetch whose bytes do not reproduce the
+# committed per-target blob sha256 (R8-1, INPUT_BYTES_UNVERIFIED) and a re-rolled precision
+# sample that does not reproduce the committed freeze sample_root (R8-2, PRECISION_SAMPLE_UNBOUND).
+# Finally prints the Report with blind recall as the headline plus the four labelled secondaries.
+# Exit 0 on success (all positives pass AND all guards trip with the expected reason).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -57,6 +59,7 @@ from contract import (
     ViolationReason,
     ContractViolation,
     _canonical_run_id,
+    blob_sha256,
     build_attestation,
     check,
     ed25519_public_key,
@@ -66,6 +69,7 @@ from contract import (
     pool_root_of,
     precision_sample_seed,
     sample_confusion_pairs,
+    sample_root_of,
     validate,
 )
 import hashlib
@@ -88,14 +92,38 @@ assert ed25519_public_key(SIGNING_KEY) == load_committed_verify_key(), (
 )
 
 
+PATCHED_REF = "c135ec4b08d946a1a1d3a198a1d72c1ccf47250f"
+TARGET_PATH = "api/core/rag/extractor/word_extractor.py"
+E2_VULN_REF = "819a80836e991ca3f427b0e85faca159083d3d40"
+
+# PART 2 / R5-1: the certify path RECOMPUTES the numerator ITSELF by re-running the COMMITTED
+# detector on the pinned SHAs. R8-1: each blind CohortEntry commits the per-target sha256 of the
+# bytes at (vuln_ref/patched_ref, path); the recompute requires the fetched bytes to reproduce it.
+# Here we use a (fake, deterministic) frozen detector + fetcher so the smoke is hermetic (production
+# resolves the real ssrf_detector + GitHub-raw fetcher). A marker-driven fake detector flags the
+# blind sink in the vuln tree and not in the patched tree, so validate()'s own recompute confirms
+# e2. (Article III: the detector parses the fetched source as DATA; it is never executed.)
+_FILES = {
+    (E2_VULN_REF, TARGET_PATH): "def f(url_spec):\n    client.get(url_spec.geturl(), timeout=5)  # FLAG\n",
+    (PATCHED_REF, TARGET_PATH): "def f(url_spec):\n    ssrf_proxy.validate(url_spec)\n    client.get(url_spec.geturl(), timeout=5)\n",
+}
+
+
 def entry(vuln, probe, role=Role.BLIND):
+    # R8-1: commit the per-target blob sha256 from the pinned bytes when they are known (the blind
+    # target); a calibration seed whose bytes are not in the fake corpus keeps empty blobs.
+    paths = [TARGET_PATH]
+    vuln_blobs = {p: blob_sha256(_FILES[(vuln, p)]) for p in paths if (vuln, p) in _FILES}
+    patched_blobs = {p: blob_sha256(_FILES[(PATCHED_REF, p)]) for p in paths if (PATCHED_REF, p) in _FILES}
     return CohortEntry(
         repo="https://github.com/langgenius/dify",
         vuln_ref=vuln,
-        patched_ref="c135ec4b08d946a1a1d3a198a1d72c1ccf47250f",
-        target_paths=["api/core/rag/extractor/word_extractor.py"],
+        patched_ref=PATCHED_REF,
+        target_paths=paths,
         sink_probe=probe,
         status="pinned",
+        vuln_blob_sha256=vuln_blobs,
+        patched_blob_sha256=patched_blobs,
         role=role,
     ).sealed()
 
@@ -118,8 +146,14 @@ history = CohortHistory(versions=[v1])
 
 # B4: the confusion-pair pool membership is committed in the freeze, BEFORE the seed
 # is derivable, as a Merkle pool_root. P1d: the sample size k is committed alongside it.
+# R8-2: the precision SAMPLE itself is committed inside the frozen bundle as a sample_root —
+# drawn from committed, NON-grindable inputs (cohort identity + canonical pool + k), NOT the
+# grindable freeze_hash — so grinding an inert bundle param can no longer re-roll the sample.
 pool = [f"p{i:02d}" for i in range(12)]
 COMMITTED_K = 3
+SAMPLE_SEED = precision_sample_seed(v1.content_hash, pool_root_of(pool), str(COMMITTED_K))
+sampled = sample_confusion_pairs(pool, COMMITTED_K, SAMPLE_SEED)
+COMMITTED_SAMPLE_ROOT = sample_root_of(sampled)
 bundle = DetectorBundle(
     detector_id="DT-SSRF-TAINT",
     module_hashes={"ssrf_detector.py": "deadbeef"},
@@ -132,6 +166,7 @@ bundle = DetectorBundle(
     calibration_seed_ids=[e1.identity_hash],
     pool_root=pool_root_of(pool),
     committed_k=COMMITTED_K,
+    committed_sample_root=COMMITTED_SAMPLE_ROOT,
 )
 freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
 
@@ -141,7 +176,8 @@ ledger.record(cohort_content_hash=v1.content_hash, actor="claude", activity="cur
 # R5: the run_id is the ONE canonical hash of (cohort, freeze, subject) — not a free string.
 run_id = _canonical_run_id(v1.content_hash, freeze.freeze_hash, "codex")
 run = EvaluationRun(run_id=run_id, subject="codex", cohort_content_hash=v1.content_hash, freeze_hash=freeze.freeze_hash)
-run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+# R8-5: a producing attempt carries a non-empty results_hash binding produced_results.
+run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", results_hash="R1")
 
 # A1/A2: a produced run MUST present a Report bound to the RUN's evaluated cohort.
 # R7-2: a certified report carries NO free coverage (None) and its patched_alert_density /
@@ -157,18 +193,13 @@ report_view = Report(
 )
 evaluations = EvaluationLedger()  # an empty, honest evaluate-once ledger
 
-# P1c/P1d: a real, panel-adjudicated precision bound to (cohort, freeze, run), drawn
-# with the committed k. All-TP -> precision 1.0, matching the report's headline.
-seed = precision_sample_seed(v1.content_hash, freeze.freeze_hash, run.run_id)
-sampled = sample_confusion_pairs(pool, COMMITTED_K, seed)
+# P1c/R8-2: a real, panel-adjudicated precision whose sampled_pairs reproduce the freeze's
+# committed sample_root. All-TP -> precision 1.0, matching the report's headline.
 precision_view = AdjudicatedPrecision(
-    seed=seed,
+    seed=SAMPLE_SEED,
     sampled_pairs=sampled,
     pool=pool,
     k=COMMITTED_K,
-    cohort_hash=v1.content_hash,
-    freeze_hash=freeze.freeze_hash,
-    run_id=run.run_id,
     adjudications=[
         Adjudication(
             pair_id=p,
@@ -181,18 +212,6 @@ precision_view = AdjudicatedPrecision(
     ],
 )
 
-# PART 2 / R5-1: the certify path RECOMPUTES the numerator ITSELF by re-running the
-# COMMITTED detector (resolved from the frozen detector_id) on the pinned SHAs — never a
-# caller-supplied set. Here we install a (fake, deterministic) frozen detector + fetcher
-# into the committed module-level registry/fetcher so the smoke is hermetic (production
-# resolves the real ssrf_detector + GitHub-raw fetcher). A marker-driven fake detector
-# flags the blind sink in the vuln tree and not in the patched tree, so validate()'s own
-# recompute confirms e2 -> the claimed rediscovery is VERIFIED, not trusted. (Article III:
-# the detector parses the fetched source as DATA; it is never executed.)
-_FILES = {
-    (e2.vuln_ref, "api/core/rag/extractor/word_extractor.py"): "def f(url_spec):\n    client.get(url_spec.geturl(), timeout=5)  # FLAG\n",
-    (e2.patched_ref, "api/core/rag/extractor/word_extractor.py"): "def f(url_spec):\n    ssrf_proxy.validate(url_spec)\n    client.get(url_spec.geturl(), timeout=5)\n",
-}
 def _fake_fetch(repo, ref, path):
     return _FILES[(ref, path)]
 def _fake_scan(source, uri):
@@ -423,6 +442,55 @@ expect("certified report with a free coverage numeric trips COVERAGE_UNBOUND", V
 print(f"        -> {rep12.summary()}")
 
 print()
+print("== guard 13: R8-1 input-bytes truthfulness — a DOCTORED fetch fails closed ==")
+# the numerator recompute runs on the EXACT committed pinned bytes: each entry commits the
+# per-target sha256 of the bytes at its vuln/patched SHA, folded into identity + the signed
+# attestation. An attacker controlling the fetch source/cache who returns DOCTORED bytes (that
+# do not reproduce the committed blob) is caught -> INPUT_BYTES_UNVERIFIED. (Article III: the
+# doctored source is only ever PARSED as data; it is never executed.)
+def _doctored_fetch(repo, ref, path):
+    return _FILES[(ref, path)] + "\n# attacker-injected tail that changes the bytes\n"
+verifier.FETCH_FN = _doctored_fetch
+rep13 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    precision=precision_view, prior_evaluations=evaluations, attestation=attestation, strict=True,
+)
+expect("doctored fetch bytes trip INPUT_BYTES_UNVERIFIED", ViolationReason.INPUT_BYTES_UNVERIFIED in rep13.reasons())
+print(f"        -> {rep13.summary()}")
+verifier.FETCH_FN = _fake_fetch  # restore the honest committed fetcher
+
+print()
+print("== guard 14: R8-2 committed precision sample — a sample not reproducing the committed sample_root fails closed ==")
+# the precision sample is committed inside the frozen bundle as a sample_root (drawn before
+# adjudication, decoupled from the grindable freeze_hash). A DIFFERENT valid draw (a ground/re-rolled
+# sample) does not reproduce the committed sample_root -> PRECISION_SAMPLE_UNBOUND.
+_other_seed = precision_sample_seed(v1.content_hash, pool_root_of(pool), "different-salt")
+_other_sampled = sample_confusion_pairs(pool, COMMITTED_K, _other_seed)
+assert sample_root_of(_other_sampled) != COMMITTED_SAMPLE_ROOT, "the alternate draw must differ"
+rerolled_precision = AdjudicatedPrecision(
+    seed=_other_seed,
+    sampled_pairs=_other_sampled,
+    pool=pool,
+    k=COMMITTED_K,
+    adjudications=[
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=True, decision="true-positive"),
+            ],
+        )
+        for p in _other_sampled
+    ],
+)
+rep14 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    precision=rerolled_precision, prior_evaluations=evaluations, attestation=attestation, strict=True,
+)
+expect("a re-rolled precision sample trips PRECISION_SAMPLE_UNBOUND", ViolationReason.PRECISION_SAMPLE_UNBOUND in rep14.reasons())
+print(f"        -> {rep14.summary()}")
+
+print()
 print("== report: blind recall is the headline, four labelled secondaries ==")
 rep = Report(
     blind_recall=RecallReport(rediscovered=3, total=4, patched_alert_density=1.2),
@@ -444,5 +512,5 @@ print()
 if failures:
     print(f"SMOKE FAILED: {len(failures)} check(s) failed: {failures}")
     sys.exit(1)
-print("SMOKE 008 OK: contract certifies the ed25519-signed run and every guard (anchoring + round-6 floor) trips with a typed reason.")
+print("SMOKE 008 OK: contract certifies the ed25519-signed run and every guard (anchoring + round-6/7/8 floor) trips with a typed reason.")
 PYEOF

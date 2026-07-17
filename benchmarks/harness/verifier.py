@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 import corpus_measure  # reuse the EXACT fetcher + line-precise rule; do not reimplement
+from contract import blob_sha256  # the committed per-target content-address primitive (R8-1)
 
 # (repo, ref, path) -> source text. In production this is ``corpus_measure.fetch``;
 # tests inject a canned dict-backed fake.
@@ -46,18 +47,51 @@ FetchFn = Callable[[str, str, str], str]
 ScanFn = Callable[[str, str], list]
 
 
-def _entry_rediscovered(entry, fetch_fn: FetchFn, scan_fn: ScanFn) -> bool:
+class InputBytesUnverified(Exception):
+    """R8-1: the fetched pinned bytes do NOT reproduce the committed per-target
+    ``vuln_blob_sha256`` / ``patched_blob_sha256`` of the ``CohortEntry`` (or the entry
+    committed no hash for a scored target). The recompute then ran — or would have run — the
+    detector on bytes an attacker controlling the fetch source/cache could have DOCTORED, so it
+    is not the committed pinned input. ``contract.validate`` maps this to
+    ``INPUT_BYTES_UNVERIFIED`` (fail closed) rather than trusting the detector's verdict."""
+
+
+def _require_committed_bytes(entry, path: str, ref: str, source: str, committed: dict) -> None:
+    """R8-1: require the fetched ``source`` at (``path``, ``ref``) to reproduce the entry's
+    committed per-target blob sha256. A missing commitment for a scored target is itself a
+    failure (fail closed) — the seal is not skippable by omitting a hash."""
+    want = committed.get(path)
+    got = blob_sha256(source)
+    if want is None:
+        raise InputBytesUnverified(
+            f"{entry.repo}@{ref}:{path} has no committed blob sha256 to verify the fetched bytes against"
+        )
+    if want != got:
+        raise InputBytesUnverified(
+            f"{entry.repo}@{ref}:{path} fetched bytes sha256 {got} != committed {want} (doctored input)"
+        )
+
+
+def _entry_rediscovered(entry, fetch_fn: FetchFn, scan_fn: ScanFn, *, verify_blobs: bool = True) -> bool:
     """Line-precise rediscovery for one entry over ALL its target paths, using the EXACT
     ``corpus_measure._sink_is_flagged`` rule: the sink is rediscovered iff a FLAGGED
     line's own text contains the probe in the VULN tree and NOT in the PATCHED tree.
 
     ``entry`` is a ``CohortEntry`` (``.repo`` / ``.vuln_ref`` / ``.patched_ref`` /
-    ``.target_paths`` / ``.sink_probe``). The fetched source is read as DATA only."""
+    ``.target_paths`` / ``.sink_probe``). The fetched source is read as DATA only.
+
+    R8-1: when ``verify_blobs`` (the default and the ONLY value the certify path uses), each
+    fetched source must reproduce the entry's committed per-target blob sha256 BEFORE the
+    detector sees it — so a doctored fetch is rejected (``InputBytesUnverified``) rather than
+    silently scanned."""
     probe = entry.sink_probe
     vuln_hit = patched_hit = False
     for path in entry.target_paths:
         vuln_source = fetch_fn(entry.repo, entry.vuln_ref, path)
         patched_source = fetch_fn(entry.repo, entry.patched_ref, path)
+        if verify_blobs:
+            _require_committed_bytes(entry, path, entry.vuln_ref, vuln_source, entry.vuln_blob_sha256)
+            _require_committed_bytes(entry, path, entry.patched_ref, patched_source, entry.patched_blob_sha256)
         # corpus_measure._sink_is_flagged(scan, source, uri, probe) -> (hit, flag_count)
         vuln_flagged, _ = corpus_measure._sink_is_flagged(scan_fn, vuln_source, path, probe)
         patched_flagged, _ = corpus_measure._sink_is_flagged(scan_fn, patched_source, path, probe)
@@ -66,7 +100,9 @@ def _entry_rediscovered(entry, fetch_fn: FetchFn, scan_fn: ScanFn) -> bool:
     return bool(vuln_hit and not patched_hit)
 
 
-def recompute_rediscovered(blind_entries: Iterable, *, fetch_fn: FetchFn, scan_fn: ScanFn) -> set[str]:
+def recompute_rediscovered(
+    blind_entries: Iterable, *, fetch_fn: FetchFn, scan_fn: ScanFn, verify_blobs: bool = True
+) -> set[str]:
     """Recompute the set of rediscovered BLIND entry-identity hashes by re-running the
     frozen detector on the real pinned code.
 
@@ -75,10 +111,13 @@ def recompute_rediscovered(blind_entries: Iterable, *, fetch_fn: FetchFn, scan_f
     the line-precise rule; the entry's ``computed_identity_hash`` joins the returned set
     iff its sink is rediscovered. On the strict certify path ``contract.validate`` RUNS
     this itself via :func:`recompute_certified_numerator`, resolving fetch/scan from
-    COMMITTED state rather than trusting a caller-supplied set."""
+    COMMITTED state rather than trusting a caller-supplied set.
+
+    R8-1: with ``verify_blobs`` (the default), each fetched source must reproduce the entry's
+    committed per-target blob sha256, so a doctored fetch raises ``InputBytesUnverified``."""
     rediscovered: set[str] = set()
     for entry in blind_entries:
-        if _entry_rediscovered(entry, fetch_fn, scan_fn):
+        if _entry_rediscovered(entry, fetch_fn, scan_fn, verify_blobs=verify_blobs):
             rediscovered.add(entry.computed_identity_hash)
     return rediscovered
 
@@ -188,6 +227,8 @@ def recompute_patched_alert_density(entries: Iterable, *, detector_id: str) -> f
     for entry in entries:
         for path in entry.target_paths:
             patched_source = FETCH_FN(entry.repo, entry.patched_ref, path)
+            # R8-1: the patched-tree density must be computed on the EXACT committed pinned bytes.
+            _require_committed_bytes(entry, path, entry.patched_ref, patched_source, entry.patched_blob_sha256)
             _, flag_count = corpus_measure._sink_is_flagged(scan_fn, patched_source, path, entry.sink_probe)
             total_flags += flag_count
             total_lines += len(patched_source.splitlines())

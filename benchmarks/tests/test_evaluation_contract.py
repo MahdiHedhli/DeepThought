@@ -46,6 +46,7 @@ from contract import (  # noqa: E402
     SyntheticVariant,
     ViolationReason,
     _canonical_run_id,
+    blob_sha256,
     build_attestation,
     candidates_from_adjudications,
     chain_root,
@@ -56,6 +57,7 @@ from contract import (  # noqa: E402
     pool_root_of,
     precision_sample_seed,
     sample_confusion_pairs,
+    sample_root_of,
     sign,
     validate,
     verify,
@@ -103,15 +105,24 @@ def _entry(
     role="blind",
     guided_fix=False,
     seal=True,
+    files=None,
 ):
+    paths = paths or ["a/x.py"]
+    # R8-1: when a fake-corpus ``files`` map is supplied, commit the per-target blob sha256 of the
+    # bytes at (vuln_ref/patched_ref, path). The certify recompute then requires the fetched bytes
+    # to reproduce these, so an entry built from a corpus carries its committed content address.
+    vuln_blobs = {p: blob_sha256(files[(vuln, p)]) for p in paths} if files is not None else {}
+    patched_blobs = {p: blob_sha256(files[(patched, p)]) for p in paths} if files is not None else {}
     e = CohortEntry(
         repo=repo,
         vuln_ref=vuln,
         patched_ref=patched,
-        target_paths=paths or ["a/x.py"],
+        target_paths=paths,
         sink_probe=probe,
         status=status,
         drop_reason=drop_reason,
+        vuln_blob_sha256=vuln_blobs,
+        patched_blob_sha256=patched_blobs,
         role=role,
         guided_fix=guided_fix,
     )
@@ -147,6 +158,25 @@ def _good_panel(pair_id, decision, *, curator_second=True):
             AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=curator_second, decision=decision),
         ],
     )
+
+
+def _committed_sample(pool, k, cohort_hash):
+    """R8-2: the precision sample committed at freeze time. It is drawn from committed,
+    NON-grindable inputs (cohort identity + canonical pool + k) rather than the grindable
+    freeze_hash, and its ``sample_root`` is committed inside the frozen bundle. Returns
+    ``(seed, sampled, sample_root)``; the certify builders put the sample_root in the bundle and
+    present a precision whose ``sampled_pairs`` reproduce it."""
+    seed = precision_sample_seed(cohort_hash, pool_root_of(pool), str(k))
+    sampled = sample_confusion_pairs(pool, k, seed)
+    return seed, sampled, sample_root_of(sampled)
+
+
+def _reg_files_of(regression):
+    """Merge the fake-corpus fragments of a list of ``(entry, files_fragment)`` regression rows."""
+    reg_files = {}
+    for _, frag in (regression or []):
+        reg_files.update(frag)
+    return reg_files
 
 
 # --------------------------------------------------------------------------- #
@@ -1265,7 +1295,10 @@ def test_a5_producing_attempt_must_be_terminal_in_validate():
         cohort_content_hash="H",
         freeze_hash="fz",
         attempts=[
-            EvalAttempt(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", freeze_hash="fz"),
+            EvalAttempt(
+                phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E",
+                freeze_hash="fz", results_hash="R1",  # R8-5: producing attempt binds a results_hash
+            ),
             EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", freeze_hash="fz"),
         ],
     )
@@ -1580,23 +1613,29 @@ def _anchored(
     passes and any tamper fails closed. ``regression`` is an optional list of
     ``(CohortEntry, files_fragment)`` REGRESSION entries added to the head cohort so a
     non-empty ``fixed_cohort_recall`` can be exercised."""
-    a_entry = _entry(vuln=_A_VULN, patched=_A_PATCHED, paths=["a.py"], probe="sinka(x)", role="blind")
-    b_entry = _entry(vuln=_B_VULN, patched=_B_PATCHED, paths=["b.py"], probe="sinkb(x)", role="blind")
+    base_files = {**(files or _default_files()), **_reg_files_of(regression)}
+    a_entry = _entry(vuln=_A_VULN, patched=_A_PATCHED, paths=["a.py"], probe="sinka(x)", role="blind", files=base_files)
+    b_entry = _entry(vuln=_B_VULN, patched=_B_PATCHED, paths=["b.py"], probe="sinkb(x)", role="blind", files=base_files)
     blinds = [a_entry, b_entry]
     reg_entries = [e for e, _ in (regression or [])]
-    reg_files = {}
-    for _, frag in (regression or []):
-        reg_files.update(frag)
+    reg_files = _reg_files_of(regression)
     v1 = _cohort("v1", blinds + reg_entries)
     hist = CohortHistory(versions=[v1])
     pool = _pool(12)
     committed_k = 3
+    # R8-2: draw + commit the precision sample at freeze time (decoupled from the grindable
+    # freeze_hash) and put its sample_root inside the frozen bundle.
+    sample_seed, sampled, committed_sample_root = _committed_sample(pool, committed_k, v1.content_hash)
     bundle = DetectorBundle(
-        detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k
+        detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k,
+        committed_sample_root=committed_sample_root,
     )
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     run = _run("codex", v1.content_hash, freeze.freeze_hash)
-    run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+    # R8-5: a producing attempt carries a non-empty results_hash binding produced_results.
+    run.attempt_evaluation(
+        phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", results_hash="R1"
+    )
     report = Report(
         blind_recall=RecallReport(rediscovered=1, total=2),
         fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
@@ -1606,16 +1645,11 @@ def _anchored(
         cohort_content_hash=v1.content_hash,
         rediscovered_blind_ids=[a_entry.identity_hash],
     )
-    seed = precision_sample_seed(v1.content_hash, freeze.freeze_hash, run.run_id)
-    sampled = sample_confusion_pairs(pool, committed_k, seed)
     precision = AdjudicatedPrecision(
-        seed=seed,
+        seed=sample_seed,
         sampled_pairs=sampled,
         pool=pool,
         k=committed_k,
-        cohort_hash=v1.content_hash,
-        freeze_hash=freeze.freeze_hash,
-        run_id=run.run_id,
         adjudications=[_good_panel(p, "true-positive") for p in sampled],
     )
     ledger = ExposureLedger()
@@ -1929,12 +1963,17 @@ def _chain_certify(
     hist = CohortHistory(versions=presented_versions)
     pool = _pool(12)
     committed_k = 3
+    # R8-2: commit the precision sample_root in the frozen bundle (decoupled from freeze_hash).
+    sample_seed, sampled, committed_sample_root = _committed_sample(pool, committed_k, scored_cohort.content_hash)
     bundle = DetectorBundle(
-        detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k
+        detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k,
+        committed_sample_root=committed_sample_root,
     )
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     run = _run("codex", scored_cohort.content_hash, freeze.freeze_hash)
-    run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+    run.attempt_evaluation(
+        phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", results_hash="R1"
+    )
     scored_blind = scored_cohort.by_role(Role.BLIND)
     report = Report(
         blind_recall=RecallReport(rediscovered=len(rediscovered_entries), total=len(scored_blind)),
@@ -1945,11 +1984,8 @@ def _chain_certify(
         cohort_content_hash=scored_cohort.content_hash,
         rediscovered_blind_ids=[e.identity_hash for e in rediscovered_entries],
     )
-    seed = precision_sample_seed(scored_cohort.content_hash, freeze.freeze_hash, run.run_id)
-    sampled = sample_confusion_pairs(pool, committed_k, seed)
     precision = AdjudicatedPrecision(
-        seed=seed, sampled_pairs=sampled, pool=pool, k=committed_k,
-        cohort_hash=scored_cohort.content_hash, freeze_hash=freeze.freeze_hash, run_id=run.run_id,
+        seed=sample_seed, sampled_pairs=sampled, pool=pool, k=committed_k,
         adjudications=[_good_panel(p, "true-positive") for p in sampled],
     )
     ledger = ExposureLedger()
@@ -1990,13 +2026,13 @@ def _rc_entry(tag, *, rediscovered):
     vuln = f"v{tag}" + "0" * (40 - len(f"v{tag}"))
     patched = f"p{tag}" + "0" * (40 - len(f"p{tag}"))
     path, probe = f"{tag}.py", f"sink{tag}(x)"
-    entry = _entry(vuln=vuln, patched=patched, paths=[path], probe=probe, role="blind")
     frag = {
         (vuln, path): f"def fn():\n    {probe}  # FLAG\n",
         (patched, path): (
             f"def fn():\n    guard()\n    {probe}\n" if rediscovered else f"def fn():\n    {probe}  # FLAG\n"
         ),
     }
+    entry = _entry(vuln=vuln, patched=patched, paths=[path], probe=probe, role="blind", files=frag)
     return entry, frag
 
 
@@ -2154,9 +2190,12 @@ def test_f2_evaluation_ledger_is_committed_monotonic_state(monkeypatch):
     a = _anchored(monkeypatch)
     assert _certify(a).ok, _reasons(_certify(a))
 
-    # the blind cohort + subject a second eval would re-roll (fixed identities matching _anchored)
-    a_entry = _entry(vuln=_A_VULN, patched=_A_PATCHED, paths=["a.py"], probe="sinka(x)", role="blind")
-    b_entry = _entry(vuln=_B_VULN, patched=_B_PATCHED, paths=["b.py"], probe="sinkb(x)", role="blind")
+    # the blind cohort + subject a second eval would re-roll (fixed identities matching _anchored,
+    # which builds its blinds from _default_files() — so the committed blob hashes fold into
+    # identity the same way and the recorded blind_ids overlap the scored cohort).
+    _bf = _default_files()
+    a_entry = _entry(vuln=_A_VULN, patched=_A_PATCHED, paths=["a.py"], probe="sinka(x)", role="blind", files=_bf)
+    b_entry = _entry(vuln=_B_VULN, patched=_B_PATCHED, paths=["b.py"], probe="sinkb(x)", role="blind", files=_bf)
     v1 = _cohort("v1", [a_entry, b_entry])
     # the TRUTHFUL committed evaluation-ledger already records a prior eval of this blind set
     prior = EvaluationLedger()
@@ -2247,13 +2286,13 @@ def _reg_entry(tag, *, rediscovered):
     vuln = f"vr{tag}" + "0" * (40 - len(f"vr{tag}"))
     patched = f"pr{tag}" + "0" * (40 - len(f"pr{tag}"))
     path, probe = f"r{tag}.py", f"sinkr{tag}(x)"
-    entry = _entry(vuln=vuln, patched=patched, paths=[path], probe=probe, role="regression")
     frag = {
         (vuln, path): f"def fr():\n    {probe}  # FLAG\n",
         (patched, path): (
             f"def fr():\n    guard()\n    {probe}\n" if rediscovered else f"def fr():\n    {probe}  # FLAG\n"
         ),
     }
+    entry = _entry(vuln=vuln, patched=patched, paths=[path], probe=probe, role="regression", files=frag)
     return entry, frag
 
 
@@ -2386,3 +2425,207 @@ def test_r7_2_certified_report_forbids_free_coverage(monkeypatch):
     assert not rep.ok and ViolationReason.COVERAGE_UNBOUND in _reasons(rep)
     # coverage stays available as a labelled diagnostic on a NON-certified report
     assert with_coverage.coverage == 0.9 and "coverage" in with_coverage.render()
+
+
+# --------------------------------------------------------------------------- #
+# Round-8 — pin the recompute's INPUT BYTES (R8-1), commit the precision sample (R8-2), certify
+# EVERY scoring numeric (R8-3), POLICY_REFUSAL fails closed unless production is provably absent
+# (R8-4), bind produced_results to a results_hash (R8-5), and fail closed on an inert committed
+# HISTORY root (R8-6). The FINAL per-cohort residual is the irreducible floor — genesis-commit
+# completeness (git-reviewable) + ed25519 private-key custody (organizational).
+# --------------------------------------------------------------------------- #
+
+
+# R8-1 — the certify numerator recompute runs on the EXACT committed pinned bytes; a doctored
+# fetch source/cache whose bytes do not reproduce the committed per-target blob sha256 fails
+# closed with INPUT_BYTES_UNVERIFIED (the detector never "confirms" a false rediscovery on
+# altered bytes). The honest, matching bytes certify.
+def test_r8_1_certify_rejects_doctored_input_bytes(monkeypatch):
+    a = _anchored(monkeypatch)
+    assert _certify(a).ok, _reasons(_certify(a))  # matching committed bytes → certifies
+
+    # override the committed fetcher to return DOCTORED bytes (an attacker-controlled source/cache)
+    def _doctored(repo, ref, path):
+        return _default_files()[(ref, path)] + "\n# attacker-injected tail\n"
+
+    monkeypatch.setattr(verifier, "FETCH_FN", _doctored)
+    rep = _certify(a)
+    assert not rep.ok and ViolationReason.INPUT_BYTES_UNVERIFIED in _reasons(rep)
+
+
+# R8-2 — the precision sample is committed inside the frozen bundle as a sample_root (drawn before
+# adjudication, decoupled from the grindable freeze_hash). A re-rolled sample not reproducing the
+# committed sample_root fails PRECISION_SAMPLE_UNBOUND; an inert (empty) committed sample_root is
+# rejected at certify time (the binding is mandatory).
+def test_r8_2_precision_sample_committed_in_bundle(monkeypatch):
+    a = _anchored(monkeypatch)
+    assert a["freeze"].sample_root  # the freeze commits the sample_root
+    assert _certify(a).ok, _reasons(_certify(a))  # the honest sample reproduces it
+
+    # a DIFFERENT valid draw (a re-rolled sample) does not reproduce the committed sample_root
+    ch = a["hist"].versions[0].content_hash
+    pool = _pool(12)
+    other_seed = precision_sample_seed(ch, pool_root_of(pool), "a-different-salt")
+    other_sampled = sample_confusion_pairs(pool, 3, other_seed)
+    assert sample_root_of(other_sampled) != a["freeze"].sample_root
+    rerolled = AdjudicatedPrecision(
+        seed=other_seed, sampled_pairs=other_sampled, pool=pool, k=3,
+        adjudications=[_good_panel(p, "true-positive") for p in other_sampled],
+    )
+    rep = _certify(a, precision=rerolled)
+    assert not rep.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep)
+
+    # an inert committed sample_root fails closed — the sample-commitment binding is mandatory
+    naked_bundle = a["freeze"].bundle.model_copy(update={"committed_sample_root": ""})
+    naked_freeze = FreezeManifest(bundle=naked_bundle, timestamp=a["freeze"].timestamp)
+    rep2 = _certify(a, freeze=naked_freeze)
+    assert not rep2.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep2)
+
+
+# R8-3 — certification is STRUCTURAL on EVERY scoring numeric, not only the blind headline. A
+# Report with a zero blind headline but a non-zero secondary numeric (fixed_cohort_recall,
+# patched_alert_density, or adjudicated_precision) still REQUIRES certification: through the
+# default check it is UNANCHORED. A genuinely all-zero report asserts nothing and stays exempt.
+def test_r8_3_secondary_scoring_numeric_forces_certification():
+    reg = _entry(vuln=A40, role="regression")  # a cohort with NO blind entries → blind 0/0 is valid
+    v1 = _cohort("v1", [reg])
+    hist = CohortHistory(versions=[v1])
+
+    def _rep(**over):
+        base = dict(
+            blind_recall=RecallReport(rediscovered=0, total=0),
+            fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+            patched_alert_density=0.0,
+            adjudicated_precision=0.0,
+            cohort_content_hash=v1.content_hash,
+            rediscovered_blind_ids=[],
+        )
+        base.update(over)
+        return Report(**base)
+
+    # a non-zero fixed_cohort_recall is a published number → UNANCHORED without certification
+    rep_fixed = _rep(fixed_cohort_recall=RecallReport(rediscovered=9, total=10))
+    out = validate(history=hist, report=rep_fixed)
+    assert not out.ok and ViolationReason.UNANCHORED in _reasons(out)
+    # the binding itself is honest — only the missing certification fails it
+    assert check_report(rep_fixed, hist).ok
+
+    # a set patched_alert_density and a set adjudicated_precision are equally scoring numerics
+    assert ViolationReason.UNANCHORED in _reasons(validate(history=hist, report=_rep(patched_alert_density=1.5)))
+    assert ViolationReason.UNANCHORED in _reasons(validate(history=hist, report=_rep(adjudicated_precision=0.8)))
+
+    # a genuinely all-zero report asserts nothing → not forced to certify
+    assert ViolationReason.UNANCHORED not in _reasons(validate(history=hist, report=_rep()))
+
+
+# R8-4 — a POLICY_REFUSAL scores a class N/A only when production is PROVABLY absent. If the
+# committed detector for the class produces a rediscovery on the head blind set, the run was
+# produced, not refused → POLICY_REFUSAL_ON_PRODUCED_RUN, EVEN with the run object omitted. A
+# genuine no-detector class is allowed; and an N/A POLICY_REFUSAL must be inside a certification.
+def test_r8_4_policy_refusal_fails_closed_unless_production_absent(monkeypatch):
+    files = _default_files()
+    a_entry = _entry(vuln=_A_VULN, patched=_A_PATCHED, paths=["a.py"], probe="sinka(x)", role="blind", files=files)
+    v1 = _cohort("v1", [a_entry])
+    hist = CohortHistory(versions=[v1])
+    freeze = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z"
+    )
+    _install_committed(monkeypatch, presented_history=hist, files=files, detector_id="d")
+    excl = ExclusionLog(events=[ExclusionEvent(reason=ExclusionReason.POLICY_REFUSAL)])
+
+    # the committed detector PRODUCES a rediscovery on the head blind set → the class cannot be
+    # laundered to N/A, EVEN with the run omitted (run is not passed here)
+    rep = validate(history=hist, freeze=freeze, exclusions=excl)
+    assert not rep.ok and ViolationReason.POLICY_REFUSAL_ON_PRODUCED_RUN in _reasons(rep)
+    # and an N/A POLICY_REFUSAL presented without certification is UNANCHORED
+    assert ViolationReason.UNANCHORED in _reasons(rep)
+
+    # a genuine builder-declined class (no committed detector registered for the id) is allowed:
+    # POLICY_REFUSAL_ON_PRODUCED_RUN does NOT fire
+    freeze_ghost = FreezeManifest(
+        bundle=DetectorBundle(detector_id="ghost-unregistered", lockfile_hash="L"),
+        timestamp="2026-07-16T10:00:00Z",
+    )
+    rep_ghost = validate(history=hist, freeze=freeze_ghost, exclusions=excl, strict=True)
+    assert ViolationReason.POLICY_REFUSAL_ON_PRODUCED_RUN not in _reasons(rep_ghost)
+
+
+# R8-5 — a producing attempt binds a non-empty results_hash; a non-producing "infra retry" binds
+# an empty one. So N-1 real evals cannot hide as produced_results=False "retries": a retry
+# carrying a results_hash is a concealed real evaluation → INFRA_RETRY_REQUIRES_UNCHANGED.
+def test_r8_5_results_hash_binds_produced_results():
+    # record-time: a non-producing infra retry carrying a results_hash is refused
+    run = EvaluationRun(run_id="r", subject="s", cohort_content_hash="H", freeze_hash="fz")
+    with pytest.raises(ContractViolation) as ir:
+        run.attempt_evaluation(
+            phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", results_hash="HIDDEN"
+        )
+    assert ir.value.reason is ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED
+
+    # from storage: a non-producing attempt carrying a results_hash (a concealed real eval) → reject
+    hidden = EvaluationRun(
+        run_id="r2", subject="s", cohort_content_hash="H", freeze_hash="fz",
+        attempts=[EvalAttempt(
+            phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E",
+            freeze_hash="fz", results_hash="HIDDEN",
+        )],
+    )
+    rep = validate(run=hidden)
+    assert not rep.ok and ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED in _reasons(rep)
+
+    # from storage: a PRODUCING attempt with an empty results_hash is unbound → reject
+    unbound = EvaluationRun(
+        run_id="r3", subject="s", cohort_content_hash="H", freeze_hash="fz",
+        attempts=[EvalAttempt(
+            phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", freeze_hash="fz",
+        )],
+    )
+    assert ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED in _reasons(validate(run=unbound))
+
+    # honest: a non-producing retry (empty results_hash) then a producing terminal (non-empty) passes
+    honest = EvaluationRun(
+        run_id="r4", subject="s", cohort_content_hash="H", freeze_hash="fz",
+        attempts=[
+            EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", freeze_hash="fz"),
+            EvalAttempt(
+                phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E",
+                freeze_hash="fz", results_hash="R1",
+            ),
+        ],
+    )
+    assert ViolationReason.INFRA_RETRY_REQUIRES_UNCHANGED not in _reasons(validate(run=honest))
+
+
+# R8-6 — the committed genesis loader fails closed on an INERT history root: an inert (empty
+# chain) genesis/latest history root would let a TRUNCATED cohort anchor against the empty prefix.
+def test_r8_6_genesis_fails_closed_on_inert_history_root(tmp_path):
+    import json as _json
+
+    real = "a" * 64
+    good = {
+        "genesis_history_root": real,
+        "latest": {
+            "history_root": real,
+            "attestation_root": contract._ATTESTATION_CHAIN_GENESIS,  # legit bootstrap base
+            "evaluation_root": contract._EMPTY_ROOT,  # legit empty-ledger base
+        },
+        "evaluator": {"id": "curator-not-subject", "verify_key_pub_hex": _TEST_PUB.hex()},
+    }
+
+    def _write(data):
+        p = tmp_path / f"g{len(list(tmp_path.iterdir()))}.json"
+        p.write_text(_json.dumps(data), encoding="utf-8")
+        return p
+
+    # a real, non-inert committed state loads
+    assert contract.load_committed_genesis_state(_write(good)).genesis_history_root == real
+
+    # an inert genesis_history_root fails closed
+    bad_genesis = {**good, "genesis_history_root": contract._CHAIN_GENESIS}
+    with pytest.raises(ValueError):
+        contract.load_committed_genesis_state(_write(bad_genesis))
+
+    # an inert latest.history_root fails closed
+    bad_latest = {**good, "latest": {**good["latest"], "history_root": contract._EMPTY_ROOT}}
+    with pytest.raises(ValueError):
+        contract.load_committed_genesis_state(_write(bad_latest))
