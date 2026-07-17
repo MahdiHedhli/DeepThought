@@ -25,7 +25,6 @@ and CI (and ``scripts/smoke_008.sh``) invoke ``validate`` directly.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import random
 import re
@@ -34,6 +33,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from roundrecord import ClassRate, _pct, _safe_div  # reuse the existing yardstick style
@@ -69,13 +73,13 @@ def _content_hash(obj: Any) -> str:
 #
 # The anti-omission property does NOT depend on the signature — it comes from
 # "the presented state must reproduce the committed root". The signature adds
-# non-repudiation and tamper-evidence. HMAC-SHA256 is used here because it is
-# stdlib and deterministic; PRODUCTION swaps it for an asymmetric scheme
-# (ed25519) so a published verify-key lets any third party verify while the
-# private signing key is held by a party that is NOT the scored builder
-# (curator != subject). Everything below uses only ``hashlib`` / ``hmac`` — no
-# wall clock, no randomness — so a root computed on one machine equals the root
-# computed anywhere else.
+# non-repudiation and tamper-evidence. Signing is ASYMMETRIC ed25519 (round-6):
+# ``genesis_root.json`` commits ONLY the ed25519 PUBLIC key, so any repo reader can
+# VERIFY but none can FORGE a signature — the private signing key is held externally
+# by a party that is NOT the scored subject (curator != subject). ed25519 is
+# deterministic (no per-signature randomness), so a signature computed on one machine
+# equals the signature computed anywhere else; the hashing (``hashlib``) uses no wall
+# clock and no randomness, so every root is machine-independent too.
 
 # A fixed, domain-separated genesis for the append-only chain fold. Baking a
 # constant in means an empty chain has a well-defined, reproducible root.
@@ -153,14 +157,22 @@ _ATTESTATION_CHAIN_GENESIS = _sha256("deepthought/evaluation-contract/attestatio
 class CommittedGenesisState(BaseModel):
     """The committed, git-reviewable anchor state loaded from ``genesis_root.json``: the
     immutable initial ``genesis_history_root`` plus the advancing ``latest`` certified
-    ``{history_root, attestation_root}`` and the committed evaluator ``{id, verify_key}``.
-    The strict certify path binds to THIS, never to a caller-supplied baseline."""
+    ``{history_root, attestation_root, evaluation_root}`` and the committed evaluator
+    ``{id, verify_key}``. The strict certify path binds to THIS, never to a caller-supplied
+    baseline.
+
+    ``verify_key`` is the committed ed25519 PUBLIC key (round-6); the matching private
+    signing key is held EXTERNALLY by the curator (curator != subject) and is NEVER in the
+    committed file. ``latest_evaluation_root`` (F2) is the committed root of the append-only
+    EvaluationLedger: the presented ``prior_evaluations`` must reproduce + append-only-extend
+    it, so evaluate-once is COMMITTED monotonic state, not a caller-suppliable empty ledger."""
 
     model_config = ConfigDict(extra="ignore")
 
     genesis_history_root: str
     latest_history_root: str
     latest_attestation_root: str
+    latest_evaluation_root: str = _EMPTY_ROOT
     evaluator_id: str
     verify_key: bytes
 
@@ -183,23 +195,31 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
     latest = data.get("latest") or {}
     latest_history = latest.get("history_root") or genesis
     latest_attestation = latest.get("attestation_root") or _ATTESTATION_CHAIN_GENESIS
+    # F2: the committed EvaluationLedger root. An absent value means "no eval has certified
+    # yet", i.e. the empty-ledger root — a well-defined, reproducible baseline.
+    latest_evaluation = latest.get("evaluation_root") or _EMPTY_ROOT
     if not isinstance(latest_history, str) or not latest_history:
         raise ValueError("latest.history_root must be a non-empty string")
     if not isinstance(latest_attestation, str) or not latest_attestation:
         raise ValueError("latest.attestation_root must be a non-empty string")
+    if not isinstance(latest_evaluation, str) or not latest_evaluation:
+        raise ValueError("latest.evaluation_root must be a non-empty string")
     evaluator = data.get("evaluator") or {}
     evaluator_id = evaluator.get("id")
-    verify_key_hex = evaluator.get("verify_key_hex")
+    # F4: the committed value is the ed25519 PUBLIC key (verify_key_pub_hex). The private
+    # signing key is held externally by the curator and is NEVER committed.
+    verify_key_pub_hex = evaluator.get("verify_key_pub_hex")
     if not isinstance(evaluator_id, str) or not evaluator_id:
         raise ValueError("evaluator.id must be a non-empty string")
-    if not isinstance(verify_key_hex, str) or not verify_key_hex:
-        raise ValueError("evaluator.verify_key_hex must be a non-empty hex string")
+    if not isinstance(verify_key_pub_hex, str) or not verify_key_pub_hex:
+        raise ValueError("evaluator.verify_key_pub_hex must be a non-empty hex string (the ed25519 PUBLIC key)")
     return CommittedGenesisState(
         genesis_history_root=genesis,
         latest_history_root=latest_history,
         latest_attestation_root=latest_attestation,
+        latest_evaluation_root=latest_evaluation,
         evaluator_id=evaluator_id,
-        verify_key=bytes.fromhex(verify_key_hex),
+        verify_key=bytes.fromhex(verify_key_pub_hex),
     )
 
 
@@ -211,12 +231,19 @@ def load_committed_genesis_root(path: Optional[Path] = None) -> str:
 
 
 def load_committed_verify_key(path: Optional[Path] = None) -> bytes:
-    """The committed evaluator verify-key (R5-4). ``validate`` verifies attestations with
-    THIS, never a caller-supplied key — a subject-minted key fails ``ATTESTATION_INVALID``.
-    HMAC-SHA256 here (the committed value is a shared secret, safe as a placeholder);
-    PRODUCTION commits an ed25519 PUBLIC key while the private signing key is held by a
-    party that is NOT the scored subject (curator != subject)."""
+    """The committed evaluator ed25519 PUBLIC key (F4). ``validate`` verifies attestations
+    against THIS, never a caller-supplied key — a subject-minted key or an old HMAC secret
+    fails ``ATTESTATION_INVALID``. Because only the PUBLIC key is committed, a repo reader can
+    verify but cannot forge; the matching private signing key is held externally by a party
+    that is NOT the scored subject (curator != subject) — the organizational custody floor."""
     return load_committed_genesis_state(path).verify_key
+
+
+def load_committed_evaluation_root(path: Optional[Path] = None) -> str:
+    """The committed EvaluationLedger root (F2) the presented ``prior_evaluations`` must
+    reproduce + append-only-extend. Evaluate-once is thereby COMMITTED monotonic state: a
+    caller cannot present an empty ledger to dodge the blind-set re-roll check."""
+    return load_committed_genesis_state(path).latest_evaluation_root
 
 
 def load_committed_evaluator_id(path: Optional[Path] = None) -> str:
@@ -226,15 +253,20 @@ def load_committed_evaluator_id(path: Optional[Path] = None) -> str:
 
 
 def advance_committed_root(
-    *, history_root: str, attestation_root: str, path: Optional[Path] = None
+    *, history_root: str, attestation_root: str, evaluation_root: str, path: Optional[Path] = None
 ) -> None:
-    """Persist the new certified roots to the committed file (R5-2), advancing the chain.
-    The immutable ``genesis_history_root`` is preserved; only ``latest`` moves. Called by
-    the harness AFTER a successful strict certify — the chain advances only through
-    committed, git-reviewable state. Written atomically (temp + replace)."""
+    """Persist the new certified roots to the committed file (R5-2 + F2), advancing the chain.
+    The immutable ``genesis_history_root`` is preserved; only ``latest`` moves — including
+    ``evaluation_root`` (F2), so evaluate-once is COMMITTED monotonic state that advances only
+    through this git-reviewable file. Called by the harness AFTER a successful strict certify.
+    Written atomically (temp + replace)."""
     p = path or _GENESIS_ROOT_PATH
     data = _read_committed_config(p)
-    data["latest"] = {"history_root": history_root, "attestation_root": attestation_root}
+    data["latest"] = {
+        "history_root": history_root,
+        "attestation_root": attestation_root,
+        "evaluation_root": evaluation_root,
+    }
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(p)
@@ -258,15 +290,52 @@ def _history_reproduces_committed(history: "CohortHistory", committed_prior_root
     return False
 
 
-def sign(root: str, key: bytes) -> str:
-    """Sign a root with HMAC-SHA256 (stdlib, deterministic). PRODUCTION swaps
-    this for ed25519 (see the module note above)."""
-    return hmac.new(key, root.encode("utf-8"), hashlib.sha256).hexdigest()
+def _evaluation_reproduces_committed(ledger: "EvaluationLedger", committed_root: str) -> bool:
+    """F2: True iff some prefix of the presented ``prior_evaluations`` append-only chain
+    reproduces the committed ``latest_evaluation_root`` — i.e. the presented ledger is exactly
+    the committed prior ledger plus zero-or-more appended records. The ledger ``root`` is a
+    prefix fold (:func:`chain_root`) over ``leaf_hash(record)``, so a prefix reproducing the
+    committed root proves every committed prior evaluation is present, unchanged, and in order
+    (omitting, rewriting, or reordering any changes the fold). An operator can therefore NOT
+    present an empty ledger to dodge the blind-set re-roll check: the empty-ledger root only
+    reproduces a committed root that is itself empty (a genuine first evaluation)."""
+    running = _CHAIN_GENESIS
+    if running == committed_root:
+        return True
+    for record in ledger.records:
+        running = _sha256(running + leaf_hash(record.model_dump(mode="json")))
+        if running == committed_root:
+            return True
+    return False
 
 
-def verify(root: str, signature: str, key: bytes) -> bool:
-    """Constant-time verification of :func:`sign`."""
-    return hmac.compare_digest(sign(root, key), signature)
+def sign(root: str, private_key: bytes) -> str:
+    """Sign a root with ed25519 (round-6). ``private_key`` is the 32-byte ed25519 seed
+    held EXTERNALLY by the curator (never committed). Returns the hex signature. ed25519
+    signing is deterministic, so the signature is machine-independent."""
+    sk = Ed25519PrivateKey.from_private_bytes(private_key)
+    return sk.sign(root.encode("utf-8")).hex()
+
+
+def verify(root: str, signature: str, public_key: bytes) -> bool:
+    """Verify an ed25519 signature over ``root`` against the committed 32-byte PUBLIC key.
+    A signature made with any other private key (a subject-minted key, an old HMAC secret,
+    a truncated/garbage signature) fails — only the holder of the private key matching this
+    committed public key can produce a verifying signature."""
+    try:
+        pk = Ed25519PublicKey.from_public_bytes(public_key)
+        pk.verify(bytes.fromhex(signature), root.encode("utf-8"))
+        return True
+    except (InvalidSignature, ValueError):
+        return False
+
+
+def ed25519_public_key(private_key: bytes) -> bytes:
+    """Derive the 32-byte ed25519 PUBLIC key from a 32-byte private seed. A pure crypto
+    utility (no key material is embedded here): the test/build helpers use it to commit a
+    public key into ``genesis_root.json`` from a private seed they hold, and to verify that
+    the committed public key is the one their signing seed corresponds to."""
+    return Ed25519PrivateKey.from_private_bytes(private_key).public_key().public_bytes_raw()
 
 
 # --------------------------------------------------------------------------- #
@@ -1426,10 +1495,11 @@ class Attestation(BaseModel):
     controls storage: you cannot omit, truncate, rewrite, reorder, or re-point
     any component without breaking a root or the signature.
 
-    The signature here is HMAC-SHA256; PRODUCTION uses ed25519 with a published
-    verify-key and the private key held by a party != the scored builder. The
-    anti-omission property comes from "the presented state must reproduce the
-    committed root"; the signature adds non-repudiation + tamper-evidence."""
+    The signature is ed25519 (round-6): the committed genesis commits ONLY the PUBLIC
+    verify-key, so any repo reader can verify but none can forge, and the private key is
+    held by a party != the scored subject. The anti-omission property comes from "the
+    presented state must reproduce the committed root"; the signature adds non-repudiation
+    + tamper-evidence."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -1578,11 +1648,18 @@ def validate(
     mandatory certify bindings — exposure ledger, prior evaluations, a non-inert
     ``pool_root`` / ``committed_k`` (``MISSING_LEDGER`` / ``PRECISION_SAMPLE_UNBOUND``);
     binds the history to the COMMITTED prior root and the attestation to the COMMITTED
-    chain (``ATTESTATION_NOT_EXTENDING`` / ``GENESIS_UNANCHORED``); and RECOMPUTES the
-    numerator by re-running the COMMITTED detector (resolved from the frozen
-    ``detector_id``) on the pinned SHAs (``NUMERATOR_UNVERIFIED``). A Report / producing
-    run presented for certification with no signed attestation is ``UNANCHORED``. The
-    non-strict path is unchanged, so existing per-check tests are unaffected."""
+    chain (``ATTESTATION_NOT_EXTENDING`` / ``GENESIS_UNANCHORED``); binds the certified run
+    to the terminal HEAD cohort (``DENOMINATOR_SHRINK`` / ``REPORT_DENOMINATOR_MISMATCH``,
+    F1); requires the presented ``prior_evaluations`` to reproduce the committed
+    evaluation-ledger root (``EVALUATED_MORE_THAN_ONCE``, F2); and RECOMPUTES the numerator by
+    re-running the COMMITTED detector (resolved from the frozen ``detector_id``) on the pinned
+    SHAs over the HEAD cohort (``NUMERATOR_UNVERIFIED``).
+
+    F3: certification is STRUCTURAL, not opt-in — a producing run presented together with a
+    headline Report WITHOUT ``strict`` or an ``attestation`` is ``UNANCHORED`` (a
+    produced+reported result must be certified). A certify request with no signed attestation
+    is likewise ``UNANCHORED``. The rest of the non-strict path is unchanged, so existing
+    per-check tests are unaffected."""
     result = ContractReport()
 
     try:
@@ -1647,6 +1724,21 @@ def validate(
 
         # Part B5 — the certify path. Additive: it runs after every ordinary check.
         _certifying = strict or attestation is not None
+        # F3: certification is STRUCTURAL, not opt-in. A run that produced results presented
+        # together with a headline Report is a produced+reported result — it can never be
+        # blessed UNANCHORED. Require certification (strict or a signed attestation); without
+        # it the produced+reported result is UNANCHORED.
+        if (
+            not _certifying
+            and run is not None
+            and _run_produced_results(run)
+            and report is not None
+        ):
+            result.add(
+                ViolationReason.UNANCHORED,
+                f"run {run.run_id}: produced results with a headline Report but no certification "
+                "(strict or a signed attestation) — a produced+reported result must be certified",
+            )
         if _certifying:
             _check_certification(
                 attestation=attestation,
@@ -1885,7 +1977,10 @@ def _check_exposure(
             f"run {run.run_id}: subject {run.subject!r} curated/inspected this cohort",
         )
         return
-    scored = _cohort_by_content_hash(history, run.cohort_content_hash)
+    # F1: resolve the scored cohort as the HEAD (``history.latest()``), not the run's declared
+    # (possibly stale) hash — exposure is judged against the terminal cohort the certify path
+    # requires the run to have evaluated.
+    scored = history.latest() if history is not None else None
     scored_ids = scored.identities() if scored is not None else set()
     scored_blind = _blind_identities(scored) if scored is not None else set()
     for record in ledger.records:
@@ -2059,12 +2154,17 @@ def _check_report(
     under-report the true denominator; the rediscovered set (when supplied) must be a
     subset of the actual blind identities and its size must equal the reported count.
 
-    A1: when a ``run`` is present the binding cohort is resolved from the RUN's
-    evaluated cohort FIRST (not the report's declared hash), and a report bound to a
-    DIFFERENT cohort than the run evaluated is ``REPORT_DENOMINATOR_MISMATCH`` — a
-    report can no longer point at an easier earlier version than the run scored. With
-    no run, the report must bind to the LATEST cohort version (a non-latest sibling is
-    rejected)."""
+    A1: when a ``run`` is present the report must denominate against exactly the run's
+    evaluated cohort, and a report bound to a DIFFERENT cohort than the run evaluated is
+    ``REPORT_DENOMINATOR_MISMATCH`` — a report can no longer point at an easier earlier
+    version than the run scored. With no run, the report must bind to the LATEST cohort
+    version (a non-latest sibling is rejected).
+
+    F1: the scored cohort is ALWAYS resolved as ``history.latest()`` — the terminal
+    (committed-extended head) version — NEVER as ``run.cohort_content_hash``. A run bound to
+    a stale earlier version (which drops a hard miss appended to the head later) therefore
+    denominates against the head blind count and mismatches, closing the "bind to an older,
+    smaller committed version while presenting the honest full history" hole."""
     if run is not None:
         # A1: the report must denominate against exactly the run's evaluated cohort.
         if (
@@ -2075,9 +2175,8 @@ def _check_report(
                 ViolationReason.REPORT_DENOMINATOR_MISMATCH,
                 "report cohort_content_hash is not the run's evaluated cohort",
             )
-        cohort = _cohort_by_content_hash(history, run.cohort_content_hash)
-        if cohort is None and history is not None:
-            cohort = history.latest()
+        # F1: bind the denominator to the HEAD cohort, not the run's declared (stale) hash.
+        cohort = history.latest() if history is not None else None
     else:
         cohort = _cohort_by_content_hash(history, report_view.cohort_content_hash)
         latest = history.latest() if history is not None else None
@@ -2434,6 +2533,38 @@ def _check_certification(
             "(a truncated / rewritten / re-anchored cohort cannot certify)",
         )
 
+    # F1 — the certified run MUST have evaluated the terminal (committed-extended head)
+    # cohort version. A run bound to a stale earlier version (or an unresolvable hash)
+    # denominates against a smaller blind set that silently dropped a hard miss appended to
+    # the head later; require ``run.cohort_content_hash == history.latest().content_hash``.
+    head = history.latest() if history is not None else None
+    if head is None:
+        result.add(
+            ViolationReason.REPORT_DENOMINATOR_MISMATCH,
+            "certification requires a resolvable head cohort to bind the denominator to",
+        )
+    elif run is not None and run.cohort_content_hash != head.content_hash:
+        result.add(
+            ViolationReason.DENOMINATOR_SHRINK,
+            f"certified run is bound to cohort {run.cohort_content_hash[:12]} which is not the head "
+            f"version {head.content_hash[:12]} (a stale/unresolvable bind drops later-added hard cases)",
+        )
+
+    # F2 — the presented prior_evaluations MUST reproduce + append-only-extend the committed
+    # evaluation-ledger root. Evaluate-once is COMMITTED monotonic state: an operator cannot
+    # present an empty (or truncated) ledger to dodge the A3 blind-set re-roll check — the
+    # empty-ledger root only reproduces a committed root that is itself empty (a genuine first
+    # evaluation). Combined with A3's blind-set overlap on the truthful ledger, a re-freeze
+    # re-score of an already-evaluated blind set is caught either way.
+    if evaluation_ledger is not None and not _evaluation_reproduces_committed(
+        evaluation_ledger, committed.latest_evaluation_root
+    ):
+        result.add(
+            ViolationReason.EVALUATED_MORE_THAN_ONCE,
+            "presented prior_evaluations does not reproduce + append-only-extend the committed "
+            "evaluation-ledger root (a truncated / re-anchored ledger cannot dodge evaluate-once)",
+        )
+
     # R5-1 + PART 2 — the numerator VERIFIER, RUN from committed state. ``validate`` RUNS
     # ``recompute_rediscovered`` itself: the ``scan_fn`` is resolved from the committed
     # DETECTOR_REGISTRY keyed by the frozen ``detector_id`` and the ``fetch_fn`` from the
@@ -2444,9 +2575,10 @@ def _check_certification(
     # detector PARSES fetched source as DATA; no target code is executed.
     if report is not None and report.rediscovered_blind_ids is not None:
         claimed = set(report.rediscovered_blind_ids)
-        scored = _cohort_by_content_hash(history, run.cohort_content_hash) if run is not None else None
-        if scored is None and history is not None:
-            scored = history.latest()
+        # F1: the numerator is recomputed over the HEAD cohort's blind entries, never the
+        # run's declared (possibly stale) cohort — the recompute cannot be bound to a smaller
+        # earlier version that dropped a later-added hard miss.
+        scored = history.latest() if history is not None else None
         if freeze is None or scored is None:
             result.add(
                 ViolationReason.NUMERATOR_UNVERIFIED,

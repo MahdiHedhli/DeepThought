@@ -181,13 +181,14 @@ wired into `check`, enforcing:
 - **FR-15 — Cryptographic anchoring (a certified score cannot be fabricated).** A
   certified score is bound to a single **committed, signed attestation root**
   covering ALL state, so it cannot be forged even by an operator who controls
-  storage. Stdlib-only, deterministic primitives (`hashlib`/`hmac`, no wall clock,
-  no randomness) provide: `leaf_hash` (sha256 of canonical JSON), `merkle_root`
+  storage. Deterministic primitives (stdlib `hashlib` for the roots, ed25519 via
+  `cryptography` for the signature, no wall clock, no randomness) provide: `leaf_hash` (sha256 of canonical JSON), `merkle_root`
   (order-independent root over a sorted leaf set), `chain_root` (an append-only fold
   from a fixed genesis — dropping, reordering, or rewriting ANY entry changes it),
-  and `sign`/`verify` (constant-time HMAC-SHA256; **production swaps HMAC for
-  ed25519** with a published verify-key and the private signing key held by a party
-  that is **not** the scored builder — curator ≠ subject). Every append-only surface
+  and `sign`/`verify` — **ed25519 asymmetric signatures** (round-6, FR-19): the
+  committed `genesis_root.json` holds ONLY the ed25519 PUBLIC verify-key, so any repo
+  reader can VERIFY but none can FORGE a signature; the private signing key is held
+  externally by a party that is **not** the scored subject (curator ≠ subject). Every append-only surface
   exposes its root: `CohortHistory.history_root`, and `.root` on `ExclusionLog`,
   `ExposureLedger`, `EvaluationLedger`, `AchievabilityLog`. The freeze commits the
   confusion-pair `pool_root` before the precision seed is derivable; exposure records
@@ -195,12 +196,13 @@ wired into `check`, enforcing:
   re-supplying old cohort versions. A frozen `Attestation` binds every component root
   plus `freeze_hash`, `pool_root`, canonical `run_id`, `report_hash`, `evaluator_id`,
   and `attested_at`, and is signed over the Merkle `attestation_root`. `validate`
-  gains keyword-only `attestation`, `verify_key`, and `strict`: on the certify path it
+  gains keyword-only `attestation` and `strict` (the verify-key is loaded from committed
+  state, not a caller arg — FR-18): on the certify path it
   RECOMPUTES every root from the presented objects and fails closed unless each equals
-  the attestation's committed root (`ATTESTATION_MISMATCH`), the signature verifies
-  (`ATTESTATION_INVALID` / `ATTESTATION_UNSIGNED`), and every referenced component is
-  present (`ATTESTATION_INCOMPLETE`); a Report / producing run offered for
-  certification with no signed attestation + verify-key is `UNANCHORED`. The
+  the attestation's committed root (`ATTESTATION_MISMATCH`), the signature verifies against
+  the committed ed25519 public key (`ATTESTATION_INVALID` / `ATTESTATION_UNSIGNED`), and
+  every referenced component is present (`ATTESTATION_INCOMPLETE`); a Report / producing run
+  offered for certification with no signed attestation is `UNANCHORED`. The
   anti-omission guarantee comes from "the presented state must reproduce the committed
   root"; the signature adds non-repudiation and tamper-evidence. The non-strict path is
   unchanged, so every prior call site is unaffected.
@@ -264,10 +266,52 @@ wired into `check`, enforcing:
   the exposure ledger + prior evaluations + a non-inert `pool_root` / `committed_k` are
   MANDATORY (`MISSING_LEDGER` / `PRECISION_SAMPLE_UNBOUND`); the freeze binds the PRODUCING
   attempt (`BAD_FREEZE_BINDING`); and a certified report must not carry a free
-  `achievable_recall` (`ACHIEVABLE_UNBOUND`). **The FINAL residual is exactly (i)
-  genesis-commit completeness (git-reviewable) and (ii) physical key custody (curator ≠
-  subject, organizational)** — everything else a validator can run, it now runs from
-  committed state.
+  `achievable_recall` (`ACHIEVABLE_UNBOUND`).
+
+- **FR-19 — Round-6: the floor seals (bind-to-head, committed eval-ledger, structural
+  certify, ed25519 key custody).** A sixth audit found four survivors that the round-5
+  layer left open; all four are now closed, leaving only the irreducible floor.
+  - **F1 — bind the denominator/numerator/exposure to the HEAD cohort.** A run could bind
+    to an older, smaller committed version (or an unresolvable hash) while presenting the
+    honest full history, so the denominator/recompute/exposure silently used the STALE
+    version and dropped a hard miss appended later. `_check_report`, the certification
+    numerator recompute, and `_check_exposure` now resolve the scored cohort as
+    `history.latest()` (the terminal, committed-extended head), NEVER the run's declared
+    hash; and strict certification requires `run.cohort_content_hash ==
+    history.latest().content_hash` — a stale or unresolvable bind is `DENOMINATOR_SHRINK`
+    / `REPORT_DENOMINATOR_MISMATCH`. Shrinking the pinned set now requires APPENDING a new
+    head version whose removal/role-downgrade needs a logged `COHORT_CORRECTION` event.
+  - **F2 — the EvaluationLedger is COMMITTED monotonic state, not caller-supplied.**
+    Evaluate-once was defeated by presenting an empty caller `prior_evaluations`, re-scoring
+    the blind set across trivial re-freezes. `genesis_root.json` + `CommittedGenesisState`
+    gain `latest_evaluation_root`; strict certification requires the presented
+    `prior_evaluations` to reproduce + append-only-EXTEND the committed evaluation root (a
+    truncated / re-anchored ledger → `EVALUATED_MORE_THAN_ONCE`), and `advance_committed_root`
+    advances it on a successful certify. Combined with the A3 blind-set overlap check on the
+    truthful ledger, a re-freeze re-score of an already-evaluated blind set is caught either
+    way.
+  - **F3 — certification is STRUCTURAL, not opt-in.** The entire certify path ran only when
+    `strict or attestation is not None`, so a producing run + a headline Report presented
+    WITHOUT them skipped it. `validate()` now REQUIRES certification whenever a run that
+    produced results is presented together with a headline Report — absent `strict` or a
+    signed `attestation`, the produced+reported result is `UNANCHORED`. A produced+reported
+    result can never be blessed unanchored.
+  - **F4 — ed25519 signatures; commit only the PUBLIC key.** `sign`/`verify` were symmetric
+    HMAC over a plaintext-committed shared secret, so any repo reader could sign. They are now
+    ed25519: `sign(root, private_key)` signs, `verify(root, signature, public_key)` verifies,
+    and `genesis_root.json` commits ONLY `verify_key_pub_hex` (the ed25519 PUBLIC key) — the
+    private signing key is NEVER committed. `load_committed_verify_key()` returns the public
+    key; certification verifies against it (`ATTESTATION_INVALID` for any non-committed key).
+    A repo reader can verify but cannot forge; `cryptography` is a declared dependency.
+
+- **The FINAL residual is exactly (i) genesis-commit completeness — that what the curator
+  committed at genesis is itself complete — which is git-reviewable, not validator-checkable;
+  and (ii) ed25519 private-key custody — that the private signing key is held by a party that
+  is NOT the scored subject (curator ≠ subject) — which is organizational.** Everything else a
+  validator can run, it now runs from committed state. In this repo the committed public key
+  corresponds to a fixed test/smoke signing seed held in the test/build helpers so the smoke
+  and unit tests can produce honest attestations; a production deployment commits the curator's
+  real public key while the real private key stays external.
 
 ## Acceptance criteria
 
@@ -450,7 +494,7 @@ check.
     strict/certify path RECOMPUTES each root and fails closed unless all match
     (`ATTESTATION_MISMATCH`), the signature verifies (`ATTESTATION_INVALID` /
     `ATTESTATION_UNSIGNED`), and every referenced component is present
-    (`ATTESTATION_INCOMPLETE`); certification with no signed attestation + verify-key is
+    (`ATTESTATION_INCOMPLETE`); certification with no signed attestation is
     `UNANCHORED`. A forged signature, an omitted/tampered history version, a rewritten ledger
     entry, and a swapped pool are each rejected; a fully honest signed attestation is accepted.
 
@@ -527,6 +571,29 @@ the committed-state form, never by weakening a check.
 55. **(R5-6/FR-18)** A certified report must not carry a free `achievable_recall`
     (`ACHIEVABLE_UNBOUND`); it stays a labelled diagnostic for non-certified reports.
 
+### Round-6 acceptance criteria (the floor seals)
+
+56. **(F1/FR-19)** `_check_report`, the certification numerator recompute, and `_check_exposure`
+    resolve the scored cohort as `history.latest()` (the head), never the run's declared hash;
+    strict certification requires `run.cohort_content_hash == history.latest().content_hash`. A
+    run bound to a stale earlier version (honest full history presented) or an unresolvable hash
+    is rejected (`DENOMINATOR_SHRINK` / `REPORT_DENOMINATOR_MISMATCH`); a head-bound run is
+    accepted.
+57. **(F2/FR-19)** `genesis_root.json` + `CommittedGenesisState` carry `latest_evaluation_root`;
+    strict certification requires the presented `prior_evaluations` to reproduce + append-only-
+    extend it (`EVALUATED_MORE_THAN_ONCE` otherwise), and `advance_committed_root` advances it.
+    A second eval of the same blind set under a new freeze is rejected — presenting the truthful
+    committed ledger trips A3's `BLIND_REEVALUATED`, presenting an empty ledger to dodge trips
+    `EVALUATED_MORE_THAN_ONCE`; an honest first eval is accepted and advances the committed root.
+58. **(F3/FR-19)** A producing run presented together with a headline Report WITHOUT `strict` or
+    an `attestation` is `UNANCHORED` — certification is mandatory for a produced+reported result.
+59. **(F4/FR-19)** `sign`/`verify` are ed25519; `genesis_root.json` commits ONLY
+    `verify_key_pub_hex` (the ed25519 PUBLIC key) and NEVER the private key. An attestation signed
+    with a non-committed private key (or the old symmetric secret) is `ATTESTATION_INVALID`; the
+    honest attestation (test private key) verifies against the committed public key and is
+    accepted; the private key is absent from `genesis_root.json`. `cryptography` is a declared
+    dependency.
+
 ## Open questions
 
 - **Non-blocking.** Does the contract live in a new `benchmarks/harness/contract.py`
@@ -550,15 +617,19 @@ committed `genesis_history_root`), freezes a dummy detector (committing the conf
 a `Report` and a panel-adjudicated precision, installs a fake frozen detector + fetcher
 into the COMMITTED module-level `DETECTOR_REGISTRY` / `FETCH_FN` so `validate()` RUNS the
 numerator recompute itself (FR-16/FR-18 — no caller `recomputed_rediscovered`), builds and
-SIGNS an `Attestation` with the COMMITTED evaluator key + id chained to the committed
-latest attestation root (FR-17/FR-18 — no caller `verify_key`), and passes strict
-certification; then demonstrates each guard failing: an in-place entry edit, a silent
-denominator shrink, a second blind evaluation, and a curator==subject score, plus the
-cryptographic-anchoring fail-closed cases — a forged signature (`ATTESTATION_INVALID`, now
-verified against the committed key), an omitted component (`ATTESTATION_INCOMPLETE`), and a
-certify path with no attestation (`UNANCHORED`) — plus the out-of-contract guards: a
-numerator the committed detector does not reproduce (`NUMERATOR_UNVERIFIED`, via swapping in
-a fake detector that reproduces nothing) and a chain base not rooted in the committed
-genesis (`GENESIS_UNANCHORED`) — each fail `check` with a typed reason. The `report` view
+ed25519-SIGNS an `Attestation` (with the test/build signing seed whose PUBLIC key is
+committed in `genesis_root.json`) chained to the committed latest attestation root
+(FR-17/FR-18/FR-19 — no caller `verify_key`), and passes strict certification; then
+demonstrates each guard failing: an in-place entry edit, a silent denominator shrink, a
+second blind evaluation, and a curator==subject score, plus the cryptographic-anchoring
+fail-closed cases — a forged signature (`ATTESTATION_INVALID`, verified against the committed
+ed25519 public key), an omitted component (`ATTESTATION_INCOMPLETE`), and a certify path with
+no attestation (`UNANCHORED`) — plus the out-of-contract guards: a numerator the committed
+detector does not reproduce (`NUMERATOR_UNVERIFIED`, via swapping in a fake detector that
+reproduces nothing) and a chain base not rooted in the committed genesis
+(`GENESIS_UNANCHORED`) — plus the round-6 floor seals: a stale non-head run
+(`DENOMINATOR_SHRINK`, F1), a `prior_evaluations` that does not reproduce the committed
+evaluation-ledger root (`EVALUATED_MORE_THAN_ONCE`, F2), and a produced+reported run with no
+certification (`UNANCHORED`, F3) — each fail `check` with a typed reason. The `report` view
 prints blind recall as the headline alongside the four labeled secondaries. Only after this
 gate is green does the shared-kernel work in the tranche begin.

@@ -4,16 +4,20 @@
 # Builds a 2-entry cohort v1, freezes a dummy detector (committing the confusion
 # pool root AND the precision sample size k), records exactly one blind evaluation,
 # binds a Report + a panel-adjudicated precision, RECOMPUTES the numerator with a
-# (fake, deterministic) frozen detector re-run, builds and SIGNS an Attestation
+# (fake, deterministic) frozen detector re-run, builds and ed25519-SIGNS an Attestation
+# (with the test/build signing seed whose PUBLIC key is committed in genesis_root.json)
 # chained to the git-committed genesis root, and passes strict certification. Then
 # demonstrates each guard FAILING with a typed reason: an in-place entry edit, a
 # silent denominator shrink, a second blind evaluation, a curator==subject score,
 # the cryptographic-anchoring fail-closed cases (forged signature, omitted
 # component, no attestation), a PART-2 numerator claim the frozen detector does not
-# reproduce (NUMERATOR_UNVERIFIED, via a fake detector), and a PART-3 chain base not
-# rooted in the committed genesis (GENESIS_UNANCHORED). Finally prints the Report
-# with blind recall as the headline plus the four labelled secondaries. Exit 0 on
-# success (all positives pass AND all guards trip with the expected reason).
+# reproduce (NUMERATOR_UNVERIFIED, via a fake detector), a PART-3 chain base not
+# rooted in the committed genesis (GENESIS_UNANCHORED), and the round-6 floor seals:
+# a stale non-head run (F1, DENOMINATOR_SHRINK), a prior_evaluations that does not
+# reproduce the committed eval-ledger root (F2, EVALUATED_MORE_THAN_ONCE), and a
+# produced+reported run with no certification (F3, UNANCHORED). Finally prints the
+# Report with blind recall as the headline plus the four labelled secondaries. Exit 0
+# on success (all positives pass AND all guards trip with the expected reason).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -51,6 +55,7 @@ from contract import (
     ContractViolation,
     _canonical_run_id,
     build_attestation,
+    ed25519_public_key,
     load_committed_evaluator_id,
     load_committed_genesis_root,
     load_committed_verify_key,
@@ -59,16 +64,24 @@ from contract import (
     sample_confusion_pairs,
     validate,
 )
+import hashlib
+
+import contract
 import verifier
 from verifier import recompute_certified_numerator
 
-# The committed evaluator signing key — DETERMINISTIC (never read from os.urandom). It
-# MATCHES the committed verify-key in genesis_root.json so the honest attestation verifies;
-# validate() loads the verify-key from committed state, never from a caller arg (R5-4).
-# PRODUCTION commits an ed25519 PUBLIC key while the private key is held by a party != the
-# scored subject (curator != subject).
-KEY = load_committed_verify_key()
+# The FIXED test/build ed25519 SIGNING seed (the PRIVATE key) — DETERMINISTIC (never read
+# from os.urandom). It lives ONLY here in the smoke (a test/build helper), NEVER in
+# genesis_root.json: the committed file holds ONLY the derived PUBLIC key (F4). validate()
+# verifies the attestation against that committed public key; a repo reader can verify but
+# cannot forge. PRODUCTION holds the private key externally (curator != subject) — the
+# organizational key-custody floor. The sanity assert confirms the committed public key is
+# exactly the one this signing seed corresponds to.
+SIGNING_KEY = hashlib.sha256(b"deepthought/evaluation-contract/committed-test-ed25519-seed/v1").digest()
 EVALUATOR_ID = load_committed_evaluator_id()
+assert ed25519_public_key(SIGNING_KEY) == load_committed_verify_key(), (
+    "the committed ed25519 public key must match the test/build signing seed"
+)
 
 
 def entry(vuln, probe, role=Role.BLIND):
@@ -197,7 +210,7 @@ attestation = build_attestation(
     report=report_view,
     evaluator_id=EVALUATOR_ID,  # the COMMITTED evaluator id (curator != subject)
     attested_at="2026-07-16T12:00:00Z",
-    key=KEY,
+    key=SIGNING_KEY,
     prior_attestation_root=load_committed_genesis_root(),  # R5-2/PART3: chain from the committed latest attestation root
     exclusions=None,
     ledger=ledger,
@@ -315,7 +328,7 @@ print("== guard 7: PART 3 genesis anchoring — a chain base not rooted in the c
 # an attestation whose prior_attestation_root is NOT the committed latest-attestation root
 unrooted_att = build_attestation(
     history=history, freeze=freeze, run=run, report=report_view,
-    evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=KEY,
+    evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=SIGNING_KEY,
     prior_attestation_root="deadbeef" * 8,  # a fresh, unreviewable, un-anchored genesis
     exclusions=None, ledger=ledger, evaluation_ledger=evaluations, achievability=None,
 )
@@ -326,6 +339,55 @@ rep7 = validate(
 )
 expect("un-anchored chain base trips GENESIS_UNANCHORED", ViolationReason.GENESIS_UNANCHORED in rep7.reasons())
 print(f"        -> {rep7.summary()}")
+
+print()
+print("== guard 8: F1 head-binding — a certified run bound to a stale (non-head) cohort ==")
+# the head appends a hard case (e3); the run is still bound to the STALE v1, silently dropping
+# it — validate() binds the denominator to the HEAD, so a non-head run trips DENOMINATOR_SHRINK
+e3 = entry("3" * 40, "sinkc(url)", Role.BLIND)
+v2_head = Cohort(version="v2", entries=[e1, e2, e3], reason="append a hard case at the head", parent_version="v1").sealed()
+rep8 = validate(
+    history=CohortHistory(versions=[v1, v2_head]), ledger=ledger, run=run, freeze=freeze,
+    report=report_view, precision=precision_view, prior_evaluations=evaluations,
+    attestation=attestation, strict=True,
+)
+expect("stale non-head run trips DENOMINATOR_SHRINK", ViolationReason.DENOMINATOR_SHRINK in rep8.reasons())
+print(f"        -> {rep8.summary()}")
+
+print()
+print("== guard 9: F2 committed eval-ledger — an empty prior_evaluations cannot dodge a committed prior eval ==")
+# the committed evaluation-ledger already records a prior evaluation (evaluate-once is COMMITTED
+# monotonic state). Presenting an EMPTY prior_evaluations to dodge the re-roll check does not
+# reproduce the committed non-empty eval root -> EVALUATED_MORE_THAN_ONCE. We install a committed
+# state whose evaluation_root reflects that prior eval (the smoke otherwise uses the real file).
+prior_committed = EvaluationLedger()
+prior_committed.record(
+    cohort_content_hash=v1.content_hash, freeze_hash="an-earlier-freeze",
+    subject="codex", blind_ids=[e2.identity_hash],
+)
+_orig_loader = contract.load_committed_genesis_state
+_committed_with_prior_eval = _orig_loader().model_copy(
+    update={"latest_evaluation_root": prior_committed.root}
+)
+contract.load_committed_genesis_state = lambda *a, **k: _committed_with_prior_eval
+try:
+    rep9 = validate(
+        history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+        precision=precision_view, prior_evaluations=EvaluationLedger(),  # the dodge: an empty ledger
+        attestation=attestation, strict=True,
+    )
+finally:
+    contract.load_committed_genesis_state = _orig_loader  # restore the real committed loader
+expect("empty prior_evaluations dodging a committed prior eval trips EVALUATED_MORE_THAN_ONCE", ViolationReason.EVALUATED_MORE_THAN_ONCE in rep9.reasons())
+print(f"        -> {rep9.summary()}")
+
+print()
+print("== guard 10: F3 structural certify — a produced+reported run WITHOUT certification is UNANCHORED ==")
+# a producing run + a headline Report presented with NO strict/attestation can never be blessed
+# unanchored; certification is mandatory for a produced+reported result
+rep10 = validate(history=history, ledger=ledger, run=run, freeze=freeze, report=report_view)
+expect("produced+reported run without certification trips UNANCHORED", ViolationReason.UNANCHORED in rep10.reasons())
+print(f"        -> {rep10.summary()}")
 
 print()
 print("== report: blind recall is the headline, four labelled secondaries ==")
@@ -349,5 +411,5 @@ print()
 if failures:
     print(f"SMOKE FAILED: {len(failures)} check(s) failed: {failures}")
     sys.exit(1)
-print("SMOKE 008 OK: contract certifies the signed run and every guard (incl. anchoring) trips with a typed reason.")
+print("SMOKE 008 OK: contract certifies the ed25519-signed run and every guard (anchoring + round-6 floor) trips with a typed reason.")
 PYEOF

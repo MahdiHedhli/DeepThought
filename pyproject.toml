@@ -20,6 +20,11 @@ dependencies = [
     # schema refs to local, hermetic stubs (no network). Ships transitively with
     # jsonschema>=4.18; declared here because we import it directly.
     "referencing>=0.30",
+    # ed25519 asymmetric signatures for the EvaluationContract attestation chain
+    # (feature 008, round 6): genesis_root.json commits ONLY the public verify-key,
+    # so a repo reader can verify but not forge; the private signing key is held
+    # externally by the curator (curator != subject).
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

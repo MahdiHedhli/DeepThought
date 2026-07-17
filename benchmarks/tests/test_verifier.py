@@ -15,6 +15,7 @@ SAFETY: the detector reads fetched files as DATA (``scan_source`` parses text); 
 target code is executed here — Article III stays intact.
 """
 
+import hashlib
 import json
 import os
 import socket
@@ -44,6 +45,7 @@ from contract import (  # noqa: E402
     ViolationReason,
     _canonical_run_id,
     build_attestation,
+    ed25519_public_key,
     pool_root_of,
     precision_sample_seed,
     sample_confusion_pairs,
@@ -51,7 +53,10 @@ from contract import (  # noqa: E402
 )
 from verifier import recompute_rediscovered  # noqa: E402
 
-KEY = b"deepthought-verifier-test-key-0123456789"
+# A FIXED test ed25519 keypair (F4): the PRIVATE seed signs, the derived PUBLIC key is what
+# the hermetic committed-state fixture commits and ``validate`` verifies against.
+KEY = hashlib.sha256(b"deepthought-verifier-test-ed25519-seed/v1").digest()  # 32-byte private seed
+_TEST_PUB = ed25519_public_key(KEY)  # the committed ed25519 PUBLIC key
 EVALUATOR_ID = "curator-not-subject"
 CHAIN_BASE = "abad1dea" * 8  # a fixed committed latest-attestation root for the hermetic fixtures
 
@@ -142,7 +147,7 @@ def _install_committed(monkeypatch, hist, *, detector_id="d", scan=fake_scan, re
         latest_history_root=phr,
         latest_attestation_root=CHAIN_BASE,
         evaluator_id=EVALUATOR_ID,
-        verify_key=KEY,
+        verify_key=_TEST_PUB,
     )
     monkeypatch.setattr(contract, "load_committed_genesis_state", lambda *a, **k: state)
     monkeypatch.setattr(verifier, "FETCH_FN", fake_fetch)

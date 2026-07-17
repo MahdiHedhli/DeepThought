@@ -6,6 +6,7 @@ tests. Everything is DETERMINISTIC: timestamps and sample seeds are passed in,
 never read from the wall clock or an RNG the test does not control.
 """
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -48,6 +49,7 @@ from contract import (  # noqa: E402
     build_attestation,
     candidates_from_adjudications,
     chain_root,
+    ed25519_public_key,
     leaf_hash,
     merkle_root,
     pool_root_of,
@@ -63,8 +65,15 @@ A40 = "a" * 40
 B40 = "b" * 40
 C40 = "c" * 40
 
-# A fixed evaluator key (deterministic tests never read os.urandom).
-KEY = b"deepthought-test-evaluator-key-0123456789"
+# A FIXED test ed25519 keypair (F4). Deterministic (derived from a fixed seed, never
+# os.urandom). The PRIVATE seed (``KEY``) is the test/build signing key — it lives ONLY in
+# this test helper, never in genesis_root.json; the PUBLIC key (``_TEST_PUB``) is what the
+# hermetic committed-state fixture commits and ``validate`` verifies attestations against. So
+# the tests demonstrate the ed25519 mechanism: an attestation signed with the test PRIVATE key
+# verifies against the committed PUBLIC key, and a signature made with any non-committed key is
+# ``ATTESTATION_INVALID``.
+KEY = hashlib.sha256(b"deepthought-test-evaluator-ed25519-seed/v1").digest()  # 32-byte private seed
+_TEST_PUB = ed25519_public_key(KEY)  # the committed ed25519 PUBLIC key
 
 # The committed evaluator id + the attestation-chain base the hermetic certify fixtures
 # use. Round-5 loads the verify-key, evaluator id, genesis root, and prior history baseline
@@ -1328,12 +1337,14 @@ def test_b1_b2_anchoring_primitives_are_deterministic():
     # merkle_root: order-independent over the SAME set; membership-sensitive.
     assert merkle_root(["a", "b", "c"]) == merkle_root(["c", "b", "a"])
     assert merkle_root(["a", "b", "c"]) != merkle_root(["a", "b"])
-    # sign/verify: round-trips; a forged signature or a wrong key fails (constant-time).
+    # sign/verify: ed25519 round-trips; a signature made with a non-committed key, or a
+    # garbage signature, fails against the committed PUBLIC key (F4).
     root = merkle_root(["a", "b"])
-    sig = sign(root, KEY)
-    assert verify(root, sig, KEY)
-    assert not verify(root, sig, b"a-different-key")
-    assert not verify(root, "00" * 32, KEY)
+    sig = sign(root, KEY)  # signed with the test PRIVATE seed
+    assert verify(root, sig, _TEST_PUB)  # verifies against the matching PUBLIC key
+    other_pub = ed25519_public_key(hashlib.sha256(b"a-different-seed").digest())
+    assert not verify(root, sig, other_pub)  # a different (non-committed) key fails
+    assert not verify(root, "00" * 32, _TEST_PUB)  # a malformed signature fails
 
 
 # B1 — history_root closes truncation/omission/reorder.
@@ -1503,20 +1514,24 @@ def _install_committed(
     prior_history_root=None,
     detector_id="d",
     scan=None,
-    verify_key=KEY,
+    verify_key=_TEST_PUB,
     evaluator_id=EVALUATOR_ID,
+    evaluation_root=None,
 ):
     """Install the COMMITTED anchor state + committed detector/fetcher so a strict certify
-    RUNS its verifications hermetically from committed state (R5-1..R5-4). ``validate``
-    resolves the verify-key, evaluator id, prior history root, and chain root from
-    ``contract.load_committed_genesis_state`` and the detector/fetcher from ``verifier``;
-    all are monkeypatched here. ``prior_history_root`` defaults to the presented history's
-    full root (a valid append-only extension by zero)."""
+    RUNS its verifications hermetically from committed state (R5-1..R5-4, F1, F2, F4).
+    ``validate`` resolves the verify-key (ed25519 PUBLIC key), evaluator id, prior history
+    root, committed evaluation-ledger root, and chain root from
+    ``contract.load_committed_genesis_state`` and the detector/fetcher from ``verifier``; all
+    are monkeypatched here. ``prior_history_root`` defaults to the presented history's full
+    root (a valid append-only extension by zero); ``evaluation_root`` (F2) defaults to the
+    reproducible empty-ledger root."""
     phr = prior_history_root if prior_history_root is not None else presented_history.history_root
     state = contract.CommittedGenesisState(
         genesis_history_root=phr,
         latest_history_root=phr,
         latest_attestation_root=chain_from,
+        latest_evaluation_root=evaluation_root if evaluation_root is not None else contract._EMPTY_ROOT,
         evaluator_id=evaluator_id,
         verify_key=verify_key,
     )
@@ -1529,7 +1544,16 @@ def _install_committed(
     monkeypatch.setitem(verifier.DETECTOR_REGISTRY, detector_id, lambda: (scan or _fake_scan))
 
 
-def _anchored(monkeypatch, *, prior_attestation_root=None, files=None, scan=None, chain_from=ATT_CHAIN_BASE):
+def _anchored(
+    monkeypatch,
+    *,
+    prior_attestation_root=None,
+    files=None,
+    scan=None,
+    chain_from=ATT_CHAIN_BASE,
+    evln=None,
+    committed_evaluation_root=None,
+):
     """A fully honest, anchored evaluation bundle plus its signed Attestation, with the
     COMMITTED state + committed detector/fetcher installed to match it. Reused by the B5
     fail-closed cases and the Round-4/5 certify cases (each tampers exactly one thing). The
@@ -1581,9 +1605,10 @@ def _anchored(monkeypatch, *, prior_attestation_root=None, files=None, scan=None
     excl = ExclusionLog(
         events=[ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity="z", from_version="v0", to_version="v1")]
     )
-    evln = EvaluationLedger()
+    evln = EvaluationLedger() if evln is None else evln
     _install_committed(
-        monkeypatch, presented_history=hist, files=files or _default_files(), chain_from=chain_from, scan=scan
+        monkeypatch, presented_history=hist, files=files or _default_files(), chain_from=chain_from, scan=scan,
+        evaluation_root=committed_evaluation_root,
     )
     att = build_attestation(
         history=hist,
@@ -1767,7 +1792,8 @@ def test_r5_3_certify_bindings_are_mandatory(monkeypatch):
 # signed and passed by the subject, cannot certify (validate uses the committed key).
 def test_r5_4_verify_key_and_evaluator_from_committed_state(monkeypatch):
     a = _anchored(monkeypatch)
-    subject_key = b"subject-minted-key-attacker-controls-0000"
+    # a 32-byte ed25519 seed the SUBJECT mints — a valid key, but NOT the committed one
+    subject_key = hashlib.sha256(b"subject-minted-key-attacker-controls/v1").digest()
     self_signed = build_attestation(
         history=a["hist"], freeze=a["freeze"], run=a["run"], report=a["report"],
         evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=subject_key,
@@ -1830,21 +1856,25 @@ def test_r5_2_advance_committed_root_persists(tmp_path):
         _json.dumps(
             {
                 "genesis_history_root": "aa" * 32,
-                "evaluator": {"id": EVALUATOR_ID, "verify_key_hex": KEY.hex()},
+                "evaluator": {"id": EVALUATOR_ID, "verify_key_pub_hex": _TEST_PUB.hex()},
             }
         ),
         encoding="utf-8",
     )
-    # before any advance: latest defaults to the genesis / attestation-chain base
+    # before any advance: latest defaults to the genesis / attestation-chain / empty-eval base
     before = contract.load_committed_genesis_state(p)
     assert before.latest_history_root == "aa" * 32
     assert before.latest_attestation_root == contract._ATTESTATION_CHAIN_GENESIS
+    assert before.latest_evaluation_root == contract._EMPTY_ROOT  # F2: empty-ledger baseline
 
-    contract.advance_committed_root(history_root="bb" * 32, attestation_root="cc" * 32, path=p)
+    contract.advance_committed_root(
+        history_root="bb" * 32, attestation_root="cc" * 32, evaluation_root="dd" * 32, path=p
+    )
     after = contract.load_committed_genesis_state(p)
     assert after.genesis_history_root == "aa" * 32  # immutable
     assert after.latest_history_root == "bb" * 32  # advanced
     assert after.latest_attestation_root == "cc" * 32
+    assert after.latest_evaluation_root == "dd" * 32  # F2: the eval root advances too
 
 
 # --------------------------------------------------------------------------- #
@@ -2034,3 +2064,127 @@ def test_part3_certify_chain_base_must_root_in_committed_genesis(monkeypatch):
     # the honest chain, rooted in the committed latest-attestation root, is accepted
     rooted = _anchored(monkeypatch)
     assert _certify(rooted).ok, _reasons(_certify(rooted))
+
+
+# --------------------------------------------------------------------------- #
+# Round-6 (the floor): bind-to-head (F1), committed eval-ledger (F2), structural
+# certify (F3), ed25519 key custody (F4). After these the only residual is the
+# irreducible floor — genesis-commit completeness (git-reviewable) + ed25519
+# private-key custody (organizational, curator != subject).
+# --------------------------------------------------------------------------- #
+
+
+# F1 — the certified run MUST bind to the terminal HEAD cohort. A run bound to a stale
+# earlier version (honest full history presented) or an unresolvable hash is rejected.
+def test_f1_certify_run_must_bind_the_head_cohort(monkeypatch):
+    ea, fa = _rc_entry("a", rediscovered=True)
+    eb, fb = _rc_entry("b", rediscovered=False)
+    ec, fc = _rc_entry("c", rediscovered=False)
+    files = {**fa, **fb, **fc}
+    v1 = _cohort("v1", [ea, eb])
+    v2 = _cohort("v2", [ea, eb, ec], reason="append hard case c", parent="v1")  # head adds a case
+    full = CohortHistory(versions=[v1, v2])  # the committed head-extended history
+
+    # head-bound run (v2) with the honest full history certifies
+    ok = _chain_certify(monkeypatch, [v1, v2], v2, rediscovered_entries=[ea], files=files, prior_history=full)
+    assert ok.ok, _reasons(ok)
+
+    # a run bound to the STALE earlier version v1 (honest full history presented) is rejected:
+    # v1 is not the head, so it silently drops the hard case appended at v2
+    stale = _chain_certify(monkeypatch, [v1, v2], v1, rediscovered_entries=[ea], files=files, prior_history=full)
+    assert not stale.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(stale)
+
+    # a run bound to an UNRESOLVABLE cohort hash (a version never appended to history) is
+    # likewise rejected — it is not the head either
+    v3_unpresented = _cohort("v3", [ea, eb, ec], reason="never appended", parent="v2")
+    unresolvable = _chain_certify(
+        monkeypatch, [v1, v2], v3_unpresented, rediscovered_entries=[ea], files=files, prior_history=full
+    )
+    assert not unresolvable.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(unresolvable)
+
+
+# F2 — the EvaluationLedger is COMMITTED monotonic state: the presented prior_evaluations
+# must reproduce the committed evaluation-ledger root. Evaluate-once cannot be dodged with an
+# empty ledger across a re-freeze.
+def test_f2_evaluation_ledger_is_committed_monotonic_state(monkeypatch):
+    # (1) honest FIRST eval: empty prior_evaluations, committed eval root = empty → accept
+    a = _anchored(monkeypatch)
+    assert _certify(a).ok, _reasons(_certify(a))
+
+    # the blind cohort + subject a second eval would re-roll (fixed identities matching _anchored)
+    a_entry = _entry(vuln=_A_VULN, patched=_A_PATCHED, paths=["a.py"], probe="sinka(x)", role="blind")
+    b_entry = _entry(vuln=_B_VULN, patched=_B_PATCHED, paths=["b.py"], probe="sinkb(x)", role="blind")
+    v1 = _cohort("v1", [a_entry, b_entry])
+    # the TRUTHFUL committed evaluation-ledger already records a prior eval of this blind set
+    prior = EvaluationLedger()
+    prior.record(
+        cohort_content_hash=v1.content_hash,
+        freeze_hash="an-earlier-freeze",
+        subject="codex",
+        blind_ids=[a_entry.identity_hash, b_entry.identity_hash],
+    )
+
+    # (2a) presenting the TRUTHFUL committed ledger reproduces the committed eval root (F2
+    #      passes), but A3's blind-set overlap catches the re-roll → BLIND_REEVALUATED
+    a_truthful = _anchored(monkeypatch, evln=prior, committed_evaluation_root=prior.root)
+    truthful = _certify(a_truthful)
+    assert not truthful.ok and ViolationReason.BLIND_REEVALUATED in _reasons(truthful)
+
+    # (2b) presenting an EMPTY prior_evaluations to DODGE the re-roll check does not reproduce
+    #      the committed (non-empty) eval root → EVALUATED_MORE_THAN_ONCE (F2)
+    a_dodge = _anchored(monkeypatch, evln=EvaluationLedger(), committed_evaluation_root=prior.root)
+    dodge = _certify(a_dodge)
+    assert not dodge.ok and ViolationReason.EVALUATED_MORE_THAN_ONCE in _reasons(dodge)
+
+
+# F3 — certification is STRUCTURAL, not opt-in. A producing run presented together with a
+# headline Report WITHOUT strict/attestation is UNANCHORED.
+def test_f3_produced_and_reported_run_requires_certification(monkeypatch):
+    a = _anchored(monkeypatch)
+    # a producing run + a headline Report, validated WITHOUT strict/attestation → UNANCHORED
+    rep = validate(
+        history=a["hist"], run=a["run"], freeze=a["freeze"], report=a["report"], ledger=a["ledger"]
+    )
+    assert not rep.ok and ViolationReason.UNANCHORED in _reasons(rep)
+    # the SAME bundle, certified (strict + signed attestation), is accepted
+    assert _certify(a).ok, _reasons(_certify(a))
+
+
+# F4 — ed25519 key custody: an attestation signed with a non-committed key is
+# ATTESTATION_INVALID; the honest attestation (test private key) verifies vs the committed
+# public key; and the committed genesis_root.json commits ONLY the ed25519 PUBLIC key.
+def test_f4_ed25519_signatures_and_private_key_never_committed(monkeypatch):
+    import json as _json
+
+    # (1) an attestation signed with a NON-committed private key → ATTESTATION_INVALID
+    a = _anchored(monkeypatch)
+    non_committed = hashlib.sha256(b"not-the-committed-signing-key/v1").digest()
+    forged = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=a["report"],
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=non_committed,
+        prior_attestation_root=ATT_CHAIN_BASE,
+        exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep = _certify(a, attestation=forged)
+    assert not rep.ok and ViolationReason.ATTESTATION_INVALID in _reasons(rep)
+
+    # (2) the honest attestation, signed with the test PRIVATE key, verifies against the
+    #     committed PUBLIC key → accept
+    assert _certify(a).ok, _reasons(_certify(a))
+
+    # (3) the committed genesis_root.json commits ONLY the ed25519 PUBLIC key — no private
+    #     signing key (and no old symmetric verify_key_hex) is present anywhere in the file
+    genesis = Path(__file__).parent.parent / "harness" / "genesis_root.json"
+    raw = genesis.read_text(encoding="utf-8")
+    data = _json.loads(raw)
+    assert "verify_key_pub_hex" in data["evaluator"]
+    assert "verify_key_hex" not in data["evaluator"]  # no symmetric secret / private-key field
+    committed_pub = bytes.fromhex(data["evaluator"]["verify_key_pub_hex"])
+    assert len(committed_pub) == 32  # a valid 32-byte ed25519 public key
+    # the fixed committed test SIGNING seed (the private key) is NOT present in the file, yet
+    # its derived public key IS the committed one — proving the private key stayed external
+    committed_seed = hashlib.sha256(
+        b"deepthought/evaluation-contract/committed-test-ed25519-seed/v1"
+    ).digest()
+    assert committed_seed.hex() not in raw
+    assert ed25519_public_key(committed_seed) == committed_pub

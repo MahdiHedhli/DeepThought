@@ -128,14 +128,14 @@ A third red-team separated the residue into two classes:
 
 **The anti-omission property does NOT depend on the signature** — it comes from "the
 presented state must reproduce the committed root". The signature adds non-repudiation
-and tamper-evidence. The signing primitive is HMAC-SHA256 here (stdlib, deterministic);
-**production swaps it for an asymmetric scheme (ed25519)** so a *published* verify-key
-lets any third party verify a certified score while the *private* signing key is held
-by a party that is **not** the scored builder (curator ≠ subject). This is the same
+and tamper-evidence. The signing primitive is **ed25519 (round-6, see the sixth wave):
+`genesis_root.json` commits ONLY the PUBLIC verify-key**, so a *published* verify-key
+lets any repo reader verify a certified score while the *private* signing key is held
+by a party that is **not** the scored subject (curator ≠ subject). This is the same
 custody boundary the exposure ledger enforces for cohorts, now extended to the
 attestation: the party that can *mint* a certified score is separated from the party
-being *scored*. The `attestation` / `verify_key` / `strict` parameters are keyword-only
-and additive; the non-strict path is unchanged, so every prior caller is unaffected.
+being *scored*. The `attestation` / `strict` parameters are keyword-only and additive;
+the non-strict path is otherwise unchanged.
 
 ## Fourth wave (round-4): out-of-contract verification — attack the irreducible floor
 
@@ -198,16 +198,36 @@ principle drove the fixes, applied everywhere rather than only to the listed rep
 | R5-5 | the freeze bound only `attempts[0]`, not the PRODUCING attempt | the producing post-freeze attempt's `freeze_hash` must equal the frozen bundle hash (`BAD_FREEZE_BINDING`) |
 | R5-6 | a certified report could carry a free `achievable_recall` diagnostic as if bound | a certified report must not carry `achievable_recall` (`ACHIEVABLE_UNBOUND`); it stays a labelled diagnostic for non-certified reports |
 
+The round-5 layer sealed the opt-in bypasses, but a sixth audit found four survivors (see
+the sixth wave) before the residual was truly reached.
+
+## Sixth wave (round-6): the floor seals — bind-to-head, committed eval-ledger, structural certify, ed25519
+
+A sixth audit found four survivors that the round-5 layer still left open. All four are
+now closed, and after them the ONLY residual is the irreducible floor. (Regression tests
+`test_f1_*`..`test_f4_*`.)
+
+| Hole | Bypass it left open | Now sealed in `validate()` by |
+|---|---|---|
+| F1 | a run bound to an OLDER, smaller committed cohort version (or an unresolvable hash) while presenting the honest full history — the denominator/recompute/exposure used the STALE version and silently dropped a hard miss appended to the head later | `_check_report`, the certification numerator recompute, and `_check_exposure` resolve the scored cohort as `history.latest()` (the head), never the run's declared hash; strict certify requires `run.cohort_content_hash == history.latest().content_hash` (`DENOMINATOR_SHRINK` / `REPORT_DENOMINATOR_MISMATCH`) |
+| F2 | evaluate-once was defeated by presenting an EMPTY caller `prior_evaluations`, re-scoring the blind set across trivial re-freezes | `genesis_root.json` + `CommittedGenesisState` carry `latest_evaluation_root`; the presented `prior_evaluations` must reproduce + append-only-extend it (`EVALUATED_MORE_THAN_ONCE`), and `advance_committed_root` advances it; combined with A3's blind-set overlap on the truthful ledger (`BLIND_REEVALUATED`) a re-freeze re-score is caught either way |
+| F3 | the whole certify path ran only under `strict or attestation`, so a producing run + a headline Report presented WITHOUT them skipped it | a producing run presented together with a headline Report WITHOUT `strict` or an `attestation` is `UNANCHORED` — certification is mandatory for a produced+reported result |
+| F4 | `sign`/`verify` were symmetric HMAC over a plaintext-committed shared secret — any repo reader could sign a valid attestation | `sign`/`verify` are ed25519; `genesis_root.json` commits ONLY `verify_key_pub_hex` (the PUBLIC key) and NEVER the private key; certification verifies against the committed public key (`ATTESTATION_INVALID` for any non-committed key). A repo reader can verify but cannot forge |
+
 **The FINAL residual is now exactly two things, both structurally outside a validator and
 both pushed onto reviewable / organizational boundaries rather than silently assumed:**
-(i) **genesis-commit completeness** — that what the curator commits at genesis
-(`genesis_root.json`) is itself complete; this lives in git, timestamped and reviewable in
-history; and (ii) **physical key custody** — that the *private* signing key is held by a
-party that is NOT the scored subject (`curator != subject`). The in-band half of custody
-(`evaluator_id` == committed id, `!= subject`, verify-key from committed state) is enforced
-in code; the physical key-holding boundary is organizational. Everything a validator *can*
-run and check, it now RUNS and checks from committed state; the two things it structurally
-cannot are git review and organizational key custody.
+(i) **genesis-commit completeness [git-reviewable]** — that what the curator commits at
+genesis (`genesis_root.json`) is itself complete; this lives in git, timestamped and
+reviewable in history; and (ii) **ed25519 private-key custody [curator ≠ subject,
+organizational]** — that the *private* signing key is held by a party that is NOT the
+scored subject. The in-band half of custody (`evaluator_id` == committed id, `!= subject`,
+and the verify-key is the committed PUBLIC key so no repo reader can forge) is enforced in
+code; the physical private-key-holding boundary is organizational. In this repo the
+committed public key corresponds to a fixed test/smoke signing seed held in the test/build
+helpers so the smoke and unit tests can produce honest attestations; a production deployment
+commits the curator's real public key while the real private key stays external. Everything a
+validator *can* run and check, it now RUNS and checks from committed state; the two things it
+structurally cannot are git review and organizational key custody.
 
 ## Sealing note (for the later cross-model evaluator)
 
