@@ -246,6 +246,29 @@ wired into `check`, enforcing:
   that is not the subject (organizational; the in-band `evaluator_id != subject` half is
   enforced).
 
+- **FR-18 — Verifications RUN from committed state, never from caller args (the round-4
+  layer was opt-in).** ONE governing principle hardens the whole certify path: **a trusted
+  value or a verification RESULT must NEVER be a caller argument the scored party could
+  forge.** `validate()` RUNS each verification itself and LOADS every trusted root / key /
+  detector from COMMITTED, git-tracked state via module-level, monkeypatchable registries /
+  loaders — not caller args — and every completeness input a strict certify needs is
+  MANDATORY and resolved from committed state (omission or an inert default FAILS CLOSED).
+  Concretely: the `recomputed_rediscovered` and `verify_key` parameters are REMOVED; strict
+  certify RUNS `verifier.recompute_certified_numerator` (resolving the detector from a
+  committed `DETECTOR_REGISTRY` keyed by the frozen `detector_id` and the fetcher from the
+  committed `FETCH_FN`) and verifies the signature with the committed evaluator verify-key +
+  evaluator id (`ATTESTATION_INVALID`); `genesis_root.json` is a REAL, non-empty, MONOTONIC
+  committed chain (`genesis_history_root` + `latest.{history_root, attestation_root}`) that
+  the presented history must append-only-EXTEND (`ATTESTATION_NOT_EXTENDING`) and the
+  attestation chain from (`GENESIS_UNANCHORED`), advanced only via `advance_committed_root`;
+  the exposure ledger + prior evaluations + a non-inert `pool_root` / `committed_k` are
+  MANDATORY (`MISSING_LEDGER` / `PRECISION_SAMPLE_UNBOUND`); the freeze binds the PRODUCING
+  attempt (`BAD_FREEZE_BINDING`); and a certified report must not carry a free
+  `achievable_recall` (`ACHIEVABLE_UNBOUND`). **The FINAL residual is exactly (i)
+  genesis-commit completeness (git-reviewable) and (ii) physical key custody (curator ≠
+  subject, organizational)** — everything else a validator can run, it now runs from
+  committed state.
+
 ## Acceptance criteria
 
 1. An entry whose canonical fields change without a new identity hash fails `check`.
@@ -467,6 +490,43 @@ bound form, never by weakening a check.
     `load_committed_genesis_root()` reads it. A chain BASE whose `prior_attestation_root` is not
     the committed genesis is `GENESIS_UNANCHORED`; the honest chain rooted in it is accepted.
 
+### Round-5 acceptance criteria (RUN from committed state — the round-4 layer was opt-in)
+
+An audit proved the round-4 verification layer was bypassable because it was built as
+OPT-IN / CALLER-SUPPLIED inputs. Round-5 applies ONE governing principle (FR-18): a trusted
+value or a verification RESULT must never be a caller argument the scored party could forge;
+`validate()` RUNS each verification and LOADS every trusted root / key / detector from
+COMMITTED state. Each maps to a dedicated regression test (`test_r5_1`..`test_r5_6`, the
+rewritten `test_part2_*` / `test_part3_*` / `test_b5_*` / `test_p1*`, and
+`test_verifier.py`); the honest object-builders and `scripts/smoke_008.sh` were updated to
+the committed-state form, never by weakening a check.
+
+50. **(R5-1/FR-18)** The `recomputed_rediscovered` parameter is REMOVED; strict certify RUNS
+    `verifier.recompute_certified_numerator`, resolving `scan_fn` from a committed
+    `DETECTOR_REGISTRY` keyed by the frozen `detector_id` and `fetch_fn` from the committed
+    `FETCH_FN`. A claim the recompute does not confirm, an omission, or an unresolvable
+    detector is `NUMERATOR_UNVERIFIED`. Registry + fetcher are monkeypatchable; the net-gated
+    real re-run stays.
+51. **(R5-2/FR-18)** `genesis_root.json` holds a REAL non-empty `genesis_history_root` +
+    `latest.{history_root, attestation_root}`; `load_committed_genesis_root()` returns the
+    latest attestation root. The presented history must reproduce + append-only-extend the
+    COMMITTED prior history root (`ATTESTATION_NOT_EXTENDING`) and the attestation chain from
+    the committed latest attestation root (`GENESIS_UNANCHORED`); `prior_history` is never
+    caller-trusted on the certify path. `advance_committed_root(...)` persists the advance and
+    leaves `genesis_history_root` immutable.
+52. **(R5-3/FR-18)** On strict certify the exposure ledger + prior evaluations are MANDATORY
+    (`MISSING_LEDGER`) and `pool_root` (non-empty) / `committed_k` (≥ min(|pool|, 2)) are
+    MANDATORY (`PRECISION_SAMPLE_UNBOUND`); the round-4 `if … is not None` opt-in guards are
+    removed.
+53. **(R5-4/FR-18)** The verify-key + evaluator id are LOADED from committed config; the
+    `verify_key` parameter is REMOVED. A subject-minted key, or an evaluator id that is not
+    the committed one, fails `ATTESTATION_INVALID`; `evaluator_id == subject` is
+    `CURATOR_IS_SUBJECT`.
+54. **(R5-5/FR-18)** The freeze binds the PRODUCING post-freeze attempt (not only
+    `attempts[0]`): a producing attempt with a forged `freeze_hash` is `BAD_FREEZE_BINDING`.
+55. **(R5-6/FR-18)** A certified report must not carry a free `achievable_recall`
+    (`ACHIEVABLE_UNBOUND`); it stays a labelled diagnostic for non-certified reports.
+
 ## Open questions
 
 - **Non-blocking.** Does the contract live in a new `benchmarks/harness/contract.py`
@@ -484,18 +544,21 @@ bound form, never by weakening a check.
 
 ## Success criteria
 
-A smoke (`scripts/smoke_008.sh`) builds a two-entry cohort `v1`, freezes a dummy
-detector (committing the confusion `pool_root` and the precision `committed_k`),
-records exactly one blind evaluation, binds a `Report` and a panel-adjudicated
-precision, RECOMPUTES the numerator with a fake frozen detector re-run (FR-16), builds
-and SIGNS an `Attestation` chained to the git-committed genesis root (FR-17), and
-passes strict certification; then demonstrates each guard failing: an in-place entry
-edit, a silent denominator shrink, a second blind evaluation, and a curator==subject
-score, plus the cryptographic-anchoring fail-closed cases — a forged signature
-(`ATTESTATION_INVALID`), an omitted component (`ATTESTATION_INCOMPLETE`), and a
-certify path with no attestation (`UNANCHORED`) — plus the Round-4 out-of-contract
-guards: a numerator the frozen detector does not reproduce (`NUMERATOR_UNVERIFIED`, via
-a fake detector) and a chain base not rooted in the committed genesis
-(`GENESIS_UNANCHORED`) — each fail `check` with a typed reason. The `report` view
-prints blind recall as the headline alongside the four labeled secondaries. Only after
-this gate is green does the shared-kernel work in the tranche begin.
+A smoke (`scripts/smoke_008.sh`) builds a two-entry cohort `v1` (reproducing the
+committed `genesis_history_root`), freezes a dummy detector (committing the confusion
+`pool_root` and the precision `committed_k`), records exactly one blind evaluation, binds
+a `Report` and a panel-adjudicated precision, installs a fake frozen detector + fetcher
+into the COMMITTED module-level `DETECTOR_REGISTRY` / `FETCH_FN` so `validate()` RUNS the
+numerator recompute itself (FR-16/FR-18 — no caller `recomputed_rediscovered`), builds and
+SIGNS an `Attestation` with the COMMITTED evaluator key + id chained to the committed
+latest attestation root (FR-17/FR-18 — no caller `verify_key`), and passes strict
+certification; then demonstrates each guard failing: an in-place entry edit, a silent
+denominator shrink, a second blind evaluation, and a curator==subject score, plus the
+cryptographic-anchoring fail-closed cases — a forged signature (`ATTESTATION_INVALID`, now
+verified against the committed key), an omitted component (`ATTESTATION_INCOMPLETE`), and a
+certify path with no attestation (`UNANCHORED`) — plus the out-of-contract guards: a
+numerator the committed detector does not reproduce (`NUMERATOR_UNVERIFIED`, via swapping in
+a fake detector that reproduces nothing) and a chain base not rooted in the committed
+genesis (`GENESIS_UNANCHORED`) — each fail `check` with a typed reason. The `report` view
+prints blind recall as the headline alongside the four labeled secondaries. Only after this
+gate is green does the shared-kernel work in the tranche begin.

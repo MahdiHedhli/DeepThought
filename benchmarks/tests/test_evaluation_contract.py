@@ -14,7 +14,8 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "harness"))
 
-import contract  # noqa: E402  (module handle for monkeypatching load_committed_genesis_root)
+import contract  # noqa: E402  (module handle for monkeypatching the committed-state loaders)
+import verifier  # noqa: E402  (module handle for monkeypatching the committed detector registry + fetcher)
 from contract import (  # noqa: E402
     AchievabilityLog,
     AchievabilityPrediction,
@@ -39,6 +40,7 @@ from contract import (  # noqa: E402
     RealCVEAggregate,
     RecallReport,
     Report,
+    Role,
     SyntheticSuite,
     SyntheticVariant,
     ViolationReason,
@@ -47,7 +49,6 @@ from contract import (  # noqa: E402
     candidates_from_adjudications,
     chain_root,
     leaf_hash,
-    load_committed_genesis_root,
     merkle_root,
     pool_root_of,
     precision_sample_seed,
@@ -65,10 +66,14 @@ C40 = "c" * 40
 # A fixed evaluator key (deterministic tests never read os.urandom).
 KEY = b"deepthought-test-evaluator-key-0123456789"
 
-# The real git-committed genesis root, the honest chain base for the B5 / Round-4
-# certify helpers (the Round-4 genesis tests monkeypatch the loader with a hermetic
-# fixture instead of depending on this value).
-GENESIS_ROOT = load_committed_genesis_root()
+# The committed evaluator id + the attestation-chain base the hermetic certify fixtures
+# use. Round-5 loads the verify-key, evaluator id, genesis root, and prior history baseline
+# from COMMITTED state, never from caller args, so the certify tests monkeypatch
+# ``contract.load_committed_genesis_state`` with a hermetic fixture (via
+# :func:`_install_committed`) consistent with each presented history instead of depending
+# on the real committed file's values.
+EVALUATOR_ID = "curator-not-subject"
+ATT_CHAIN_BASE = "c0ffee00" * 8  # a fixed committed latest-attestation root for the fixtures
 
 
 def _pool(n):
@@ -1440,14 +1445,101 @@ def test_b4_precision_pool_must_reproduce_committed_pool_root():
     assert not rep.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep)
 
 
-def _anchored(prior_attestation_root=GENESIS_ROOT):
-    """A fully honest, anchored evaluation bundle plus its signed Attestation.
-    Reused by the B5 fail-closed cases and the Round-4 certify cases (each tampers
-    exactly one thing). Round-4: the freeze commits ``committed_k`` (P1d), the certify
-    binds a real ``AdjudicatedPrecision`` (P1c), the chain roots in the committed
-    genesis (P1a/PART3, overridable via ``prior_attestation_root``), and the numerator
-    is recomputed (PART2)."""
-    blinds = [_entry(vuln=x * 40, role="blind") for x in ("a", "b")]
+# --------------------------------------------------------------------------- #
+# Round-3 cryptographic-anchoring + Round-4/5 certify regression floor. Round-5
+# closes the round-4 bypasses that were OPT-IN / caller-supplied: ``validate`` RUNS
+# each verification itself and LOADS every trusted root / key / detector from
+# COMMITTED, git-tracked state (monkeypatched here with hermetic fixtures via
+# :func:`_install_committed`) — never a caller argument the scored party could forge.
+# The "omit the baseline" class becomes impossible: a certified score is bound to a
+# single committed, signed attestation root and the committed monotonic genesis chain.
+# --------------------------------------------------------------------------- #
+
+# Distinct fake-corpus keys for the two honest blind entries. A ``FLAG`` marker on a
+# line makes the fake detector emit a finding there; the line-precise rule then also
+# requires the flagged line's own text to contain the sink probe.
+_A_VULN, _A_PATCHED = "va" + "0" * 38, "pa" + "0" * 38
+_B_VULN, _B_PATCHED = "vb" + "0" * 38, "pb" + "0" * 38
+
+
+def _fake_scan(source, uri):
+    """A marker-driven fake detector: emit a SARIF-ish finding for each line whose text
+    contains ``FLAG``. It PARSES the string; it never executes it."""
+    return [
+        {"locations": [{"physicalLocation": {"region": {"startLine": i}}}]}
+        for i, line in enumerate(source.splitlines(), 1)
+        if "FLAG" in line
+    ]
+
+
+def _default_files():
+    """Fake corpus where blind entry 'a' is REDISCOVERED (flagged in vuln, not in patched)
+    and 'b' is NOT (flagged in both trees)."""
+    return {
+        (_A_VULN, "a.py"): "def f():\n    sinka(x)  # FLAG\n",
+        (_A_PATCHED, "a.py"): "def f():\n    guard()\n    sinka(x)\n",
+        (_B_VULN, "b.py"): "def g():\n    sinkb(x)  # FLAG\n",
+        (_B_PATCHED, "b.py"): "def g():\n    sinkb(x)  # FLAG\n",
+    }
+
+
+def _files_rediscover_b():
+    """Fake corpus where 'b' is the rediscovery and 'a' is not — the committed detector
+    confirms a DIFFERENT entry than the honest report claims."""
+    return {
+        (_A_VULN, "a.py"): "def f():\n    sinka(x)  # FLAG\n",
+        (_A_PATCHED, "a.py"): "def f():\n    sinka(x)  # FLAG\n",  # flagged in both -> not rediscovered
+        (_B_VULN, "b.py"): "def g():\n    sinkb(x)  # FLAG\n",
+        (_B_PATCHED, "b.py"): "def g():\n    sinkb(x)\n",  # rediscovered
+    }
+
+
+def _install_committed(
+    monkeypatch,
+    *,
+    presented_history,
+    files,
+    chain_from=ATT_CHAIN_BASE,
+    prior_history_root=None,
+    detector_id="d",
+    scan=None,
+    verify_key=KEY,
+    evaluator_id=EVALUATOR_ID,
+):
+    """Install the COMMITTED anchor state + committed detector/fetcher so a strict certify
+    RUNS its verifications hermetically from committed state (R5-1..R5-4). ``validate``
+    resolves the verify-key, evaluator id, prior history root, and chain root from
+    ``contract.load_committed_genesis_state`` and the detector/fetcher from ``verifier``;
+    all are monkeypatched here. ``prior_history_root`` defaults to the presented history's
+    full root (a valid append-only extension by zero)."""
+    phr = prior_history_root if prior_history_root is not None else presented_history.history_root
+    state = contract.CommittedGenesisState(
+        genesis_history_root=phr,
+        latest_history_root=phr,
+        latest_attestation_root=chain_from,
+        evaluator_id=evaluator_id,
+        verify_key=verify_key,
+    )
+    monkeypatch.setattr(contract, "load_committed_genesis_state", lambda *a, **k: state)
+
+    def _fetch(repo, ref, path):
+        return files[(ref, path)]
+
+    monkeypatch.setattr(verifier, "FETCH_FN", _fetch)
+    monkeypatch.setitem(verifier.DETECTOR_REGISTRY, detector_id, lambda: (scan or _fake_scan))
+
+
+def _anchored(monkeypatch, *, prior_attestation_root=None, files=None, scan=None, chain_from=ATT_CHAIN_BASE):
+    """A fully honest, anchored evaluation bundle plus its signed Attestation, with the
+    COMMITTED state + committed detector/fetcher installed to match it. Reused by the B5
+    fail-closed cases and the Round-4/5 certify cases (each tampers exactly one thing). The
+    freeze commits ``committed_k`` (R5-3/P1d), the certify binds a real
+    ``AdjudicatedPrecision`` (P1c), the chain roots in the committed latest attestation root
+    (R5-2/PART3, overridable via ``prior_attestation_root``), and the numerator is
+    RECOMPUTED by ``validate`` running the committed detector (R5-1/PART2)."""
+    a_entry = _entry(vuln=_A_VULN, patched=_A_PATCHED, paths=["a.py"], probe="sinka(x)", role="blind")
+    b_entry = _entry(vuln=_B_VULN, patched=_B_PATCHED, paths=["b.py"], probe="sinkb(x)", role="blind")
+    blinds = [a_entry, b_entry]
     v1 = _cohort("v1", blinds)
     hist = CohortHistory(versions=[v1])
     pool = _pool(12)
@@ -1465,10 +1557,8 @@ def _anchored(prior_attestation_root=GENESIS_ROOT):
         patched_alert_density=0.0,
         adjudicated_precision=1.0,
         cohort_content_hash=v1.content_hash,
-        rediscovered_blind_ids=[blinds[0].identity_hash],
+        rediscovered_blind_ids=[a_entry.identity_hash],
     )
-    # P1c: a real, panel-adjudicated precision bound to (cohort, freeze, run). All-TP →
-    # precision 1.0, matching report.adjudicated_precision.
     seed = precision_sample_seed(v1.content_hash, freeze.freeze_hash, run.run_id)
     sampled = sample_confusion_pairs(pool, committed_k, seed)
     precision = AdjudicatedPrecision(
@@ -1492,27 +1582,26 @@ def _anchored(prior_attestation_root=GENESIS_ROOT):
         events=[ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity="z", from_version="v0", to_version="v1")]
     )
     evln = EvaluationLedger()
+    _install_committed(
+        monkeypatch, presented_history=hist, files=files or _default_files(), chain_from=chain_from, scan=scan
+    )
     att = build_attestation(
         history=hist,
         freeze=freeze,
         run=run,
         report=report,
-        evaluator_id="curator-not-subject",
+        evaluator_id=EVALUATOR_ID,
         attested_at="2026-07-16T12:00:00Z",
         key=KEY,
-        prior_attestation_root=prior_attestation_root,  # P1a/PART3: chain base roots in the committed genesis
+        prior_attestation_root=prior_attestation_root if prior_attestation_root is not None else chain_from,
         exclusions=excl,
         ledger=ledger,
         evaluation_ledger=evln,
         achievability=None,
     )
-    # PART2: the honest recompute — the frozen detector confirms exactly the claimed
-    # rediscovery set on the real code (here injected directly; the verifier's own
-    # tests exercise recompute_rediscovered end-to-end).
-    recomputed = {blinds[0].computed_identity_hash}
     return dict(
         hist=hist, freeze=freeze, run=run, report=report, precision=precision, ledger=ledger,
-        excl=excl, evln=evln, blinds=blinds, att=att, recomputed=recomputed,
+        excl=excl, evln=evln, blinds=blinds, att=att,
     )
 
 
@@ -1527,8 +1616,6 @@ def _certify(a, **overrides):
         ledger=a["ledger"],
         prior_evaluations=a["evln"],
         attestation=a["att"],
-        verify_key=KEY,
-        recomputed_rediscovered=a["recomputed"],
         strict=True,
     )
     kw.update(overrides)
@@ -1536,23 +1623,23 @@ def _certify(a, **overrides):
 
 
 # B5 — a fully honest, signed attestation is ACCEPTED under strict certification.
-def test_b5_honest_signed_attestation_accepted():
-    a = _anchored()
+def test_b5_honest_signed_attestation_accepted(monkeypatch):
+    a = _anchored(monkeypatch)
     rep = _certify(a)
     assert rep.ok, _reasons(rep)
 
 
-# B5 — a forged signature is rejected.
-def test_b5_forged_signature_rejected():
-    a = _anchored()
+# B5 — a forged signature is rejected (verified against the COMMITTED evaluator key).
+def test_b5_forged_signature_rejected(monkeypatch):
+    a = _anchored(monkeypatch)
     forged = a["att"].model_copy(update={"signature": "00" * 32})
     rep = _certify(a, attestation=forged)
     assert not rep.ok and ViolationReason.ATTESTATION_INVALID in _reasons(rep)
 
 
 # B5 — a tampered/omitted history version (root mismatch) is rejected.
-def test_b5_tampered_history_root_mismatch():
-    a = _anchored()
+def test_b5_tampered_history_root_mismatch(monkeypatch):
+    a = _anchored(monkeypatch)
     extra = _entry(vuln=C40, role="blind")
     v2 = _cohort("v2", a["blinds"] + [extra], reason="append not attested", parent="v1")
     tampered = CohortHistory(versions=[a["hist"].versions[0], v2])
@@ -1561,8 +1648,8 @@ def test_b5_tampered_history_root_mismatch():
 
 
 # B5 — a rewritten ledger entry (chain-root mismatch) is rejected.
-def test_b5_rewritten_ledger_entry_root_mismatch():
-    a = _anchored()
+def test_b5_rewritten_ledger_entry_root_mismatch(monkeypatch):
+    a = _anchored(monkeypatch)
     rewritten = ExclusionLog(
         events=[
             ExclusionEvent(
@@ -1579,8 +1666,8 @@ def test_b5_rewritten_ledger_entry_root_mismatch():
 
 
 # B5 — a swapped pool (pool_root mismatch) is rejected.
-def test_b5_swapped_pool_root_mismatch():
-    a = _anchored()
+def test_b5_swapped_pool_root_mismatch(monkeypatch):
+    a = _anchored(monkeypatch)
     swapped_bundle = a["freeze"].bundle.model_copy(update={"pool_root": pool_root_of(_pool(20))})
     swapped_freeze = FreezeManifest(bundle=swapped_bundle, timestamp=a["freeze"].timestamp)
     rep = _certify(a, freeze=swapped_freeze)
@@ -1588,15 +1675,15 @@ def test_b5_swapped_pool_root_mismatch():
 
 
 # B5 — an attestation that references a component not presented is rejected (fail closed).
-def test_b5_missing_component_incomplete():
-    a = _anchored()
+def test_b5_missing_component_incomplete(monkeypatch):
+    a = _anchored(monkeypatch)
     rep = _certify(a, history=None)
     assert not rep.ok and ViolationReason.ATTESTATION_INCOMPLETE in _reasons(rep)
 
 
 # B5 — a certify path with NO attestation is UNANCHORED (fail closed).
-def test_b5_certify_without_attestation_unanchored():
-    a = _anchored()
+def test_b5_certify_without_attestation_unanchored(monkeypatch):
+    a = _anchored(monkeypatch)
     rep = validate(
         history=a["hist"],
         freeze=a["freeze"],
@@ -1605,27 +1692,177 @@ def test_b5_certify_without_attestation_unanchored():
         exclusions=a["excl"],
         ledger=a["ledger"],
         prior_evaluations=a["evln"],
-        strict=True,  # no attestation, no verify_key
+        strict=True,  # no attestation (the verify-key is committed, not a caller arg)
     )
     assert not rep.ok and ViolationReason.UNANCHORED in _reasons(rep)
 
 
 # --------------------------------------------------------------------------- #
-# Round-4 out-of-contract verification (P1a..P1e + PART 3). An audit proved the
-# irreducible floor a pure validator cannot verify: genesis completeness, input
-# truthfulness, and key custody. These attack it with measures OUTSIDE the pure
-# validator — the certify path now RECOMPUTES the numerator (test_verifier.py),
-# CHAINS attestations to a git-committed genesis, and demands a producing eval, a
+# Round-5 fail-closed certify seals — verifications RUN from committed state, and
+# every completeness input a strict certify needs is MANDATORY (R5-1..R5-6).
+# --------------------------------------------------------------------------- #
+
+
+# R5-1 / PART 2 — the certify path RECOMPUTES the numerator by RUNNING the committed
+# detector (resolved from the frozen detector_id) on the real pinned code; no caller set.
+def test_part2_numerator_must_match_the_recompute(monkeypatch):
+    a = _anchored(monkeypatch)  # default corpus: only entry 'a' is rediscovered
+    # the committed detector re-run confirms exactly the claim -> certifies
+    assert _certify(a).ok, _reasons(_certify(a))
+
+    # the committed detector produces NOTHING on the real code (claim unconfirmed) -> reject
+    a_none = _anchored(monkeypatch, scan=lambda source, uri: [])
+    rep = _certify(a_none)
+    assert not rep.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep)
+
+    # the committed detector confirms a DIFFERENT entry than claimed -> reject
+    a_other = _anchored(monkeypatch, files=_files_rediscover_b())
+    rep2 = _certify(a_other)
+    assert not rep2.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep2)
+
+
+# R5-1 — the recompute is NOT a caller argument: `validate` no longer accepts one.
+def test_r5_1_validate_rejects_a_caller_supplied_recompute(monkeypatch):
+    a = _anchored(monkeypatch)
+    with pytest.raises(TypeError):
+        validate(
+            history=a["hist"], freeze=a["freeze"], run=a["run"], report=a["report"],
+            precision=a["precision"], exclusions=a["excl"], ledger=a["ledger"],
+            prior_evaluations=a["evln"], attestation=a["att"], strict=True,
+            recomputed_rediscovered={a["blinds"][0].identity_hash},  # no longer a parameter
+        )
+
+
+# R5-3 — the mandatory certify bindings fail closed when omitted (no opt-in skips).
+def test_r5_3_certify_bindings_are_mandatory(monkeypatch):
+    a = _anchored(monkeypatch)
+    # a curator==subject scenario: with the ledger PRESENT the exposure check runs and bars it
+    subj_ledger = ExposureLedger()
+    subj_ledger.record(cohort_content_hash=a["run"].cohort_content_hash, actor="codex", activity="curated")
+    rep_self = _certify(a, ledger=subj_ledger)
+    assert not rep_self.ok and ViolationReason.CURATOR_IS_SUBJECT in _reasons(rep_self)
+
+    # omitting the exposure ledger fails closed (curator != subject becomes unverifiable)
+    rep_no_ledger = _certify(a, ledger=None)
+    assert not rep_no_ledger.ok and ViolationReason.MISSING_LEDGER in _reasons(rep_no_ledger)
+
+    # omitting the prior_evaluations ledger fails closed (evaluate-once unverifiable)
+    rep_no_evln = _certify(a, prior_evaluations=None)
+    assert not rep_no_evln.ok and ViolationReason.MISSING_LEDGER in _reasons(rep_no_evln)
+
+    # an inert (empty) committed pool_root fails closed
+    inert_pool = a["freeze"].bundle.model_copy(update={"pool_root": ""})
+    inert_freeze = FreezeManifest(bundle=inert_pool, timestamp=a["freeze"].timestamp)
+    rep_pool = _certify(a, freeze=inert_freeze)
+    assert not rep_pool.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep_pool)
+
+    # an inert committed_k (0) fails closed
+    inert_k = a["freeze"].bundle.model_copy(update={"committed_k": 0})
+    inert_k_freeze = FreezeManifest(bundle=inert_k, timestamp=a["freeze"].timestamp)
+    rep_k = _certify(a, freeze=inert_k_freeze)
+    assert not rep_k.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(rep_k)
+
+
+# R5-4 — the verify-key + evaluator id come from COMMITTED state. A subject-minted key,
+# signed and passed by the subject, cannot certify (validate uses the committed key).
+def test_r5_4_verify_key_and_evaluator_from_committed_state(monkeypatch):
+    a = _anchored(monkeypatch)
+    subject_key = b"subject-minted-key-attacker-controls-0000"
+    self_signed = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=a["report"],
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=subject_key,
+        prior_attestation_root=ATT_CHAIN_BASE,
+        exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep = _certify(a, attestation=self_signed)
+    assert not rep.ok and ViolationReason.ATTESTATION_INVALID in _reasons(rep)
+
+    # an attestation minted by an evaluator id that is not the committed one is rejected
+    wrong_evaluator = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=a["report"],
+        evaluator_id="some-other-evaluator", attested_at="2026-07-16T12:00:00Z", key=KEY,
+        prior_attestation_root=ATT_CHAIN_BASE,
+        exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep2 = _certify(a, attestation=wrong_evaluator)
+    assert not rep2.ok and ViolationReason.ATTESTATION_INVALID in _reasons(rep2)
+
+
+# R5-5 — the freeze binds the PRODUCING attempt: a producing attempt with a forged
+# freeze_hash is caught even when the first attempt is honestly bound.
+def test_r5_5_freeze_binds_the_producing_attempt(monkeypatch):
+    a = _entry(vuln=A40, role="blind")
+    v1 = _cohort("v1", [a])
+    hist = CohortHistory(versions=[v1])
+    freeze = FreezeManifest(bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z")
+    run = _run("s", v1.content_hash, freeze.freeze_hash)
+    # a non-producing first attempt honestly bound, then a PRODUCING attempt with a forged hash
+    run.attempts.append(
+        EvalAttempt(phase="post_freeze", produced_results=False, artifact_hash="A", env_hash="E", freeze_hash=freeze.freeze_hash)
+    )
+    run.attempts.append(
+        EvalAttempt(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E", freeze_hash="forged")
+    )
+    rep = validate(history=hist, run=run, freeze=freeze)
+    assert not rep.ok and ViolationReason.BAD_FREEZE_BINDING in _reasons(rep)
+
+
+# R5-6 — a certified report must not carry a free achievable_recall diagnostic.
+def test_r5_6_certified_report_forbids_achievable_recall(monkeypatch):
+    a = _anchored(monkeypatch)
+    diag = a["report"].model_copy(update={"achievable_recall": 0.9})
+    att = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=diag,
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=KEY,
+        prior_attestation_root=ATT_CHAIN_BASE,
+        exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep = _certify(a, report=diag, attestation=att)
+    assert not rep.ok and ViolationReason.ACHIEVABLE_UNBOUND in _reasons(rep)
+
+
+# R5-2 — advance_committed_root persists the advancing roots; genesis stays immutable.
+def test_r5_2_advance_committed_root_persists(tmp_path):
+    import json as _json
+
+    p = tmp_path / "genesis_root.json"
+    p.write_text(
+        _json.dumps(
+            {
+                "genesis_history_root": "aa" * 32,
+                "evaluator": {"id": EVALUATOR_ID, "verify_key_hex": KEY.hex()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # before any advance: latest defaults to the genesis / attestation-chain base
+    before = contract.load_committed_genesis_state(p)
+    assert before.latest_history_root == "aa" * 32
+    assert before.latest_attestation_root == contract._ATTESTATION_CHAIN_GENESIS
+
+    contract.advance_committed_root(history_root="bb" * 32, attestation_root="cc" * 32, path=p)
+    after = contract.load_committed_genesis_state(p)
+    assert after.genesis_history_root == "aa" * 32  # immutable
+    assert after.latest_history_root == "bb" * 32  # advanced
+    assert after.latest_attestation_root == "cc" * 32
+
+
+# --------------------------------------------------------------------------- #
+# Round-4 out-of-contract verification (P1a..P1e + PART 3), now RUN from committed
+# state per Round-5. The certify path RECOMPUTES the numerator (test_part2), CHAINS
+# attestations to the committed monotonic genesis, and demands a producing eval, a
 # bound precision, a committed k, and a certifier that is not the subject.
 # --------------------------------------------------------------------------- #
 
 
-# P1a — the certification history must append-only-EXTEND the prior committed root.
-def _chain_certify(presented_versions, scored_cohort, scored_blinds, *, rediscovered, prior,
-                   prior_attestation_root=None):
+def _chain_certify(
+    monkeypatch, presented_versions, scored_cohort, *, rediscovered_entries, files, prior_history,
+    chain_from=ATT_CHAIN_BASE, prior_attestation_root=None,
+):
     """A fully honest, anchored strict-certify whose run/report/attestation bind to
     ``scored_cohort`` and whose presented history is ``presented_versions``, validated
-    against a ``prior`` committed history (the chain predecessor)."""
+    against a ``prior_history`` COMMITTED baseline (the chain predecessor loaded from
+    committed state, never the caller)."""
     hist = CohortHistory(versions=presented_versions)
     pool = _pool(12)
     committed_k = 3
@@ -1635,14 +1872,15 @@ def _chain_certify(presented_versions, scored_cohort, scored_blinds, *, rediscov
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     run = _run("codex", scored_cohort.content_hash, freeze.freeze_hash)
     run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
+    scored_blind = scored_cohort.by_role(Role.BLIND)
     report = Report(
-        blind_recall=RecallReport(rediscovered=len(rediscovered), total=len(scored_blinds)),
+        blind_recall=RecallReport(rediscovered=len(rediscovered_entries), total=len(scored_blind)),
         fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
         coverage=1.0,
         patched_alert_density=0.0,
         adjudicated_precision=1.0,
         cohort_content_hash=scored_cohort.content_hash,
-        rediscovered_blind_ids=[e.identity_hash for e in rediscovered],
+        rediscovered_blind_ids=[e.identity_hash for e in rediscovered_entries],
     )
     seed = precision_sample_seed(scored_cohort.content_hash, freeze.freeze_hash, run.run_id)
     sampled = sample_confusion_pairs(pool, committed_k, seed)
@@ -1651,43 +1889,68 @@ def _chain_certify(presented_versions, scored_cohort, scored_blinds, *, rediscov
         cohort_hash=scored_cohort.content_hash, freeze_hash=freeze.freeze_hash, run_id=run.run_id,
         adjudications=[_good_panel(p, "true-positive") for p in sampled],
     )
-    par = prior_attestation_root if prior_attestation_root is not None else prior.history_root
+    ledger = ExposureLedger()
+    ledger.record(
+        cohort_content_hash=scored_cohort.content_hash, actor="claude", activity="curated",
+        curated_entry_ids=[e.identity_hash for e in scored_blind],
+    )
     evln = EvaluationLedger()
+    _install_committed(
+        monkeypatch, presented_history=hist, files=files, chain_from=chain_from,
+        prior_history_root=prior_history.history_root,
+    )
     att = build_attestation(
         history=hist, freeze=freeze, run=run, report=report,
-        evaluator_id="curator-not-subject", attested_at="2026-07-16T12:00:00Z", key=KEY,
-        prior_attestation_root=par, evaluation_ledger=evln,
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=KEY,
+        prior_attestation_root=prior_attestation_root if prior_attestation_root is not None else chain_from,
+        ledger=ledger, evaluation_ledger=evln,
     )
-    recomputed = {e.computed_identity_hash for e in rediscovered}
     return validate(
         history=hist, freeze=freeze, run=run, report=report, precision=precision,
-        prior_evaluations=evln, prior_history=prior, attestation=att, verify_key=KEY,
-        recomputed_rediscovered=recomputed, strict=True,
+        ledger=ledger, prior_evaluations=evln, attestation=att, strict=True,
     )
 
 
-def test_p1a_certify_history_must_extend_prior_committed_root():
-    a = _entry(vuln=A40, role="blind")
-    b = _entry(vuln=B40, role="blind")
-    c = _entry(vuln=C40, role="blind")
-    v1 = _cohort("v1", [a, b])
-    v2 = _cohort("v2", [a, b, c], reason="append c", parent="v1")  # superset extension
+def _rc_entry(tag, *, rediscovered):
+    """A blind entry with distinct fake-corpus keys, plus its files fragment. When
+    ``rediscovered`` the patched file drops the FLAG (rediscovered); else it keeps it."""
+    vuln = f"v{tag}" + "0" * (40 - len(f"v{tag}"))
+    patched = f"p{tag}" + "0" * (40 - len(f"p{tag}"))
+    path, probe = f"{tag}.py", f"sink{tag}(x)"
+    entry = _entry(vuln=vuln, patched=patched, paths=[path], probe=probe, role="blind")
+    frag = {
+        (vuln, path): f"def fn():\n    {probe}  # FLAG\n",
+        (patched, path): (
+            f"def fn():\n    guard()\n    {probe}\n" if rediscovered else f"def fn():\n    {probe}  # FLAG\n"
+        ),
+    }
+    return entry, frag
+
+
+# P1a / R5-2 — the certification history must append-only-EXTEND the COMMITTED prior root.
+def test_p1a_certify_history_must_extend_prior_committed_root(monkeypatch):
+    ea, fa = _rc_entry("a", rediscovered=True)
+    eb, fb = _rc_entry("b", rediscovered=False)
+    ec, fc = _rc_entry("c", rediscovered=False)
+    files = {**fa, **fb, **fc}
+    v1 = _cohort("v1", [ea, eb])
+    v2 = _cohort("v2", [ea, eb, ec], reason="append c", parent="v1")  # superset extension
     prior = CohortHistory(versions=[v1])
 
-    # honest append-only extension: presented [v1, v2] extends prior [v1]
-    ok = _chain_certify([v1, v2], v2, [a, b, c], rediscovered=[a], prior=prior)
+    # honest append-only extension: presented [v1, v2] extends the committed prior [v1]
+    ok = _chain_certify(monkeypatch, [v1, v2], v2, rediscovered_entries=[ea], files=files, prior_history=prior)
     assert ok.ok, _reasons(ok)
 
-    # a from-storage rebuild that DROPS v1 and re-anchors on a fresh single version
-    # (its content does not append-only-extend the committed prior) is rejected
-    v2_solo = _cohort("v2", [a, b], reason="rebuild dropping v1", parent="v1")
-    bad = _chain_certify([v2_solo], v2_solo, [a, b], rediscovered=[a], prior=prior)
+    # a from-storage rebuild that DROPS v1 and re-anchors on a fresh single version whose
+    # content does not reproduce the committed prior root is rejected
+    v2_solo = _cohort("v2", [ea, eb], reason="rebuild dropping v1", parent="v1")
+    bad = _chain_certify(monkeypatch, [v2_solo], v2_solo, rediscovered_entries=[ea], files=files, prior_history=prior)
     assert not bad.ok and ViolationReason.ATTESTATION_NOT_EXTENDING in _reasons(bad)
 
 
 # P1b — certification requires exactly one producing post-freeze evaluation.
-def test_p1b_certify_requires_a_producing_evaluation():
-    a = _anchored()
+def test_p1b_certify_requires_a_producing_evaluation(monkeypatch):
+    a = _anchored(monkeypatch)
     ch = a["hist"].versions[0].content_hash
     # a run with the SAME canonical run_id but NO producing evaluation (attempts == [])
     no_eval = _run("codex", ch, a["freeze"].freeze_hash)
@@ -1699,8 +1962,8 @@ def test_p1b_certify_requires_a_producing_evaluation():
 
 
 # P1c — the headline precision must be bound to a real AdjudicatedPrecision.
-def test_p1c_certify_requires_bound_adjudicated_precision():
-    a = _anchored()
+def test_p1c_certify_requires_bound_adjudicated_precision(monkeypatch):
+    a = _anchored(monkeypatch)
     # (1) a free adjudicated_precision float with NO bound AdjudicatedPrecision
     rep = _certify(a, precision=None)
     assert not rep.ok and ViolationReason.PRECISION_UNBOUND in _reasons(rep)
@@ -1727,8 +1990,8 @@ def test_p1c_certify_requires_bound_adjudicated_precision():
 
 
 # P1d — the precision sample size k must equal the k committed inside the freeze.
-def test_p1d_precision_k_must_equal_committed_freeze_k():
-    a = _anchored()  # committed_k == 3
+def test_p1d_precision_k_must_equal_committed_freeze_k(monkeypatch):
+    a = _anchored(monkeypatch)  # committed_k == 3
     ch = a["hist"].versions[0].content_hash
     fz = a["freeze"].freeze_hash
     rid = a["run"].run_id
@@ -1749,49 +2012,25 @@ def test_p1d_precision_k_must_equal_committed_freeze_k():
 
 
 # P1e — the certifier (attestation.evaluator_id) must not be the scored subject.
-def test_p1e_certifier_must_not_be_the_scored_subject():
-    a = _anchored()
+def test_p1e_certifier_must_not_be_the_scored_subject(monkeypatch):
+    a = _anchored(monkeypatch)
     self_att = build_attestation(
         history=a["hist"], freeze=a["freeze"], run=a["run"], report=a["report"],
         evaluator_id=a["run"].subject,  # == "codex", the scored subject
-        attested_at="2026-07-16T12:00:00Z", key=KEY, prior_attestation_root=GENESIS_ROOT,
+        attested_at="2026-07-16T12:00:00Z", key=KEY, prior_attestation_root=ATT_CHAIN_BASE,
         exclusions=a["excl"], ledger=a["ledger"], evaluation_ledger=a["evln"], achievability=None,
     )
     rep = _certify(a, attestation=self_att)
     assert not rep.ok and ViolationReason.CURATOR_IS_SUBJECT in _reasons(rep)
 
 
-# PART 3 — the attestation chain base must root in the git-committed genesis.
+# PART 3 / R5-2 — the attestation chain must root in the COMMITTED latest-attestation root.
 def test_part3_certify_chain_base_must_root_in_committed_genesis(monkeypatch):
-    # a hermetic fixture genesis so the test never depends on the committed file's value
-    fixture_genesis = "f" * 64
-    monkeypatch.setattr(contract, "load_committed_genesis_root", lambda *args, **kw: fixture_genesis)
-
-    # a chain base whose prior_attestation_root is NOT the committed genesis is refused
-    unrooted = _anchored(prior_attestation_root="deadbeef" * 8)
+    # a chain whose prior_attestation_root is NOT the committed root is refused
+    unrooted = _anchored(monkeypatch, prior_attestation_root="deadbeef" * 8)
     rep = _certify(unrooted)
     assert not rep.ok and ViolationReason.GENESIS_UNANCHORED in _reasons(rep)
 
-    # the honest chain, rooted in the committed genesis, is accepted
-    rooted = _anchored(prior_attestation_root=fixture_genesis)
+    # the honest chain, rooted in the committed latest-attestation root, is accepted
+    rooted = _anchored(monkeypatch)
     assert _certify(rooted).ok, _reasons(_certify(rooted))
-
-
-# PART 2 — the certify path RECOMPUTES the numerator: a claimed set the recompute does
-# not confirm, or that omits a real rediscovery, is NUMERATOR_UNVERIFIED. (The verifier
-# itself is exercised end-to-end in test_verifier.py.)
-def test_part2_numerator_must_match_the_recompute():
-    a = _anchored()
-    confirmed = a["blinds"][0].computed_identity_hash
-    other = a["blinds"][1].computed_identity_hash
-    # the recompute confirms exactly the claim -> certifies
-    assert _certify(a, recomputed_rediscovered={confirmed}).ok
-    # the detector produced NOTHING on the real code (claim unconfirmed) -> reject
-    rep = _certify(a, recomputed_rediscovered=set())
-    assert not rep.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep)
-    # the recompute confirms a DIFFERENT entry than claimed -> reject
-    rep2 = _certify(a, recomputed_rediscovered={other})
-    assert not rep2.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep2)
-    # no recompute supplied at all -> fail closed
-    rep3 = _certify(a, recomputed_rediscovered=None)
-    assert not rep3.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep3)

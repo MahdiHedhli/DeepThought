@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "harness"))
 
 import contract  # noqa: E402
+import verifier  # noqa: E402  (module handle for monkeypatching the committed detector registry + fetcher)
 from contract import (  # noqa: E402
     AdjudicatedPrecision,
     Adjudication,
@@ -43,7 +44,6 @@ from contract import (  # noqa: E402
     ViolationReason,
     _canonical_run_id,
     build_attestation,
-    load_committed_genesis_root,
     pool_root_of,
     precision_sample_seed,
     sample_confusion_pairs,
@@ -52,6 +52,8 @@ from contract import (  # noqa: E402
 from verifier import recompute_rediscovered  # noqa: E402
 
 KEY = b"deepthought-verifier-test-key-0123456789"
+EVALUATOR_ID = "curator-not-subject"
+CHAIN_BASE = "abad1dea" * 8  # a fixed committed latest-attestation root for the hermetic fixtures
 
 
 def _reasons(report):
@@ -127,16 +129,39 @@ def test_recompute_is_deterministic_and_order_independent():
 # wiring into the certify path — a claimed set that the recompute does not
 # confirm (over-claim), or that omits a real rediscovery, is NUMERATOR_UNVERIFIED
 # --------------------------------------------------------------------------- #
-def _certify_with_claim(cohort, claimed_entries, *, recomputed):
+def _install_committed(monkeypatch, hist, *, detector_id="d", scan=fake_scan, register=True):
+    """Install the COMMITTED anchor state + the committed detector/fetcher so a strict
+    certify RUNS its numerator recompute from committed state (R5-1): ``validate`` resolves
+    ``scan_fn`` from ``verifier.DETECTOR_REGISTRY`` keyed by the frozen ``detector_id`` and
+    ``fetch_fn`` from ``verifier.FETCH_FN`` — neither is a caller argument. When
+    ``register`` is False the detector is intentionally left UNREGISTERED so the certify
+    fails closed on a numerator it cannot recompute."""
+    phr = hist.history_root
+    state = contract.CommittedGenesisState(
+        genesis_history_root=phr,
+        latest_history_root=phr,
+        latest_attestation_root=CHAIN_BASE,
+        evaluator_id=EVALUATOR_ID,
+        verify_key=KEY,
+    )
+    monkeypatch.setattr(contract, "load_committed_genesis_state", lambda *a, **k: state)
+    monkeypatch.setattr(verifier, "FETCH_FN", fake_fetch)
+    if register:
+        monkeypatch.setitem(verifier.DETECTOR_REGISTRY, detector_id, lambda: scan)
+
+
+def _certify_with_claim(monkeypatch, cohort, claimed_entries, *, detector_id="d", register=True):
     """A fully honest, anchored strict-certify over ``cohort`` whose Report claims
-    ``claimed_entries`` as rediscovered, with an injected ``recomputed`` set. Only the
-    numerator claim varies between cases."""
+    ``claimed_entries`` as rediscovered. The numerator is RECOMPUTED by ``validate`` running
+    the COMMITTED detector (the marker-driven fake, registered by ``_install_committed``) on
+    the fake corpus — not a caller-supplied set. Only the numerator claim (and, for the
+    fail-closed case, whether the detector is registered) varies between cases."""
     hist = CohortHistory(versions=[cohort])
     blind = sorted(e.computed_identity_hash for e in cohort.entries)
     pool = [f"p{i:02d}" for i in range(12)]
     committed_k = 3
     bundle = DetectorBundle(
-        detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k
+        detector_id=detector_id, lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k
     )
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     rid = _canonical_run_id(cohort.content_hash, freeze.freeze_hash, "codex")
@@ -174,16 +199,19 @@ def _certify_with_claim(cohort, claimed_entries, *, recomputed):
             for p in sampled
         ],
     )
+    ledger = ExposureLedger()
     evln = EvaluationLedger()
+    _install_committed(monkeypatch, hist, detector_id=detector_id, register=register)
     att = build_attestation(
         history=hist,
         freeze=freeze,
         run=run,
         report=report,
-        evaluator_id="curator-not-subject",
+        evaluator_id=EVALUATOR_ID,
         attested_at="2026-07-16T12:00:00Z",
         key=KEY,
-        prior_attestation_root=load_committed_genesis_root(),
+        prior_attestation_root=CHAIN_BASE,
+        ledger=ledger,
         evaluation_ledger=evln,
     )
     return validate(
@@ -192,42 +220,39 @@ def _certify_with_claim(cohort, claimed_entries, *, recomputed):
         run=run,
         report=report,
         precision=precision,
+        ledger=ledger,
         prior_evaluations=evln,
         attestation=att,
-        verify_key=KEY,
-        recomputed_rediscovered=recomputed,
         strict=True,
     )
 
 
-def test_certify_numerator_matches_recompute_passes():
+def test_certify_numerator_matches_recompute_passes(monkeypatch):
     cohort = Cohort(version="v1", entries=[ENTRY_A, ENTRY_B, ENTRY_C]).sealed()
-    recomputed = recompute_rediscovered([ENTRY_A, ENTRY_B, ENTRY_C], fetch_fn=fake_fetch, scan_fn=fake_scan)
-    # the honest report claims exactly what the frozen detector reproduces on real code
-    rep = _certify_with_claim(cohort, [ENTRY_A], recomputed=recomputed)
+    # the honest report claims exactly what the committed detector reproduces on real code
+    rep = _certify_with_claim(monkeypatch, cohort, [ENTRY_A])
     assert rep.ok, _reasons(rep)
 
 
-def test_certify_over_claimed_rediscovery_is_numerator_unverified():
+def test_certify_over_claimed_rediscovery_is_numerator_unverified(monkeypatch):
     cohort = Cohort(version="v1", entries=[ENTRY_A, ENTRY_B, ENTRY_C]).sealed()
-    recomputed = recompute_rediscovered([ENTRY_A, ENTRY_B, ENTRY_C], fetch_fn=fake_fetch, scan_fn=fake_scan)
-    # the report CLAIMS B as rediscovered, but the recompute only confirms A
-    rep = _certify_with_claim(cohort, [ENTRY_A, ENTRY_B], recomputed=recomputed)
+    # the report CLAIMS B as rediscovered, but the committed detector re-run only confirms A
+    rep = _certify_with_claim(monkeypatch, cohort, [ENTRY_A, ENTRY_B])
     assert not rep.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep)
 
 
-def test_certify_omitting_a_real_rediscovery_is_numerator_unverified():
+def test_certify_omitting_a_real_rediscovery_is_numerator_unverified(monkeypatch):
     cohort = Cohort(version="v1", entries=[ENTRY_A, ENTRY_B, ENTRY_C]).sealed()
-    recomputed = recompute_rediscovered([ENTRY_A, ENTRY_B, ENTRY_C], fetch_fn=fake_fetch, scan_fn=fake_scan)
-    # the report OMITS A (claims nothing), but the recompute confirms A -> mismatch
-    rep = _certify_with_claim(cohort, [], recomputed=recomputed)
+    # the report OMITS A (claims nothing), but the committed detector re-run confirms A
+    rep = _certify_with_claim(monkeypatch, cohort, [])
     assert not rep.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep)
 
 
-def test_certify_without_a_recompute_is_fail_closed_unverified():
+def test_certify_with_an_unrecomputable_detector_is_fail_closed_unverified(monkeypatch):
     cohort = Cohort(version="v1", entries=[ENTRY_A, ENTRY_B, ENTRY_C]).sealed()
-    # no recompute supplied at all: the numerator is unverifiable -> fail closed
-    rep = _certify_with_claim(cohort, [ENTRY_A], recomputed=None)
+    # the frozen detector_id has no committed registry entry: the numerator cannot be
+    # recomputed from committed state, so certification fails closed
+    rep = _certify_with_claim(monkeypatch, cohort, [ENTRY_A], detector_id="ghost-unregistered", register=False)
     assert not rep.ok and ViolationReason.NUMERATOR_UNVERIFIED in _reasons(rep)
 
 

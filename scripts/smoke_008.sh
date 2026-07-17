@@ -51,17 +51,24 @@ from contract import (
     ContractViolation,
     _canonical_run_id,
     build_attestation,
+    load_committed_evaluator_id,
     load_committed_genesis_root,
+    load_committed_verify_key,
     pool_root_of,
     precision_sample_seed,
     sample_confusion_pairs,
     validate,
 )
-from verifier import recompute_rediscovered
+import verifier
+from verifier import recompute_certified_numerator
 
-# A fixed evaluator key — DETERMINISTIC (never read from os.urandom). PRODUCTION
-# swaps HMAC for ed25519 with the private key held by a party != the scored builder.
-KEY = b"deepthought-smoke-evaluator-key-0123456789"
+# The committed evaluator signing key — DETERMINISTIC (never read from os.urandom). It
+# MATCHES the committed verify-key in genesis_root.json so the honest attestation verifies;
+# validate() loads the verify-key from committed state, never from a caller arg (R5-4).
+# PRODUCTION commits an ed25519 PUBLIC key while the private key is held by a party != the
+# scored subject (curator != subject).
+KEY = load_committed_verify_key()
+EVALUATOR_ID = load_committed_evaluator_id()
 
 
 def entry(vuln, probe, role=Role.BLIND):
@@ -155,11 +162,14 @@ precision_view = AdjudicatedPrecision(
     ],
 )
 
-# PART 2: RECOMPUTE the numerator by re-running a (here fake, deterministic) frozen
-# detector on the pinned SHAs. A marker-driven fake detector flags the blind sink in
-# the vuln tree and not in the patched tree, so the recompute confirms e2 -> the
-# claimed rediscovery is VERIFIED, not trusted. (Article III: the detector parses the
-# fetched source as DATA; it is never executed.)
+# PART 2 / R5-1: the certify path RECOMPUTES the numerator ITSELF by re-running the
+# COMMITTED detector (resolved from the frozen detector_id) on the pinned SHAs — never a
+# caller-supplied set. Here we install a (fake, deterministic) frozen detector + fetcher
+# into the committed module-level registry/fetcher so the smoke is hermetic (production
+# resolves the real ssrf_detector + GitHub-raw fetcher). A marker-driven fake detector
+# flags the blind sink in the vuln tree and not in the patched tree, so validate()'s own
+# recompute confirms e2 -> the claimed rediscovery is VERIFIED, not trusted. (Article III:
+# the detector parses the fetched source as DATA; it is never executed.)
 _FILES = {
     (e2.vuln_ref, "api/core/rag/extractor/word_extractor.py"): "def f(url_spec):\n    client.get(url_spec.geturl(), timeout=5)  # FLAG\n",
     (e2.patched_ref, "api/core/rag/extractor/word_extractor.py"): "def f(url_spec):\n    ssrf_proxy.validate(url_spec)\n    client.get(url_spec.geturl(), timeout=5)\n",
@@ -173,7 +183,11 @@ def _fake_scan(source, uri):
     ]
 def _fake_scan_blind(source, uri):
     return []  # a fake detector that produces NOTHING -> confirms no rediscovery
-recomputed = recompute_rediscovered([e2], fetch_fn=_fake_fetch, scan_fn=_fake_scan)
+
+# Install the committed detector + fetcher (module-level, monkeypatchable): validate()
+# resolves DT-SSRF-TAINT's scan_source from DETECTOR_REGISTRY and the fetcher from FETCH_FN.
+verifier.FETCH_FN = _fake_fetch
+verifier.DETECTOR_REGISTRY["DT-SSRF-TAINT"] = lambda: _fake_scan
 
 # B5: bind every component root into one signed Attestation (chained to the committed genesis).
 attestation = build_attestation(
@@ -181,10 +195,10 @@ attestation = build_attestation(
     freeze=freeze,
     run=run,
     report=report_view,
-    evaluator_id="curator-not-subject",
+    evaluator_id=EVALUATOR_ID,  # the COMMITTED evaluator id (curator != subject)
     attested_at="2026-07-16T12:00:00Z",
     key=KEY,
-    prior_attestation_root=load_committed_genesis_root(),  # P1a/PART3: chain base roots in the committed genesis
+    prior_attestation_root=load_committed_genesis_root(),  # R5-2/PART3: chain from the committed latest attestation root
     exclusions=None,
     ledger=ledger,
     evaluation_ledger=evaluations,
@@ -192,6 +206,8 @@ attestation = build_attestation(
 )
 
 # R6: a run with post-freeze attempts is validated against its FreezeManifest (freeze=).
+# The verify-key + evaluator id + genesis chain + numerator recompute are all loaded/RUN
+# from committed state — no verify_key / recomputed_rediscovered caller args (R5-1/R5-4).
 certified = validate(
     history=history,
     ledger=ledger,
@@ -201,13 +217,16 @@ certified = validate(
     precision=precision_view,
     prior_evaluations=evaluations,
     attestation=attestation,
-    verify_key=KEY,
-    recomputed_rediscovered=recomputed,
     strict=True,
 )
 expect("honest signed attestation certifies (strict)", certified.ok)
+if not certified.ok:
+    print(f"        -> {certified.summary()}")
 expect("exactly one semantic evaluation recorded", run.semantic_evaluation_count == 1)
-expect("numerator recompute confirms the claimed rediscovery", recomputed == {e2.identity_hash})
+expect(
+    "committed detector re-run confirms the claimed rediscovery",
+    recompute_certified_numerator([e2], detector_id="DT-SSRF-TAINT") == {e2.identity_hash},
+)
 
 print()
 print("== guard 1: in-place entry edit without a version bump ==")
@@ -248,11 +267,12 @@ print(f"        -> {rep4.summary()}")
 
 print()
 print("== guard 5: cryptographic anchoring fails closed (forged / omitted / unanchored) ==")
-# a forged signature cannot certify
+# a forged signature cannot certify (verified against the COMMITTED evaluator key; no
+# verify_key caller arg — R5-4)
 forged = attestation.model_copy(update={"signature": "00" * 32})
 rep5a = validate(
     history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
-    prior_evaluations=evaluations, attestation=forged, verify_key=KEY, strict=True,
+    precision=precision_view, prior_evaluations=evaluations, attestation=forged, strict=True,
 )
 expect("forged signature trips ATTESTATION_INVALID", ViolationReason.ATTESTATION_INVALID in rep5a.reasons())
 print(f"        -> {rep5a.summary()}")
@@ -260,7 +280,7 @@ print(f"        -> {rep5a.summary()}")
 # omitting a referenced component (the history) fails closed
 rep5b = validate(
     history=None, ledger=ledger, run=run, freeze=freeze, report=report_view,
-    prior_evaluations=evaluations, attestation=attestation, verify_key=KEY, strict=True,
+    precision=precision_view, prior_evaluations=evaluations, attestation=attestation, strict=True,
 )
 expect("omitted history component trips ATTESTATION_INCOMPLETE", ViolationReason.ATTESTATION_INCOMPLETE in rep5b.reasons())
 print(f"        -> {rep5b.summary()}")
@@ -268,38 +288,41 @@ print(f"        -> {rep5b.summary()}")
 # certifying with NO attestation at all is UNANCHORED
 rep5c = validate(
     history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
-    prior_evaluations=evaluations, strict=True,
+    precision=precision_view, prior_evaluations=evaluations, strict=True,
 )
 expect("certify with no attestation trips UNANCHORED", ViolationReason.UNANCHORED in rep5c.reasons())
 print(f"        -> {rep5c.summary()}")
 
 print()
-print("== guard 6: PART 2 numerator verifier — a claim the frozen detector does not reproduce ==")
-# a fake frozen detector that produces NOTHING on the real code: the report still
-# CLAIMS e2 rediscovered, but the recompute does not confirm it -> NUMERATOR_UNVERIFIED
-recomputed_blind = recompute_rediscovered([e2], fetch_fn=_fake_fetch, scan_fn=_fake_scan_blind)
+print("== guard 6: PART 2 numerator verifier — a claim the committed detector does not reproduce ==")
+# swap the committed detector for a fake that produces NOTHING on the real code: the report
+# still CLAIMS e2 rediscovered, but validate()'s own recompute does not confirm it ->
+# NUMERATOR_UNVERIFIED. The recompute is RUN from committed state, not a caller arg (R5-1).
+verifier.DETECTOR_REGISTRY["DT-SSRF-TAINT"] = lambda: _fake_scan_blind
 rep6 = validate(
     history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
     precision=precision_view, prior_evaluations=evaluations, attestation=attestation,
-    verify_key=KEY, recomputed_rediscovered=recomputed_blind, strict=True,
+    strict=True,
 )
 expect("unconfirmed rediscovery trips NUMERATOR_UNVERIFIED", ViolationReason.NUMERATOR_UNVERIFIED in rep6.reasons())
-expect("the fake detector reproduced nothing", recomputed_blind == set())
+expect("the fake detector reproduced nothing", recompute_certified_numerator([e2], detector_id="DT-SSRF-TAINT") == set())
 print(f"        -> {rep6.summary()}")
+# restore the honest committed detector for the remaining guards
+verifier.DETECTOR_REGISTRY["DT-SSRF-TAINT"] = lambda: _fake_scan
 
 print()
 print("== guard 7: PART 3 genesis anchoring — a chain base not rooted in the committed genesis ==")
-# an attestation whose prior_attestation_root is NOT the committed genesis root
+# an attestation whose prior_attestation_root is NOT the committed latest-attestation root
 unrooted_att = build_attestation(
     history=history, freeze=freeze, run=run, report=report_view,
-    evaluator_id="curator-not-subject", attested_at="2026-07-16T12:00:00Z", key=KEY,
+    evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=KEY,
     prior_attestation_root="deadbeef" * 8,  # a fresh, unreviewable, un-anchored genesis
     exclusions=None, ledger=ledger, evaluation_ledger=evaluations, achievability=None,
 )
 rep7 = validate(
     history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
     precision=precision_view, prior_evaluations=evaluations, attestation=unrooted_att,
-    verify_key=KEY, recomputed_rediscovered=recomputed, strict=True,
+    strict=True,
 )
 expect("un-anchored chain base trips GENESIS_UNANCHORED", ViolationReason.GENESIS_UNANCHORED in rep7.reasons())
 print(f"        -> {rep7.summary()}")

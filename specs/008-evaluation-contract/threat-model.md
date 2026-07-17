@@ -174,6 +174,41 @@ ledger enforces for cohorts. This is the honest trust boundary: everything a val
 *can* check is checked; the two things it structurally cannot are pushed onto git
 review and organizational key custody rather than silently assumed.
 
+## Fifth wave (round-5): the round-4 layer was OPT-IN — make it RUN from committed state
+
+A fifth audit proved the round-4 verification layer, while present, was **bypassable
+because it was built as OPT-IN / CALLER-SUPPLIED inputs**: the numerator recompute, the
+verify-key, the prior-history baseline, and several completeness inputs were passed IN to
+`validate` by the very party being scored, who could therefore forge them. ONE governing
+principle drove the fixes, applied everywhere rather than only to the listed repros:
+
+- **A trusted value or a verification RESULT must NEVER be a caller argument the scored
+  party could forge.** `validate()` RUNS each verification itself and LOADS every trusted
+  root / key / detector from COMMITTED, git-tracked state (via module-level,
+  monkeypatchable registries / loaders — not caller args). Every completeness input a
+  strict certify needs is MANDATORY and resolved from committed state; omission or an inert
+  default FAILS CLOSED.
+
+| Hole | Bypass it re-opened (round-4 was opt-in) | Now sealed in `validate()` by |
+|---|---|---|
+| R5-1 | `recomputed_rediscovered=` was a caller set — the subject passed a recompute matching its own lie | the `recomputed_rediscovered` param is REMOVED; strict certify RUNS `verifier.recompute_certified_numerator`, resolving `scan_fn` from a committed `DETECTOR_REGISTRY` keyed by the frozen `detector_id` and `fetch_fn` from the committed fetcher (`NUMERATOR_UNVERIFIED`; a fail-closed miss when the detector cannot be resolved) |
+| R5-2 | `load_committed_genesis_root()` was `chain_root([])` (empty) so any truncated cohort "anchored"; `prior_history` was a trusted caller arg | a REAL, non-empty, MONOTONIC committed genesis (`genesis_root.json` holds `genesis_history_root` + `latest.{history_root,attestation_root}`); the presented history must reproduce + append-only-extend the COMMITTED prior (`ATTESTATION_NOT_EXTENDING`) and the attestation must chain from the committed latest attestation root (`GENESIS_UNANCHORED`); `advance_committed_root(...)` persists the advance |
+| R5-3 | `_check_exposure` / pool_root / committed_k were guarded by `if … is not None` — omit the arg, skip the check | on strict certify the exposure ledger + prior evaluations are MANDATORY (`MISSING_LEDGER`) and `pool_root` / `committed_k` must be non-inert (`PRECISION_SAMPLE_UNBOUND`); the opt-in guards are removed |
+| R5-4 | `verify_key=` was a caller arg — a subject mints key K, signs, passes K | the verify-key + evaluator id are LOADED from committed config; a subject-minted key or a wrong evaluator id fails `ATTESTATION_INVALID`; the `verify_key` param is REMOVED |
+| R5-5 | the freeze bound only `attempts[0]`, not the PRODUCING attempt | the producing post-freeze attempt's `freeze_hash` must equal the frozen bundle hash (`BAD_FREEZE_BINDING`) |
+| R5-6 | a certified report could carry a free `achievable_recall` diagnostic as if bound | a certified report must not carry `achievable_recall` (`ACHIEVABLE_UNBOUND`); it stays a labelled diagnostic for non-certified reports |
+
+**The FINAL residual is now exactly two things, both structurally outside a validator and
+both pushed onto reviewable / organizational boundaries rather than silently assumed:**
+(i) **genesis-commit completeness** — that what the curator commits at genesis
+(`genesis_root.json`) is itself complete; this lives in git, timestamped and reviewable in
+history; and (ii) **physical key custody** — that the *private* signing key is held by a
+party that is NOT the scored subject (`curator != subject`). The in-band half of custody
+(`evaluator_id` == committed id, `!= subject`, verify-key from committed state) is enforced
+in code; the physical key-holding boundary is organizational. Everything a validator *can*
+run and check, it now RUNS and checks from committed state; the two things it structurally
+cannot are git review and organizational key custody.
+
 ## Sealing note (for the later cross-model evaluator)
 
 The exposure ledger and freeze manifest are the in-contract guarantees. The OS-level
