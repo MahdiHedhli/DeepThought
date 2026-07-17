@@ -157,9 +157,11 @@ A named, opt-in, **purely ergonomic** `mostly_harmless` profile.
 - **FR-8 — Verify stays isolated.** The `verify` command constructs only a
   `NoopSandbox` dry-run under every profile value; the `--i-have-sandbox-signoff`
   refusal remains the literal first action of the command body, before any
-  profile resolution; and neither `cli.py` nor the new `profile.py` imports or
-  references `DockerSandbox` or any executing backend. The `Profile` type carries
-  no sandbox or execution field (Constitution III).
+  profile resolution; neither `cli.py` nor the new `profile.py` references
+  `DockerSandbox`; and importing the CLI does not pull the executing backend into
+  the process import closure (`DockerSandbox` is exported lazily, verified by a
+  clean-subprocess test). The `Profile` type carries no sandbox or execution field
+  (Constitution III).
 
 - **FR-9 — The profile never suppresses a session's next steps.** A session's own
   `## Next steps` — including a pending VERIFY escalation reported by a
@@ -215,9 +217,10 @@ Every test below must pass. Tests marked (RT) trace to a red-team finding in
    profile in {unset, `mostly_harmless`, arbitrary} and via env. (FR-8, RT)
 8. **Verify is Noop dry-run under the profile** — a reproduced verdict does not
    promote, pages no evidence, writes no transition. (FR-8)
-9. **No executing backend imported** — AST/structural assertion that `cli.py` and
-   `profile.py` never import or reference `DockerSandbox` or any executing
-   backend, even though `sandbox/__init__.py` exports it. (FR-8, RT)
+9. **No executing backend in the CLI import closure** — the AST name-check confirms
+   `cli.py`/`profile.py` never reference `DockerSandbox`, AND a clean-subprocess
+   test confirms importing `deepthought.cli` never loads `deepthought.sandbox.docker`
+   (the backend is exported lazily). (FR-8, RT — PR #37 codex review)
 10. **Execution-stop messaging not trimmed** — the sign-off refusal and the "no
     execution — sandbox sign-off pending" banner render in full under
     `terse_output`. (FR-7, RT)

@@ -375,6 +375,39 @@ def test_ac9_docker_backend_still_exported_by_sandbox_package():
     assert "DockerSandbox" in sandbox.__all__
 
 
+def test_ac9_cli_import_closure_excludes_executing_backend():
+    """codex review (PR #37): the AST name-check is necessary but NOT sufficient.
+    cli.py does `from .sandbox import ...`, which runs the sandbox package __init__;
+    if that eagerly imported `.docker`, the executing backend would be in the
+    process import closure even though cli.py never names it. Verify in a CLEAN
+    subprocess that importing deepthought.cli leaves deepthought.sandbox.docker
+    unloaded (DockerSandbox is exported lazily)."""
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, deepthought.cli; "
+        "print('LOADED' if 'deepthought.sandbox.docker' in sys.modules else 'CLEAN')"
+    )
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env
+    )
+    assert result.returncode == 0, result.stderr
+    assert "CLEAN" in result.stdout, (
+        "importing deepthought.cli loaded the executing backend "
+        f"(stdout={result.stdout!r} stderr={result.stderr!r})"
+    )
+
+
+def test_ac9_docker_backend_lazily_importable():
+    """DockerSandbox stays available (lazily) for the signed-off Tier-2 harness."""
+    from deepthought import sandbox
+
+    assert sandbox.DockerSandbox.__name__ == "DockerSandbox"
+
+
 def test_ac9_profile_module_has_no_sandbox_field():
     prof = resolve_profile("mostly_harmless")
     field_names = {f.name for f in _dataclass_fields(prof)}

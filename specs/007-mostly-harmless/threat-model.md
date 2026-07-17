@@ -70,10 +70,11 @@ profile-carried `state_path` / output-directory default.
   Adding `--profile` to `verify` — the one command whose only theoretical path to
   execution is its refusing flag — couples it to a new `profile.py` that could
   import the already-exported `DockerSandbox` the CLI deliberately never imports.
-  → **Mitigation:** structural/AST test that `cli.py` and `profile.py` never
-  import an executing backend; `verify` constructs only `NoopSandbox` dry-run
-  under every profile value; `Profile` carries no sandbox field. **FR-8**; tests
-  **AC-9, AC-8**.
+  → **Mitigation:** `cli.py`/`profile.py` never reference an executing backend
+  (AST name-check); `DockerSandbox` is exported *lazily* so importing the CLI never
+  loads it into the process closure (clean-subprocess test — PR #37 codex review);
+  `verify` constructs only `NoopSandbox` dry-run under every profile value;
+  `Profile` carries no sandbox field. **FR-8**; tests **AC-9, AC-8**.
 
 - **F2.3 (LOW) — `local_lab` as latent execution pressure.** A basis narrated as
   "safe to run in my lab" creates pressure to later wire real execution for it.

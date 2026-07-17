@@ -22,7 +22,6 @@ from .base import (
     Signoff,
     SignoffRequired,
 )
-from .docker import DockerSandbox
 from .noop import NoopSandbox
 
 __all__ = [
@@ -40,3 +39,17 @@ __all__ = [
     "NoopSandbox",
     "DockerSandbox",
 ]
+
+
+def __getattr__(name: str):
+    # ``DockerSandbox`` is the executing backend. It stays exported for the callers
+    # that explicitly need it (the signed-off Tier-2 harness), but it is imported
+    # LAZILY (PEP 562): merely importing this package — e.g. via the CLI, which only
+    # needs ``NoopSandbox`` — must never pull the executing backend into the process
+    # import closure. This keeps the CLI's "no executing backend imported" invariant
+    # real, not just true of its source (Constitution Article III; codex review #37).
+    if name == "DockerSandbox":
+        from .docker import DockerSandbox
+
+        return DockerSandbox
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
