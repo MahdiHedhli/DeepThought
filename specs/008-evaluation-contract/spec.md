@@ -137,7 +137,8 @@ wired into `check`, enforcing:
   fetch failure, repository disappearance, `target_paths` drift, unverified
   patched-file deletion, CWE reclassification, duplicate CVE/GHSA alias, seed swap,
   post-freeze `drop_reason` change, `target_paths` narrowing, `sink_probe`
-  alteration, triage/dedup suppression, `policy_refusal`, and no-artifact.
+  alteration, triage/dedup suppression, `role-downgrade` (a blind entry legitimately
+  moved out of the blind set, FR-4), `policy_refusal`, and no-artifact.
   **Infrastructure-class** events invalidate the run; **analysis-limitation**
   events count as a miss. No exclusion edits history.
 
@@ -260,6 +261,53 @@ unchanged.
     `validate()`: a prediction registered at/after the freeze timestamp
     (`ACHIEVABILITY_NOT_PRE_FREEZE`) or an in-place rewrite of a sealed log
     (`IN_PLACE_EDIT`) is rejected even when it bypassed `append`.
+
+### Round-2 adversarial-audit acceptance criteria (the second wave)
+
+A second red-team of `validate()` — run after the H1..H9 seals held — found a
+second wave of holes governed by two principles: **P1** no binding check is
+skippable by omitting a sibling argument or leaving an `Optional` `None`; **P2**
+every denominator-affecting field is sealed into a content hash AND preserved across
+versions via a matched `COHORT_CORRECTION` event. Each maps to a dedicated
+regression test (`test_r1`..`test_r8`). `validate()` gained two more keyword-only,
+optional baselines (`prior_history`, `prior_evaluations`); `AdjudicatedPrecision.pool`
+/ `.k` became mandatory and `EvaluationRun.run_id` became the canonical
+`sha256(cohort | freeze | subject)` — intended tightenings, so the existing tests and
+`scripts/smoke_008.sh` were updated to the honest bound form.
+
+24. **(R1, L1)** `role` and `guided_fix` are sealed into `Cohort.computed_content_hash`.
+    An in-place role/`guided_fix` flip on a sealed cohort (shrinking the blind-role
+    denominator or dodging AC-4 with no version bump) breaks the seal → `IN_PLACE_EDIT`.
+    They remain OUTSIDE entry *identity*, so a role move across a new version preserves
+    identity.
+25. **(R2, L1)** Denominator preservation is BLIND-SET preserving, not merely
+    identity-set preserving. An identity that leaves the blind set — by removal OR by a
+    role-downgrade that keeps its identity — needs a `COHORT_CORRECTION` event matched to
+    the exact `(identity, from_version, to_version)` transition, else `DENOMINATOR_SHRINK`.
+26. **(R3, L1/L10)** With a `prior_history` baseline, the presented history must be an
+    append-only extension: every baseline version appears at the same index with an
+    identical content hash. A from-storage rebuild that drops an earlier version
+    (`HISTORY_TRUNCATED`) or rewrites one in place (`IN_PLACE_EDIT`) is rejected.
+27. **(R4, L1/L9, P1)** A `Report`'s numerator + cohort binding are MANDATORY. When a
+    cohort resolves, `rediscovered_blind_ids` must be present (a free-int headline is
+    unverifiable) — `REPORT_DENOMINATOR_MISMATCH` otherwise; a `Report` with no cohort to
+    bind against is `REPORT_UNBOUND`, never a silent pass.
+28. **(R5, L4)** `EvaluationRun.run_id` must equal the canonical
+    `sha256(cohort_content_hash | freeze_hash | subject)` (`NON_CANONICAL_RUN_ID`), so the
+    precision sample cannot be re-rolled via a fresh run_id; an append-only
+    `EvaluationLedger` (`prior_evaluations` baseline) flags a second evaluation of the same
+    `(cohort, freeze, subject)` → `EVALUATED_MORE_THAN_ONCE`.
+29. **(R6, L4, P1)** A run that recorded post-freeze attempts but is validated with no
+    `FreezeManifest` fails with `MISSING_FREEZE` — a fabricated `run.freeze_hash` cannot
+    stand in for the freeze.
+30. **(R7, L5)** Exposure resolves by ENTRY IDENTITY across versions, not by the
+    version-scoped content hash: a curator/inspector of ANY cohort version sharing an entry
+    identity with the scored cohort is barred (`CURATOR_IS_SUBJECT`) — a version bump cannot
+    launder a curator into a subject.
+31. **(R8, L6, P1)** `AdjudicatedPrecision.pool`/`.k` are mandatory and the sample is
+    ALWAYS verified to be `sample_confusion_pairs(pool, k, seed)`; a hand-picked favorable
+    subset is rejected at the type boundary, and a precision presented with no run/freeze to
+    bind to is `PRECISION_SAMPLE_UNBOUND`.
 
 ## Open questions
 

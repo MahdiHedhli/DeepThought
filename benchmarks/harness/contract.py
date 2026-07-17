@@ -89,6 +89,7 @@ class ExclusionReason(str, Enum):
     TARGET_PATHS_NARROWING = "target_paths-narrowing"
     SINK_PROBE_EDIT = "sink_probe-edit"
     TRIAGE_DEDUP_SUPPRESSION = "triage/dedup-suppression"
+    ROLE_DOWNGRADE = "role-downgrade"  # a blind entry legitimately moved out of the blind set (FR-4)
     POLICY_REFUSAL = "policy_refusal"
     NO_ARTIFACT = "no-artifact"
 
@@ -131,6 +132,7 @@ _EXCLUSION_CLASS: dict[ExclusionReason, ExclusionClass] = {
     ExclusionReason.TARGET_PATHS_NARROWING: ExclusionClass.COHORT_CORRECTION,
     ExclusionReason.SINK_PROBE_EDIT: ExclusionClass.COHORT_CORRECTION,
     ExclusionReason.TRIAGE_DEDUP_SUPPRESSION: ExclusionClass.COHORT_CORRECTION,
+    ExclusionReason.ROLE_DOWNGRADE: ExclusionClass.COHORT_CORRECTION,
     # Policy refusal — N/A, distinct from a 0 miss.
     ExclusionReason.POLICY_REFUSAL: ExclusionClass.POLICY_REFUSAL,
 }
@@ -159,6 +161,11 @@ class ViolationReason(str, Enum):
     SEED_IN_BLIND = "calibration-seed-is-a-blind-entry"
     REPORT_DENOMINATOR_MISMATCH = "report-recall-not-bound-to-frozen-cohort"
     PRECISION_SAMPLE_UNBOUND = "precision-sample-not-bound-to-seed"
+    # Round-2 adversarial-audit seals (R1..R8): validate() enforces these too.
+    HISTORY_TRUNCATED = "history-truncated-or-reordered-vs-prior-baseline"
+    REPORT_UNBOUND = "report-not-bound-to-any-resolvable-cohort"
+    NON_CANONICAL_RUN_ID = "run-id-not-the-canonical-cohort-freeze-subject-hash"
+    EVALUATED_MORE_THAN_ONCE = "cohort-freeze-subject-evaluated-more-than-once"
 
 
 class ContractViolation(Exception):
@@ -283,8 +290,25 @@ class Cohort(BaseModel):
 
     @property
     def computed_content_hash(self) -> str:
+        # R1: role and guided_fix are SEALED into the content hash (not just the
+        # identity set). An in-place role flip or guided_fix edit on a sealed cohort
+        # therefore breaks the seal (IN_PLACE_EDIT) instead of silently shrinking the
+        # blind-role denominator with no version bump. They remain OUTSIDE entry
+        # *identity*, so a role move across a new version still preserves the identity.
         return _content_hash(
-            {"version": self.version, "entries": sorted(e.computed_identity_hash for e in self.entries)}
+            {
+                "version": self.version,
+                "entries": sorted(
+                    # role may be a Role member or a raw str (model_copy(update=...)
+                    # skips validation); normalise to the enum value either way.
+                    [
+                        e.computed_identity_hash,
+                        e.role.value if isinstance(e.role, Role) else str(e.role),
+                        e.guided_fix,
+                    ]
+                    for e in self.entries
+                ),
+            }
         )
 
     @property
@@ -607,6 +631,53 @@ class EvaluationRun(BaseModel):
         return attempt
 
 
+def _canonical_run_id(cohort_content_hash: str, freeze_hash: str, subject: str) -> str:
+    """The ONE canonical run_id for a (cohort, freeze, subject) triple (R5):
+    ``sha256(cohort_content_hash | freeze_hash | subject)``. Because the run_id is a
+    pure function of those three sealed inputs, an operator cannot mint a fresh
+    run_id to re-roll the precision sample or to launder a second evaluation as a new
+    run — there is exactly one valid run_id per (cohort, freeze, subject)."""
+    return _sha256("\x1f".join([cohort_content_hash, freeze_hash, subject]))
+
+
+class EvaluationRecord(BaseModel):
+    """One completed evaluation, keyed by the sealed (cohort, freeze, subject)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cohort_content_hash: str
+    freeze_hash: str
+    subject: str
+
+
+class EvaluationLedger(BaseModel):
+    """Append-only record of which (cohort, freeze, subject) triples have already
+    been evaluated (R5). Mirrors ``ExposureLedger``. Supplied to ``validate`` as the
+    ``prior_evaluations`` baseline so a SECOND evaluation of the same triple — the
+    blind re-roll ("freeze once, evaluate N times, keep the best") — is flagged
+    ``EVALUATED_MORE_THAN_ONCE`` instead of passing as a fresh run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    records: list[EvaluationRecord] = Field(default_factory=list)
+
+    def record(self, *, cohort_content_hash: str, freeze_hash: str, subject: str) -> None:
+        self.records.append(
+            EvaluationRecord(
+                cohort_content_hash=cohort_content_hash, freeze_hash=freeze_hash, subject=subject
+            )
+        )
+
+    def count(self, cohort_content_hash: str, freeze_hash: str, subject: str) -> int:
+        return sum(
+            1
+            for r in self.records
+            if r.cohort_content_hash == cohort_content_hash
+            and r.freeze_hash == freeze_hash
+            and r.subject == subject
+        )
+
+
 # --------------------------------------------------------------------------- #
 # FR-9 — recall vs precision, kept separate
 # --------------------------------------------------------------------------- #
@@ -693,12 +764,14 @@ class AdjudicatedPrecision(BaseModel):
     sampled_pairs: list[str]
     adjudications: list[Adjudication]
 
-    # Optional binding context (H8). When supplied, the sample is checked to be the
-    # exact deterministic draw for this (cohort, freeze, run) — so an operator
-    # cannot re-roll the sample until it flatters the detector, and cannot drop the
-    # unfavorable pairs.
-    pool: Optional[list[str]] = None  # the full confusion-pair pool the sample is drawn from
-    k: Optional[int] = None  # the sample size
+    # R8: pool and k are MANDATORY. The sample is ALWAYS verified to be the exact
+    # deterministic draw ``sample_confusion_pairs(pool, k, seed)`` — so a hand-picked
+    # favorable subset can no longer hide behind an omitted pool/k (P1: no binding is
+    # skippable by leaving a sibling field None).
+    pool: list[str]  # the full confusion-pair pool the sample is drawn from
+    k: int  # the sample size
+    # Optional binding context. When the full (cohort, freeze, run) is supplied, the
+    # seed must be exactly precision_sample_seed(cohort, freeze, run).
     cohort_hash: Optional[str] = None
     freeze_hash: Optional[str] = None
     run_id: Optional[str] = None
@@ -724,17 +797,17 @@ class AdjudicatedPrecision(BaseModel):
                 raise ValueError("adjudicators must be non-builders")
             if not any(not v.is_curator for v in adj.verdicts):
                 raise ValueError("at least one adjudicator must be a non-curator")
-        # SAMPLE BINDING (H8): if a pool/k are declared, the sample must be exactly
-        # sample_confusion_pairs(pool, k, seed); if the full seed context is declared,
-        # the seed must be exactly precision_sample_seed(cohort, freeze, run).
+        # SAMPLE BINDING (R8): pool/k are mandatory, so the draw is ALWAYS verified —
+        # the sample must be exactly sample_confusion_pairs(pool, k, seed).
+        expected_sample = sample_confusion_pairs(self.pool, self.k, self.seed)
+        if list(self.sampled_pairs) != list(expected_sample):
+            raise ValueError("sampled_pairs is not the deterministic sample_confusion_pairs(pool, k, seed) draw")
+        # If the full seed context is declared, the seed must be exactly
+        # precision_sample_seed(cohort, freeze, run).
         if self.cohort_hash is not None and self.freeze_hash is not None and self.run_id is not None:
             expected_seed = precision_sample_seed(self.cohort_hash, self.freeze_hash, self.run_id)
             if self.seed != expected_seed:
                 raise ValueError("seed is not bound to precision_sample_seed(cohort_hash, freeze_hash, run_id)")
-        if self.pool is not None and self.k is not None:
-            expected_sample = sample_confusion_pairs(self.pool, self.k, self.seed)
-            if list(self.sampled_pairs) != list(expected_sample):
-                raise ValueError("sampled_pairs is not the deterministic sample_confusion_pairs(pool, k, seed) draw")
         return self
 
     @property
@@ -985,6 +1058,8 @@ def validate(
     achievability: Optional[AchievabilityLog] = None,
     prior_exclusions: Optional[ExclusionLog] = None,
     prior_achievability: Optional[AchievabilityLog] = None,
+    prior_history: Optional[CohortHistory] = None,
+    prior_evaluations: Optional[EvaluationLedger] = None,
 ) -> ContractReport:
     """Validate the Evaluation Contract (FR-14). Checks entry-hash integrity,
     version monotonicity, denominator preservation, blind-reuse, the exposure
@@ -1008,6 +1083,8 @@ def validate(
             _check_version_monotonicity(history, result)
             _check_denominator_preservation(history, exclusions, result)
             _check_blind_reuse(history, result)
+            if prior_history is not None:
+                _check_history_extension(history, prior_history, result)  # R3
 
         if exclusions is not None:
             _check_exclusion_run_validity(exclusions, result)
@@ -1020,8 +1097,17 @@ def validate(
         if run is not None:
             _check_freeze_before_evaluation(run, result)
             _check_blind_access(run, result)
+            _check_run_id_canonical(run, result)  # R5
+            _check_evaluation_ledger(run, prior_evaluations, result)  # R5
+            # R6: a run that recorded post-freeze attempts MUST be validated against
+            # its FreezeManifest — a fabricated run.freeze_hash cannot stand in for it.
+            if run.post_freeze_attempts and freeze is None:
+                result.add(
+                    ViolationReason.MISSING_FREEZE,
+                    "a run with post-freeze attempts must be validated against its FreezeManifest",
+                )
             if ledger is not None:
-                _check_exposure(run, ledger, result)
+                _check_exposure(run, ledger, history, result)  # R7
 
         if freeze is not None:
             _check_freeze_binding(freeze, run, history, result)
@@ -1085,21 +1171,62 @@ def _check_denominator_preservation(
     # or flat-identity check let a miss/infra/policy event — or a stale v1->v2 event
     # — launder a later removal. Events are consumed per transition: one event
     # authorizes exactly its named removal.
+    #
+    # R2: preservation is BLIND-SET preserving, not merely identity-set preserving.
+    # An identity can leave the authoritative blind denominator two ways — by being
+    # removed from the cohort entirely, OR by a role-downgrade (BLIND -> regression/
+    # calibration) that keeps its identity. BOTH must be authorized by a matched
+    # COHORT_CORRECTION event. The union is deduped, so an identity that both leaves
+    # the blind set and is removed needs exactly one event.
     available: "Counter[tuple[str, str, str]]" = (
         exclusions.correction_transitions() if exclusions is not None else Counter()
     )
     for prev, curr in zip(history.versions, history.versions[1:]):
         removed = prev.identities() - curr.identities()
-        for identity in sorted(removed):
+        prev_blind = {e.computed_identity_hash for e in prev.by_role(Role.BLIND)}
+        curr_blind = {e.computed_identity_hash for e in curr.by_role(Role.BLIND)}
+        left_blind = prev_blind - curr_blind
+        must_authorize = removed | left_blind
+        for identity in sorted(must_authorize):
             key = (identity, prev.version, curr.version)
             if available.get(key, 0) > 0:
-                available[key] -= 1  # consume the one event that authorizes this removal
+                available[key] -= 1  # consume the one event that authorizes this transition
             else:
                 report.add(
                     ViolationReason.DENOMINATOR_SHRINK,
-                    f"{prev.version}->{curr.version}: entry {identity[:12]} left the denominator "
-                    "with no matching cohort-correction event",
+                    f"{prev.version}->{curr.version}: entry {identity[:12]} left the blind denominator "
+                    "(removed or role-downgraded) with no matching cohort-correction event",
                 )
+
+
+def _check_history_extension(
+    history: CohortHistory, prior: CohortHistory, report: ContractReport
+) -> None:
+    """R3: the presented ``history`` must be an APPEND-ONLY extension of the
+    ``prior_history`` baseline. Every version in the baseline must appear at the same
+    index with an identical content_hash. A from-storage rebuild that drops an earlier
+    version (e.g. collapses to a single easier version, dodging the consecutive-pair
+    denominator check) or rewrites a prior version is rejected — HISTORY_TRUNCATED for
+    a dropped/reordered version, IN_PLACE_EDIT for a same-tag content rewrite."""
+    for i, prior_cohort in enumerate(prior.versions):
+        if i >= len(history.versions):
+            report.add(
+                ViolationReason.HISTORY_TRUNCATED,
+                f"baseline version {prior_cohort.version} (index {i}) is missing from the presented history",
+            )
+            continue
+        curr = history.versions[i]
+        if curr.version != prior_cohort.version:
+            report.add(
+                ViolationReason.HISTORY_TRUNCATED,
+                f"baseline version {prior_cohort.version} at index {i} was dropped/reordered "
+                f"(presented {curr.version} instead)",
+            )
+        elif curr.content_hash != prior_cohort.content_hash:
+            report.add(
+                ViolationReason.IN_PLACE_EDIT,
+                f"baseline version {prior_cohort.version} content changed vs the prior_history baseline",
+            )
 
 
 def _check_exclusion_run_validity(exclusions: ExclusionLog, report: ContractReport) -> None:
@@ -1167,11 +1294,70 @@ def _check_blind_access(run: EvaluationRun, report: ContractReport) -> None:
                 break
 
 
-def _check_exposure(run: EvaluationRun, ledger: ExposureLedger, report: ContractReport) -> None:
+def _check_exposure(
+    run: EvaluationRun,
+    ledger: ExposureLedger,
+    history: Optional[CohortHistory],
+    report: ContractReport,
+) -> None:
+    """R7: resolve exposure by ENTRY IDENTITY across versions, not by the
+    version-scoped cohort content hash. A version bump (same entries, new hash) must
+    not launder a curator into a subject: if the subject curated/inspected ANY cohort
+    version that shares an entry identity with the scored cohort, it is barred."""
+    # Direct content-hash exposure always bars (works even with no history to resolve).
     if not ledger.can_score(run.cohort_content_hash, run.subject):
         report.add(
             ViolationReason.CURATOR_IS_SUBJECT,
             f"run {run.run_id}: subject {run.subject!r} curated/inspected this cohort",
+        )
+        return
+    # Entry-identity resolution across versions (needs history to resolve hashes).
+    scored = _cohort_by_content_hash(history, run.cohort_content_hash)
+    if scored is None:
+        return
+    scored_ids = scored.identities()
+    for record in ledger.records:
+        if record.actor != run.subject:
+            continue
+        record_cohort = _cohort_by_content_hash(history, record.cohort_content_hash)
+        if record_cohort is None:
+            continue
+        if scored_ids & record_cohort.identities():
+            report.add(
+                ViolationReason.CURATOR_IS_SUBJECT,
+                f"run {run.run_id}: subject {run.subject!r} curated/inspected a cohort version "
+                "sharing an entry identity with the scored cohort",
+            )
+            return
+
+
+def _check_run_id_canonical(run: EvaluationRun, report: ContractReport) -> None:
+    """R5: the run_id must be the ONE canonical hash of (cohort, freeze, subject).
+    A free-string run_id is re-rollable — it lets an operator freeze once and mint a
+    fresh run_id per attempt to re-roll the precision sample or launder a repeat
+    evaluation. Enforced whenever the run carries a freeze_hash (the run has frozen)."""
+    if run.freeze_hash is None:
+        return
+    expected = _canonical_run_id(run.cohort_content_hash, run.freeze_hash, run.subject)
+    if run.run_id != expected:
+        report.add(
+            ViolationReason.NON_CANONICAL_RUN_ID,
+            f"run_id {run.run_id!r} != canonical(cohort, freeze, subject) {expected[:12]}",
+        )
+
+
+def _check_evaluation_ledger(
+    run: EvaluationRun, prior_evaluations: Optional[EvaluationLedger], report: ContractReport
+) -> None:
+    """R5: evaluate-once. If a prior EvaluationLedger already contains this
+    (cohort, freeze, subject) triple, this is a second evaluation of the same blind
+    cohort — the "keep the best of N" re-roll — and is flagged."""
+    if run.freeze_hash is None or prior_evaluations is None:
+        return
+    if prior_evaluations.count(run.cohort_content_hash, run.freeze_hash, run.subject) > 0:
+        report.add(
+            ViolationReason.EVALUATED_MORE_THAN_ONCE,
+            f"run {run.run_id}: (cohort, freeze, subject={run.subject!r}) was already evaluated",
         )
 
 
@@ -1237,7 +1423,13 @@ def _check_report(
     if cohort is None and history is not None:
         cohort = history.latest()
     if cohort is None:
-        return  # nothing to bind against
+        # R4 (P1): a Report presented with nothing to bind against is NOT a silent
+        # pass — an unbound headline number is unverifiable and therefore rejected.
+        report.add(
+            ViolationReason.REPORT_UNBOUND,
+            "a Report must bind to a resolvable cohort/history; none resolved",
+        )
+        return
 
     blind = _blind_identities(cohort)
     if report_view.blind_recall.total != len(blind):
@@ -1252,7 +1444,14 @@ def _check_report(
             "report freeze_hash does not equal the frozen bundle hash",
         )
 
-    if report_view.rediscovered_blind_ids is not None:
+    # R4 (P1): the numerator binding is MANDATORY once a cohort resolves. Without the
+    # per-entry rediscovered set, a headline "4/4" is an unverifiable free integer.
+    if report_view.rediscovered_blind_ids is None:
+        report.add(
+            ViolationReason.REPORT_DENOMINATOR_MISMATCH,
+            "rediscovered_blind_ids is required to bind the numerator to the frozen cohort's blind entries",
+        )
+    else:
         rediscovered = set(report_view.rediscovered_blind_ids)
         extraneous = rediscovered - blind
         if extraneous:
@@ -1274,10 +1473,16 @@ def _check_precision_binding(
     freeze: Optional[FreezeManifest],
     report: ContractReport,
 ) -> None:
-    """Route precision through validate (H8). The seed must be the deterministic
+    """Route precision through validate (H8/R8). The seed must be the deterministic
     ``precision_sample_seed`` over THIS run's (cohort, freeze, run_id); a precision
-    computed over some other context — a re-rolled sample — is rejected."""
+    computed over some other context — a re-rolled sample — is rejected. R8 (P1): a
+    precision object presented with no run/freeze to bind to is itself unbound — it is
+    not silently accepted."""
     if run is None or freeze is None:
+        report.add(
+            ViolationReason.PRECISION_SAMPLE_UNBOUND,
+            "precision presented without a run/freeze to bind the sample to",
+        )
         return
     if precision.cohort_hash is not None and precision.cohort_hash != run.cohort_content_hash:
         report.add(

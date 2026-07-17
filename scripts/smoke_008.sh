@@ -37,6 +37,7 @@ from contract import (
     Role,
     ViolationReason,
     ContractViolation,
+    _canonical_run_id,
     validate,
 )
 
@@ -85,9 +86,12 @@ freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
 ledger = ExposureLedger()
 ledger.record(cohort_content_hash=v1.content_hash, actor="claude", activity="curated")
 
-run = EvaluationRun(run_id="run-1", subject="codex", cohort_content_hash=v1.content_hash, freeze_hash=freeze.freeze_hash)
+# R5: the run_id is the ONE canonical hash of (cohort, freeze, subject) — not a free string.
+run_id = _canonical_run_id(v1.content_hash, freeze.freeze_hash, "codex")
+run = EvaluationRun(run_id=run_id, subject="codex", cohort_content_hash=v1.content_hash, freeze_hash=freeze.freeze_hash)
 run.attempt_evaluation(phase="post_freeze", produced_results=True, artifact_hash="A", env_hash="E")
-report = validate(history=history, ledger=ledger, run=run)
+# R6: a run with post-freeze attempts is validated against its FreezeManifest (freeze=).
+report = validate(history=history, ledger=ledger, run=run, freeze=freeze)
 expect("clean cohort + one blind eval validates", report.ok)
 expect("exactly one semantic evaluation recorded", run.semantic_evaluation_count == 1)
 
@@ -122,7 +126,8 @@ expect("second blind eval refused with BLIND_ACCESS_EXCEEDED", tripped)
 
 print()
 print("== guard 4: curator == subject ==")
-run_self = EvaluationRun(run_id="run-2", subject="claude", cohort_content_hash=v1.content_hash, freeze_hash=freeze.freeze_hash)
+run_self_id = _canonical_run_id(v1.content_hash, freeze.freeze_hash, "claude")
+run_self = EvaluationRun(run_id=run_self_id, subject="claude", cohort_content_hash=v1.content_hash, freeze_hash=freeze.freeze_hash)
 rep4 = validate(run=run_self, ledger=ledger)
 expect("curator scoring itself trips CURATOR_IS_SUBJECT", ViolationReason.CURATOR_IS_SUBJECT in rep4.reasons())
 print(f"        -> {rep4.summary()}")

@@ -26,6 +26,7 @@ from contract import (  # noqa: E402
     ContractViolation,
     DetectorBundle,
     EvalAttempt,
+    EvaluationLedger,
     EvaluationRun,
     ExclusionClass,
     ExclusionEvent,
@@ -40,6 +41,7 @@ from contract import (  # noqa: E402
     SyntheticSuite,
     SyntheticVariant,
     ViolationReason,
+    _canonical_run_id,
     candidates_from_adjudications,
     precision_sample_seed,
     sample_confusion_pairs,
@@ -86,6 +88,18 @@ def _cohort(version, entries, *, reason="", parent=None, seal=True):
 
 def _reasons(report):
     return {v.reason for v in report.violations}
+
+
+def _run(subject, cohort_hash, freeze_hash, **kw):
+    """An EvaluationRun with the canonical run_id for its (cohort, freeze, subject)
+    (R5) — the honest bound form now that a free-string run_id is rejected."""
+    return EvaluationRun(
+        run_id=_canonical_run_id(cohort_hash, freeze_hash, subject),
+        subject=subject,
+        cohort_content_hash=cohort_hash,
+        freeze_hash=freeze_hash,
+        **kw,
+    )
 
 
 def _good_panel(pair_id, decision, *, curator_second=True):
@@ -189,13 +203,28 @@ def test_ac4_blind_reused_after_fix_fails_unless_moved_to_regression():
     solo = validate(history=CohortHistory(versions=[_cohort("v1", [g])]))
     assert not solo.ok and ViolationReason.BLIND_REUSED_AFTER_FIX in _reasons(solo)
 
-    # role is NOT part of identity: moving blind -> regression keeps the identity,
-    # so the denominator is preserved with no exclusion event needed
+    # role is NOT part of entry identity: moving blind -> regression keeps the
+    # identity. But it DOES leave the blind denominator, so (R2) it must be authorized
+    # by a matched ROLE_DOWNGRADE cohort-correction event, in a new version.
     g_reg = g.model_copy(update={"role": "regression"}).sealed()
     assert g_reg.identity_hash == g.identity_hash
     v1 = _cohort("v1", [g])
     v2 = _cohort("v2", [g_reg], reason="blind guided a fix -> regression", parent="v1")
-    fixed = validate(history=CohortHistory(versions=[v1, v2]))
+    # without the event, the blind-set shrink is a violation
+    unlogged = validate(history=CohortHistory(versions=[v1, v2]))
+    assert not unlogged.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(unlogged)
+    # with the matched correction event, the move is legitimate
+    excl = ExclusionLog(
+        events=[
+            ExclusionEvent(
+                reason=ExclusionReason.ROLE_DOWNGRADE,
+                entry_identity=g.identity_hash,
+                from_version="v1",
+                to_version="v2",
+            )
+        ]
+    )
+    fixed = validate(history=CohortHistory(versions=[v1, v2]), exclusions=excl)
     assert fixed.ok, _reasons(fixed)
 
 
@@ -242,11 +271,11 @@ def test_ac5_missing_freeze_fails_and_bundle_change_moves_hash():
 def test_ac6_curator_cannot_score_itself():
     ledger = ExposureLedger()
     ledger.record(cohort_content_hash="H", actor="claude", activity="curated")
-    run = EvaluationRun(run_id="r", subject="claude", cohort_content_hash="H", freeze_hash="fz")
+    run = _run("claude", "H", "fz")
     bad = validate(run=run, ledger=ledger)
     assert not bad.ok and ViolationReason.CURATOR_IS_SUBJECT in _reasons(bad)
     # a non-exposed subject is fine; rotation surfaces one
-    ok = validate(run=run.model_copy(update={"subject": "codex"}), ledger=ledger)
+    ok = validate(run=_run("codex", "H", "fz"), ledger=ledger)
     assert ok.ok, _reasons(ok)
     assert ledger.rotate_subject(["claude", "codex"], "H") == "codex"
 
@@ -325,6 +354,8 @@ def test_ac9_recall_independent_of_density_precision_needs_blind_sample():
         AdjudicatedPrecision(
             seed=seed,
             sampled_pairs=["p0"],
+            pool=["p0"],
+            k=1,
             adjudications=[
                 Adjudication(
                     pair_id="p0",
@@ -340,6 +371,8 @@ def test_ac9_recall_independent_of_density_precision_needs_blind_sample():
         AdjudicatedPrecision(
             seed=seed,
             sampled_pairs=["p0"],
+            pool=["p0"],
+            k=1,
             adjudications=[
                 Adjudication(
                     pair_id="p0",
@@ -352,6 +385,8 @@ def test_ac9_recall_independent_of_density_precision_needs_blind_sample():
         AdjudicatedPrecision(
             seed=seed,
             sampled_pairs=["p0"],
+            pool=["p0"],
+            k=1,
             adjudications=[
                 Adjudication(
                     pair_id="p0",
@@ -362,11 +397,14 @@ def test_ac9_recall_independent_of_density_precision_needs_blind_sample():
                 )
             ],
         )
-    # ambiguous counts AGAINST precision
+    # ambiguous counts AGAINST precision (sample derived from the deterministic draw)
+    amb_sample = sample_confusion_pairs(pairs, 2, seed)
     ap = AdjudicatedPrecision(
         seed=seed,
-        sampled_pairs=["p0", "p1"],
-        adjudications=[_good_panel("p0", "true-positive"), _good_panel("p1", "ambiguous")],
+        sampled_pairs=amb_sample,
+        pool=pairs,
+        k=2,
+        adjudications=[_good_panel(amb_sample[0], "true-positive"), _good_panel(amb_sample[1], "ambiguous")],
     )
     assert ap.precision == 0.5
 
@@ -476,7 +514,7 @@ def test_ac14_check_fails_on_each_violation_class():
     ledger = ExposureLedger()
     ledger.record(cohort_content_hash="H", actor="claude", activity="inspected")
     csub = validate(
-        run=EvaluationRun(run_id="r", subject="claude", cohort_content_hash="H", freeze_hash="fz"),
+        run=_run("claude", "H", "fz"),
         ledger=ledger,
     )
     assert ViolationReason.CURATOR_IS_SUBJECT in _reasons(csub)
@@ -510,7 +548,7 @@ def test_ac14_check_fails_on_each_violation_class():
     # a fully consistent bundle passes everything
     good = validate(
         history=CohortHistory(versions=[_cohort("v1", [_entry()])]),
-        run=EvaluationRun(run_id="r", subject="codex", cohort_content_hash="H", freeze_hash="fz"),
+        run=_run("codex", "H", "fz"),
         ledger=ExposureLedger(),
     )
     assert good.ok, _reasons(good)
@@ -645,10 +683,10 @@ def test_h6_freeze_binding_and_seed_disjointness():
     rep2 = validate(history=hist, run=run2, freeze=freeze2)
     assert not rep2.ok and ViolationReason.SEED_IN_BLIND in _reasons(rep2)
 
-    # a correctly-bound freeze with a disjoint seed passes
+    # a correctly-bound freeze with a disjoint seed passes (canonical run_id, R5)
     bundle3 = DetectorBundle(detector_id="d", lockfile_hash="L")
     freeze3 = FreezeManifest(bundle=bundle3, timestamp="2026-07-16T10:00:00Z")
-    run3 = EvaluationRun(run_id="r3", subject="s", cohort_content_hash=v1.content_hash, freeze_hash=freeze3.freeze_hash)
+    run3 = _run("s", v1.content_hash, freeze3.freeze_hash)
     assert validate(history=hist, run=run3, freeze=freeze3).ok
 
 
@@ -745,11 +783,13 @@ def test_h8_precision_coverage_and_sample_binding():
     )
     assert ap.precision == 1.0
 
-    # routing through validate(): a precision bound to a different run context is rejected
+    # routing through validate(): a precision bound to a different run context is rejected.
+    # The run's run_id must itself be canonical (R5), so the bound seed derives from it.
     bundle = DetectorBundle(detector_id="d")
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
-    run = EvaluationRun(run_id="rp", subject="s", cohort_content_hash="CH", freeze_hash=freeze.freeze_hash)
-    seed_rp = precision_sample_seed("CH", freeze.freeze_hash, "rp")
+    rid = _canonical_run_id("CH", freeze.freeze_hash, "s")
+    run = EvaluationRun(run_id=rid, subject="s", cohort_content_hash="CH", freeze_hash=freeze.freeze_hash)
+    seed_rp = precision_sample_seed("CH", freeze.freeze_hash, rid)
     ap_bound = AdjudicatedPrecision(
         seed=seed_rp,
         sampled_pairs=sample_confusion_pairs(pool, 3, seed_rp),
@@ -757,7 +797,7 @@ def test_h8_precision_coverage_and_sample_binding():
         k=3,
         cohort_hash="CH",
         freeze_hash=freeze.freeze_hash,
-        run_id="rp",
+        run_id=rid,
         adjudications=[_good_panel(s, "true-positive") for s in sample_confusion_pairs(pool, 3, seed_rp)],
     )
     assert validate(run=run, freeze=freeze, precision=ap_bound).ok
@@ -814,3 +854,230 @@ def test_h9_achievability_sealed_and_append_only():
 
     # a sealed, pre-freeze, append-only log passes
     assert validate(achievability=good).ok
+
+
+# --------------------------------------------------------------------------- #
+# Round-2 adversarial-audit regression floor (R1..R8). Each case dishonestly
+# passed validate() AFTER the round-1 (H1..H9) seals held; validate() must now
+# REJECT it. See scratchpad/contract-fix-spec-r2.md and
+# specs/008-evaluation-contract/threat-model.md. Two governing principles:
+# P1 — no binding check is skippable by omitting a sibling arg / leaving an
+# Optional None; P2 — seal every denominator-affecting field AND preserve it
+# across versions via a matched COHORT_CORRECTION event.
+# --------------------------------------------------------------------------- #
+
+
+# R1 — role + guided_fix are sealed into the cohort content hash: an in-place flip breaks it.
+def test_r1_inplace_role_flip_breaks_content_seal():
+    # a BLIND miss sealed at v1, flipped to REGRESSION in place (same version) → seal breaks
+    m = _entry(vuln=A40, role="blind")
+    v1 = _cohort("v1", [m])
+    flipped = m.model_copy(update={"role": "regression"}).sealed()  # identity is preserved
+    assert flipped.identity_hash == m.identity_hash
+    v1_tampered = v1.model_copy(update={"entries": [flipped]})  # keeps v1's declared_content_hash
+    rep = validate(history=CohortHistory(versions=[v1_tampered]))
+    assert not rep.ok and ViolationReason.IN_PLACE_EDIT in _reasons(rep)
+
+    # a guided_fix BLIND entry flipped to REGRESSION in place still fails (no version bump) —
+    # this is the AC-4 dodge the seal now closes
+    g = _entry(vuln=B40, role="blind", guided_fix=True)
+    vg = _cohort("v1", [g])
+    g_flipped = g.model_copy(update={"role": "regression"}).sealed()
+    vg_tampered = vg.model_copy(update={"entries": [g_flipped]})
+    repg = validate(history=CohortHistory(versions=[vg_tampered]))
+    assert not repg.ok and ViolationReason.IN_PLACE_EDIT in _reasons(repg)
+
+
+# R2 — a cross-version BLIND->regression downgrade (identity preserved) still needs an event.
+def test_r2_blind_role_downgrade_needs_correction_event():
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=B40, role="blind")
+    c = _entry(vuln=C40, role="blind")
+    v1 = _cohort("v1", [a, b, c])
+    c_reg = c.model_copy(update={"role": "regression"}).sealed()  # identity preserved
+    assert c_reg.identity_hash == c.identity_hash
+    v2 = _cohort("v2", [a, b, c_reg], reason="downgrade c out of blind", parent="v1")
+    # NO event: leaving the blind set (even with identity preserved) is a shrink
+    rep = validate(history=CohortHistory(versions=[v1, v2]))
+    assert not rep.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(rep)
+    # WITH a matched COHORT_CORRECTION event for c's exact transition → allowed
+    excl = ExclusionLog(
+        events=[
+            ExclusionEvent(
+                reason=ExclusionReason.ROLE_DOWNGRADE,
+                entry_identity=c.identity_hash,
+                from_version="v1",
+                to_version="v2",
+            )
+        ]
+    )
+    assert validate(history=CohortHistory(versions=[v1, v2]), exclusions=excl).ok
+
+
+# R3 — the presented history must be an append-only extension of a prior_history baseline.
+def test_r3_prior_history_must_be_append_only_extension():
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=B40, role="blind")
+    v1 = _cohort("v1", [a, b])
+    prior = CohortHistory(versions=[v1])
+
+    # a from-storage rebuild that DROPS v1 and presents only a later single version
+    # (single version → the consecutive-pair denominator check never even fires)
+    v7 = _cohort("v7", [a], reason="rebuild dropping b", parent="v1")
+    truncated = CohortHistory(versions=[v7])
+    rep = validate(history=truncated, prior_history=prior)
+    assert not rep.ok and ViolationReason.HISTORY_TRUNCATED in _reasons(rep)
+
+    # altering a baseline version's content in place (same tag, fewer entries) is rejected
+    v1_alt = _cohort("v1", [a])
+    c = _entry(vuln=C40, role="blind")
+    v2 = _cohort("v2", [a, b, c], reason="add c", parent="v1")
+    altered = CohortHistory(versions=[v1_alt, v2])
+    rep2 = validate(history=altered, prior_history=prior)
+    assert not rep2.ok and ViolationReason.IN_PLACE_EDIT in _reasons(rep2)
+
+    # an honest append: prior stays at index 0 unchanged, a new version is appended
+    extended = CohortHistory(versions=[v1, v2])
+    assert validate(history=extended, prior_history=prior).ok
+
+
+# R4 — the Report numerator + cohort binding are MANDATORY (P1); no silent unbound pass.
+def test_r4_report_numerator_and_binding_mandatory():
+    blinds = [_entry(vuln=x * 40, role="blind") for x in ("a", "b", "c", "d")]
+    v1 = _cohort("v1", blinds)
+    hist = CohortHistory(versions=[v1])
+
+    # a headline 4/4 with the numerator UNBOUND (rediscovered_blind_ids=None) is rejected,
+    # even though the total matches the cohort — the per-entry numerator binding is mandatory
+    liar = Report(
+        blind_recall=RecallReport(rediscovered=4, total=4),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v1.content_hash,
+    )
+    out = validate(history=hist, report=liar)
+    assert not out.ok and ViolationReason.REPORT_DENOMINATOR_MISMATCH in _reasons(out)
+
+    # a Report with NO cohort/history to bind against is REPORT_UNBOUND, never a silent pass
+    unbound = Report(
+        blind_recall=RecallReport(rediscovered=4, total=4),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+    )
+    out2 = validate(report=unbound)
+    assert not out2.ok and ViolationReason.REPORT_UNBOUND in _reasons(out2)
+
+    # the honest bound form (numerator present, subset of blind, matching count) passes
+    bound = Report(
+        blind_recall=RecallReport(rediscovered=1, total=4),
+        fixed_cohort_recall=RecallReport(rediscovered=0, total=0),
+        coverage=1.0,
+        patched_alert_density=0.0,
+        adjudicated_precision=1.0,
+        cohort_content_hash=v1.content_hash,
+        rediscovered_blind_ids=[blinds[0].identity_hash],
+    )
+    assert validate(history=hist, report=bound).ok
+
+
+# R5 — a canonical, non-re-rollable run_id + evaluate-once ledger.
+def test_r5_canonical_run_id_and_evaluate_once():
+    a = _entry(vuln=A40, role="blind")
+    v1 = _cohort("v1", [a])
+    hist = CohortHistory(versions=[v1])
+    freeze = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z"
+    )
+    ch, fz = v1.content_hash, freeze.freeze_hash
+
+    # a free-string run_id (re-rollable to re-draw the precision sample) is rejected
+    rerollable = EvaluationRun(
+        run_id="hand-picked-favorable", subject="s", cohort_content_hash=ch, freeze_hash=fz
+    )
+    rep = validate(history=hist, run=rerollable, freeze=freeze)
+    assert not rep.ok and ViolationReason.NON_CANONICAL_RUN_ID in _reasons(rep)
+
+    # the one canonical run_id for (cohort, freeze, subject) passes
+    good = _run("s", ch, fz)
+    assert validate(history=hist, run=good, freeze=freeze).ok
+
+    # a SECOND evaluation of the same (cohort, freeze, subject) across a prior ledger is flagged
+    prior = EvaluationLedger()
+    prior.record(cohort_content_hash=ch, freeze_hash=fz, subject="s")
+    rep2 = validate(history=hist, run=good, freeze=freeze, prior_evaluations=prior)
+    assert not rep2.ok and ViolationReason.EVALUATED_MORE_THAN_ONCE in _reasons(rep2)
+
+
+# R6 — freeze is mandatory for any run that recorded post-freeze attempts (P1).
+def test_r6_freeze_mandatory_for_post_freeze_run():
+    # a run with a post-freeze attempt and a FABRICATED freeze_hash, validated with NO
+    # freeze manifest → the fabricated hash cannot stand in; a freeze is mandatory
+    run = EvaluationRun(
+        run_id="r",
+        subject="s",
+        cohort_content_hash="H",
+        freeze_hash="fabricated",
+        attempts=[EvalAttempt(phase="post_freeze", produced_results=True)],
+    )
+    rep = validate(run=run)  # no freeze=
+    assert not rep.ok and ViolationReason.MISSING_FREEZE in _reasons(rep)
+
+
+# R7 — exposure resolves by ENTRY IDENTITY across versions, not by version-scoped hash.
+def test_r7_exposure_resolved_by_entry_identity_across_versions():
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=B40, role="blind")
+    v1 = _cohort("v1", [a, b])
+    v2 = _cohort("v2", [a, b], reason="version bump, same entries", parent="v1")  # new content hash
+    hist = CohortHistory(versions=[v1, v2])
+    ledger = ExposureLedger()
+    ledger.record(cohort_content_hash=v1.content_hash, actor="claude", activity="curated")
+
+    # claude curated v1; scoring claude on v2 (same entries, bumped version) must be barred
+    run = _run("claude", v2.content_hash, "fz")
+    rep = validate(history=hist, run=run, ledger=ledger)
+    assert not rep.ok and ViolationReason.CURATOR_IS_SUBJECT in _reasons(rep)
+
+    # a subject that never touched any version sharing an entry identity is fine
+    ok = _run("codex", v2.content_hash, "fz")
+    assert validate(history=hist, run=ok, ledger=ledger).ok
+
+
+# R8 — precision draw is ALWAYS verified: pool/k mandatory; no run/freeze → unbound.
+def test_r8_precision_pool_k_mandatory_and_binding_required():
+    seed = precision_sample_seed("cohortH", "freezeF", "run1")
+    pool = [f"p{i}" for i in range(20)]
+    sample = sample_confusion_pairs(pool, 3, seed)
+
+    # pool/k are MANDATORY: omitting them is rejected at the type boundary (P1)
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(
+            seed=seed,
+            sampled_pairs=sample,
+            adjudications=[_good_panel(s, "true-positive") for s in sample],
+        )
+
+    # a hand-picked favorable subset (not the deterministic draw) with pool/k is rejected
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(
+            seed=seed,
+            sampled_pairs=["p0", "p1", "p2"],
+            pool=pool,
+            k=3,
+            adjudications=[_good_panel(s, "true-positive") for s in ["p0", "p1", "p2"]],
+        )
+
+    # a precision presented with no run/freeze to bind to is PRECISION_SAMPLE_UNBOUND
+    ap = AdjudicatedPrecision(
+        seed=seed,
+        sampled_pairs=sample,
+        pool=pool,
+        k=3,
+        adjudications=[_good_panel(s, "true-positive") for s in sample],
+    )
+    out = validate(precision=ap)
+    assert not out.ok and ViolationReason.PRECISION_SAMPLE_UNBOUND in _reasons(out)

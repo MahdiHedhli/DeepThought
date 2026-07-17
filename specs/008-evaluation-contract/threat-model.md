@@ -63,6 +63,37 @@ The new `validate()` parameters (`freeze`, `report`, `precision`, `achievability
 is additive: existing callers are unaffected, and a caller that passes the artifacts
 gets them checked.
 
+## Second wave (round-2 adversarial audit)
+
+A second red-team, run after the H1..H9 seals held, found a second wave of holes.
+Two governing principles drove the fixes, applied systematically rather than only to
+the listed repros:
+
+- **P1 — no skippable binding.** If a `Report` / `AdjudicatedPrecision` /
+  `FreezeManifest` / `EvaluationRun` is present, its binding checks are MANDATORY and
+  must not be dodged by omitting a sibling argument or leaving an `Optional` `None`.
+- **P2 — seal every denominator-affecting field.** Anything that changes the
+  authoritative blind denominator or the numerator is sealed into a content hash (so
+  in-place edits break the seal) AND preserved across versions via a logged, matched
+  `COHORT_CORRECTION` event.
+
+| Hole | Leak it re-opened | Now sealed in `validate()` by |
+|---|---|---|
+| R1 | L1 — in-place role/`guided_fix` flip shrinking the blind-role denominator with no version bump | `role`+`guided_fix` sealed into `Cohort.computed_content_hash` ⇒ `IN_PLACE_EDIT` |
+| R2 | L1 — a cross-version BLIND→regression downgrade (identity kept) shrinking the blind set with no event | preservation is BLIND-SET preserving; a matched `COHORT_CORRECTION` (e.g. `role-downgrade`) required ⇒ `DENOMINATOR_SHRINK` |
+| R3 | L1/L10 — a from-storage rebuild dropping an earlier version (single version dodges the consecutive-pair check) | `prior_history` baseline: history must be an append-only extension ⇒ `HISTORY_TRUNCATED` / `IN_PLACE_EDIT` |
+| R4 | L1/L9 — a `Report` with an unbound numerator (`rediscovered_blind_ids=None`) or no cohort to bind | numerator + cohort binding MANDATORY (P1) ⇒ `REPORT_DENOMINATOR_MISMATCH` / `REPORT_UNBOUND` |
+| R5 | L4 — a re-rollable free-string run_id re-drawing the precision sample; "evaluate N, keep the best" | canonical `run_id = sha256(cohort|freeze|subject)` (`NON_CANONICAL_RUN_ID`) + append-only `EvaluationLedger` (`EVALUATED_MORE_THAN_ONCE`) |
+| R6 | L4 — a fabricated `run.freeze_hash` standing in for a real freeze | freeze mandatory for any run with post-freeze attempts (P1) ⇒ `MISSING_FREEZE` |
+| R7 | L5 — a version bump laundering a curator into a subject (same entries, new hash) | exposure resolved by ENTRY IDENTITY across versions ⇒ `CURATOR_IS_SUBJECT` |
+| R8 | L6 — a hand-picked favorable subset with `pool`/`k` omitted; a precision with no run/freeze | `pool`/`k` mandatory, draw ALWAYS verified; unbound precision ⇒ `PRECISION_SAMPLE_UNBOUND` |
+
+The two additional `validate()` parameters (`prior_history`, `prior_evaluations`) are
+likewise keyword-only and optional. Making `AdjudicatedPrecision.pool`/`.k` mandatory
+and `EvaluationRun.run_id` canonical are intended tightenings of the honest bound
+form; the existing tests and `scripts/smoke_008.sh` were updated to construct these
+objects correctly, never by weakening a check.
+
 ## Sealing note (for the later cross-model evaluator)
 
 The exposure ledger and freeze manifest are the in-contract guarantees. The OS-level
