@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from contract import (  # noqa: E402  (008 machinery, reused)
     _CHAIN_GENESIS,
+    _EMPTY_ROOT,
     _sha256,
     Attestation,
     ContractReport,
@@ -308,18 +309,24 @@ def certify_aggregate(
         if r.class_id not in head_active:
             report.add(ViolationReason.CLASS_ATTESTATION_INVALID, f"result for class {r.class_id!r} not an in-mean head class")
 
+    # REAUDIT-009: the pin is MANDATORY once a real committed manifest baseline exists — NOT merely
+    # when the registry is non-empty. advance_committed_root advances latest_class_manifest_root to
+    # non-empty on a successful certify while never writing the registry, so gating the pin on
+    # ``if registry`` left a reachable state (real committed manifest, empty registry) where the
+    # re-point swap silently worked. Once the committed manifest root is non-empty the baseline claims
+    # to be binding, so every in-mean class MUST be pinned; the ONLY pin-free window is the true
+    # bootstrap (committed manifest root still empty AND no registry) — the genesis-completeness floor.
+    baseline_committed = committed.latest_class_manifest_root != _EMPTY_ROOT
+    require_pin = baseline_committed or bool(registry)
     for class_id in sorted(head_active):
         entry = head_entries[class_id]
-        # PIN: every in-mean class must be committed in the registry, and the manifest entry must
-        # match the committed root — a class ABSENT from the registry (when a registry exists) is
-        # rejected, not waved through (else the swap reopens for the unpinned class). An entirely
-        # empty registry is the documented genesis-completeness bootstrap floor.
-        if registry:
+        if require_pin:
             pinned = registry.get(class_id)
             if pinned is None:
                 report.add(
                     ViolationReason.CLASS_ATTESTATION_INVALID,
-                    f"in-mean class {class_id!r} is not pinned in the committed class registry",
+                    f"in-mean class {class_id!r} is not pinned in the committed class registry "
+                    "(a registry pin is mandatory once a committed manifest baseline exists)",
                 )
             elif entry.head_history_root != pinned:
                 report.add(

@@ -272,6 +272,27 @@ def test_empty_in_mean_honest_vacuous_headline_certifies(monkeypatch):
     assert rep.ok, _reasons(rep)
 
 
+def test_pin_mandatory_once_a_committed_manifest_baseline_exists(monkeypatch):
+    # REAUDIT: advance_committed_root advances the manifest root to non-empty while never writing the
+    # registry, so a real committed baseline + EMPTY registry is reachable. In that state the pin must
+    # NOT be skipped — an unpinned in-mean class fails closed (else the cross-class re-point reopens).
+    v1 = ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])
+    _install(monkeypatch, manifest_root=ClassManifestHistory(versions=[v1]).root, class_registry={})  # real baseline, empty registry
+    rep = certify_aggregate(manifest=ClassManifestHistory(versions=[v1]), results=[_result("A", HA, 1, 2), _result("B", HB, 1, 1)], aggregate=AggregateReport(mean=0.75, n_classes=2))
+    assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
+
+
+def test_repoint_swap_with_empty_registry_but_committed_baseline_fails(monkeypatch):
+    # the exact re-audit attack: real committed baseline, empty registry, B re-pointed to A's root +
+    # A's genuine signed attestation. The mandatory-pin-once-committed rule catches it.
+    v1 = ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])
+    _install(monkeypatch, manifest_root=ClassManifestHistory(versions=[v1]).root, class_registry={})
+    v2 = ClassManifest(version="v2", entries=[_entry("A", HA), _entry("B", HA)], parent_version="v1")  # B -> HA
+    swapped_b = CertifiedClassResult(class_id="B", attestation=_result("A", HA, 2, 2).attestation, report=_report(2, 2))
+    rep = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[_result("A", HA, 2, 2), swapped_b], aggregate=AggregateReport(mean=1.0, n_classes=2))
+    assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
+
+
 def test_aggregate_mean_rejects_inf_nan():
     with pytest.raises(Exception):
         AggregateReport(mean=float("inf"), n_classes=1)
