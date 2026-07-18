@@ -318,13 +318,29 @@ builders, and smoke guards 17–19.)
 | R10-6 (MEDIUM) | the panel trusted self-asserted `is_builder`/`is_curator` and never checked the adjudicator against the scored subject | every `AdjudicatorVerdict.adjudicator` must differ from `run.subject`, be on the committed roster (`genesis_root.json` → `adjudicators`), and carry the roster's `is_builder`/`is_curator` — else `ADJUDICATOR_INVALID`. That the rostered adjudicators are genuinely independent people is the irreducible organizational remainder |
 | R10-7 (LOW) | `merkle_root` duplicated the last node on an odd level with no leaf/node domain separation — the classic duplicate-leaf second-preimage collision (CVE-2012-2459): `merkle_root([…,x]) == merkle_root([…,x,x])` | leaves are hashed under a `0x00` prefix and internal nodes under `0x01`, and an odd level is split at the largest power of two below the count (RFC 6962-style, never duplicate-last), so a duplicate-leaf second preimage can no longer collide. The committed roots in `genesis_root.json` are chain/sha256 based, so only the dynamically-recomputed attestation/pool/sample roots change |
 
-**The FINAL residual after round-10 is exactly: (i) genesis-commit completeness [git-reviewable, plus
+## Eleventh wave (round-11): the two pre-ship survivors — bind the guard to the STRUCTURE, not the label/set
+
+A final re-confirm audit (five lenses, each trying to get `validate()` to ACCEPT a dishonest
+measurement) reported the denominator-shrink, blind-freeze-bypass, and attestation-forgery lenses
+HOLDING, and surfaced two remaining code-closable holes — each an instance of a guard that checked a
+NAME or a SET where it needed the STRUCTURAL transition or the MULTISET. Both are closed before ship;
+the round-10 residual is unchanged. (Regression tests `test_r11_1_*` / `test_r11_2_*`, and smoke
+guards 20–21.)
+
+| Hole | Bypass it left open | Now sealed by |
+|---|---|---|
+| R11-1 (MEDIUM) | the R9-4 guided_fix precondition for a blind→regression role-downgrade only inspected events LABELED `ROLE_DOWNGRADE`, so relabeling the identical move as any other cohort-correction reason (`ALIAS_DUPE`, `TARGET_PATHS_NARROWING`, `SEED_SWAP`, …) laundered a hard blind MISS out of the authoritative denominator behind a mislabeled correction event | `_check_denominator_preservation` binds the guided_fix precondition to the STRUCTURAL transition — an identity in `left_blind` that is still KEPT in the head is legitimate ONLY if it guided a fix, regardless of which cohort-correction reason authorizes it — else `DENOMINATOR_SHRINK`. Full removals (identity absent from the head) are unaffected: a genuine alias/dup removal under a matched event stays legitimate |
+| R11-2 (HIGH) | precision coverage was checked as a SET (`{pair_ids} == {sampled}`) but `precision` divided `tp` by `len(adjudications)`, so appending duplicate favorable (true-positive) adjudications for already-covered pairs inflated `tp/len` toward 1.0 while the coverage set was unchanged (honest 0.50 → 0.969), certified | both `AdjudicatedPrecision._panel_and_sample_are_valid` (constructor) and `_check_precision_panel` (certify-path re-enforcement, P-A) require the MULTISET of adjudicated pair_ids to equal the sampled draw exactly (no duplicates) — else a constructor `ValueError` / `PRECISION_PANEL_INVALID` — pinning the precision denominator to `|sample|` |
+
+**The FINAL residual after round-11 is exactly: (i) genesis-commit completeness [git-reviewable, plus
 the feature-009 AGGREGATE class-manifest]; (ii) ed25519 private-key custody [curator ≠ subject];
 (iii) adjudicator independence [the committed-rostered adjudicators are genuinely independent
 people]; and (iv) operator commit-honesty of the git-committed ledgers — all four organizational /
-git-reviewable, not validator-checkable.** After round-10 every per-cohort binding is a total
-function of committed state, every ledger is committed-monotonic, and the detector is bound by code
-hash; the aggregate class-manifest completeness is the sole code-closable follow-on (feature 009).
+git-reviewable, not validator-checkable.** After round-11 every per-cohort binding is a total
+function of committed state, every ledger is committed-monotonic, the detector is bound by code hash,
+and each guard binds to the structural transition/multiset it means (not a reason label or a
+coverage set); the aggregate class-manifest completeness is the sole code-closable follow-on
+(feature 009).
 
 ## Sealing note (for the later cross-model evaluator)
 

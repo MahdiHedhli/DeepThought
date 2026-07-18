@@ -3022,3 +3022,109 @@ def test_r10_7_merkle_domain_separation_cve_2012_2459():
     # still order-independent over the same set and membership-sensitive
     assert merkle_root(["a", "b", "c"]) == merkle_root(["c", "b", "a"])
     assert merkle_root(["a", "b", "c"]) != merkle_root(["a", "b"])
+
+
+# --------------------------------------------------------------------------- #
+# Round-11 — close the two final adversarial-audit holes.
+#
+# R11-1 (taxonomy relabel): the guided_fix precondition for a blind -> non-blind
+# role-downgrade that KEEPS the entry is bound to the STRUCTURAL transition, NOT to
+# the ROLE_DOWNGRADE reason label. Before R11, relabeling the identical move as any
+# other COHORT_CORRECTION reason (ALIAS_DUPE / TARGET_PATHS_NARROWING / ...) laundered
+# a non-guided blind MISS out of the authoritative denominator (the R9-4 guard only
+# inspected ROLE_DOWNGRADE-labeled events). FR-4 legitimizes blind->regression ONLY for
+# a guided_fix entry, regardless of which correction reason authorizes the transition.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "reason",
+    [
+        ExclusionReason.ROLE_DOWNGRADE,
+        ExclusionReason.ALIAS_DUPE,
+        ExclusionReason.TARGET_PATHS_NARROWING,
+        ExclusionReason.TRIAGE_DEDUP_SUPPRESSION,
+        ExclusionReason.CWE_RECLASS,
+        ExclusionReason.SEED_SWAP,
+    ],
+)
+def test_r11_1_guided_fix_bound_to_transition_not_reason_label(reason):
+    a = _entry(vuln=A40, role="blind")
+    # A non-guided blind MISS moved blind->regression (entry KEPT), authorized by ANY
+    # cohort-correction reason, must be caught as a denominator shrink — the guided_fix
+    # precondition fires on the structural role-downgrade, not on the reason label.
+    c = _entry(vuln=C40, role="blind", guided_fix=False)
+    v1 = _cohort("v1", [a, c])
+    c_reg = c.model_copy(update={"role": "regression"}).sealed()
+    v2 = _cohort("v2", [a, c_reg], reason="relabel-launder c out of blind", parent="v1")
+    excl = ExclusionLog(
+        events=[ExclusionEvent(reason=reason, entry_identity=c.identity_hash, from_version="v1", to_version="v2")]
+    )
+    rep = validate(history=CohortHistory(versions=[v1, v2]), exclusions=excl)
+    assert not rep.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(rep), reason
+
+    # The SAME move of a GUIDED entry stays legitimate under every reason (FR-4): once the
+    # entry guided a fix, blind->regression is an honest, logged, versioned correction.
+    cg = _entry(vuln=C40, role="blind", guided_fix=True)
+    v1g = _cohort("v1", [a, cg])
+    cg_reg = cg.model_copy(update={"role": "regression"}).sealed()
+    v2g = _cohort("v2", [a, cg_reg], reason="downgrade guided cg", parent="v1")
+    excl_g = ExclusionLog(
+        events=[ExclusionEvent(reason=reason, entry_identity=cg.identity_hash, from_version="v1", to_version="v2")]
+    )
+    assert validate(history=CohortHistory(versions=[v1g, v2g]), exclusions=excl_g).ok, reason
+
+
+def test_r11_1_full_removal_unaffected_by_guided_fix():
+    # A FULL removal (entry leaves the cohort entirely) of a non-guided blind entry stays
+    # legitimate under a matched cohort-correction event — the guided_fix rule is bound to
+    # role-downgrades that KEEP the entry, not to removals (a genuine alias/dup removal).
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=C40, role="blind", guided_fix=False)
+    v1 = _cohort("v1", [a, b])
+    v2 = _cohort("v2", [a], reason="drop duplicate b", parent="v1")
+    excl = ExclusionLog(
+        events=[ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity=b.identity_hash, from_version="v1", to_version="v2")]
+    )
+    assert validate(history=CohortHistory(versions=[v1, v2]), exclusions=excl).ok
+
+
+# --------------------------------------------------------------------------- #
+# R11-2 (precision cardinality): the precision denominator is duplicate-proof — exactly
+# one adjudication per sampled pair. Appending duplicate favorable (true-positive)
+# adjudications can no longer inflate tp/len(adjudications) toward 1.0. Enforced BOTH in
+# the AdjudicatedPrecision constructor validator AND re-enforced on the certify path.
+# --------------------------------------------------------------------------- #
+def test_r11_2_precision_rejects_duplicate_adjudications():
+    pool = _pool(6)
+    k = 4
+    seed = precision_sample_seed("h" * 64, pool_root_of(pool), str(k))
+    sampled = sample_confusion_pairs(pool, k, seed)
+    honest = [
+        _good_panel(sampled[0], "true-positive"),
+        _good_panel(sampled[1], "true-positive"),
+        _good_panel(sampled[2], "false-positive"),
+        _good_panel(sampled[3], "false-positive"),
+    ]
+    ap = AdjudicatedPrecision(seed=seed, sampled_pairs=sampled, pool=pool, k=k, adjudications=honest)
+    assert ap.precision == 0.5  # honest: 2 TP / 4 pairs
+    # The attack: append 30 duplicate copies of each TP adjudication to drive tp/len -> ~1.0.
+    # Coverage (the SET of pair_ids) is unchanged, but the multiset is not — the constructor
+    # now rejects it (exactly one adjudication per sampled pair).
+    dup = honest + [_good_panel(sampled[0], "true-positive")] * 30 + [_good_panel(sampled[1], "true-positive")] * 30
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(seed=seed, sampled_pairs=sampled, pool=pool, k=k, adjudications=dup)
+
+
+def test_r11_2_precision_duplicate_reenforced_on_certify(monkeypatch):
+    a = _anchored(monkeypatch)
+    assert _certify(a).ok
+    good = a["precision"]
+    # A from-storage (model_construct) precision that duplicates an adjudication bypasses the
+    # constructor validator but is caught by the certify-path re-enforcement (P-A) ->
+    # PRECISION_PANEL_INVALID. (Duplicating a TP keeps report.adjudicated_precision at 1.0, so
+    # the P1c float-equality alone would not catch it; the cardinality guard does.)
+    dup_adjs = list(good.adjudications) + [good.adjudications[0]]
+    dup = AdjudicatedPrecision.model_construct(
+        seed=good.seed, sampled_pairs=good.sampled_pairs, pool=good.pool, k=good.k, adjudications=dup_adjs,
+    )
+    rep = _certify(a, precision=dup)
+    assert not rep.ok and ViolationReason.PRECISION_PANEL_INVALID in _reasons(rep)

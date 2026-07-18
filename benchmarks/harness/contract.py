@@ -1434,6 +1434,17 @@ class AdjudicatedPrecision(BaseModel):
             raise ValueError(
                 f"every seeded pair must be adjudicated: sampled={sorted(sampled)} adjudicated={sorted(adjudicated)}"
             )
+        # R11-2 (CARDINALITY): exactly ONE adjudication per sampled pair. The coverage check above is
+        # SET-based, but ``precision`` divides tp by len(adjudications) — so appending duplicate
+        # favorable (true-positive) adjudications for already-covered pairs inflates tp/len toward 1.0
+        # while the SET of pair_ids is unchanged. Require the MULTISET of adjudicated pair_ids to equal
+        # the sampled draw exactly (no duplicates), pinning the precision denominator to |sample|.
+        adjudicated_ids = [a.pair_id for a in self.adjudications]
+        if sorted(adjudicated_ids) != sorted(self.sampled_pairs):
+            raise ValueError(
+                "exactly one adjudication per sampled pair is required (no duplicate/inflating "
+                f"adjudications): sampled={sorted(self.sampled_pairs)} adjudicated={sorted(adjudicated_ids)}"
+            )
         for adj in self.adjudications:
             if adj.pair_id not in sampled:
                 raise ValueError(f"adjudicated pair {adj.pair_id!r} is not in the seeded sample")
@@ -2141,51 +2152,41 @@ def _check_denominator_preservation(
     )
     for prev, curr in zip(history.versions, history.versions[1:]):
         removed = prev.identities() - curr.identities()
+        curr_ids = curr.identities()
         prev_blind = {e.computed_identity_hash for e in prev.by_role(Role.BLIND)}
         curr_blind = {e.computed_identity_hash for e in curr.by_role(Role.BLIND)}
         left_blind = prev_blind - curr_blind
+        # R9-4/R11-1: the blind entries that GUIDED A FIX in their from_version cohort. FR-4
+        # legitimizes a blind->regression role-downgrade ONLY for such an entry.
+        guided_blind_prev = {
+            e.computed_identity_hash for e in prev.by_role(Role.BLIND) if e.guided_fix
+        }
         must_authorize = removed | left_blind
         for identity in sorted(must_authorize):
             key = (identity, prev.version, curr.version)
-            if available.get(key, 0) > 0:
-                available[key] -= 1  # consume the one event that authorizes this transition
-            else:
+            if available.get(key, 0) <= 0:
                 report.add(
                     ViolationReason.DENOMINATOR_SHRINK,
                     f"{prev.version}->{curr.version}: entry {identity[:12]} left the blind denominator "
                     "(removed or role-downgraded) with no matching cohort-correction event",
                 )
-
-    # R9-4 (defense-in-depth): a ROLE_DOWNGRADE (blind -> regression/calibration) is the ONLY
-    # correction reason that legitimizes a blind departure WITHOUT any other precondition — but
-    # FR-4 only authorizes blind->regression for an entry that actually GUIDED A FIX. A downgrade of
-    # a blind entry that never guided a fix just drops a hard case out of the authoritative
-    # denominator behind a logged trail. So a ROLE_DOWNGRADE that moves an identity out of the blind
-    # set ADDITIONALLY requires that identity to have carried ``guided_fix == True`` in the
-    # from_version cohort → else DENOMINATOR_SHRINK. (guided_fix is NOT part of entry identity, so
-    # the event's ``entry_identity`` matches whether or not the entry guided a fix; the flag is read
-    # from the from_version entry.)
-    if exclusions is not None:
-        for event in exclusions.events:
-            if event.reason is not ExclusionReason.ROLE_DOWNGRADE or not event.entry_identity:
                 continue
-            prev = history.get(event.from_version)
-            curr = history.get(event.to_version)
-            if prev is None or curr is None:
-                continue
-            prev_blind = {e.computed_identity_hash for e in prev.by_role(Role.BLIND)}
-            curr_blind = {e.computed_identity_hash for e in curr.by_role(Role.BLIND)}
-            if event.entry_identity not in (prev_blind - curr_blind):
-                continue  # this event does not authorize a blind departure at its named transition
-            guided_blind = {
-                e.computed_identity_hash for e in prev.by_role(Role.BLIND) if e.guided_fix
-            }
-            if event.entry_identity not in guided_blind:
+            available[key] -= 1  # consume the one event that authorizes this transition
+            # R11-1: bind the guided_fix precondition to the STRUCTURAL transition, not to the
+            # ROLE_DOWNGRADE reason LABEL. A blind entry ROLE-DOWNGRADED but KEPT in the cohort (in
+            # left_blind AND still present in curr) leaves the authoritative denominator while
+            # surviving as a softer regression/calibration case; FR-4 legitimizes that move ONLY for
+            # an entry that actually guided a fix. Binding the check to the reason label let the
+            # identical move relabel as ALIAS_DUPE / TARGET_PATHS_NARROWING / SEED_SWAP / etc. and
+            # launder a hard blind MISS out of the denominator behind a mislabeled correction event.
+            # Full removals (identity absent from curr) are unaffected — a genuine alias/dup removal
+            # authorized by a matched event stays legitimate regardless of guided_fix.
+            if identity in left_blind and identity in curr_ids and identity not in guided_blind_prev:
                 report.add(
                     ViolationReason.DENOMINATOR_SHRINK,
-                    f"{event.from_version}->{event.to_version}: ROLE_DOWNGRADE of blind entry "
-                    f"{event.entry_identity[:12]} that never guided a fix (guided_fix=False); a blind "
-                    "downgrade is legitimate only for a guided_fix entry (FR-4)",
+                    f"{prev.version}->{curr.version}: blind entry {identity[:12]} role-downgraded out of "
+                    "the denominator without having guided a fix (guided_fix=False); a blind downgrade is "
+                    "legitimate only for a guided_fix entry (FR-4), regardless of the cohort-correction reason",
                 )
 
 
@@ -2751,6 +2752,17 @@ def _check_precision_panel(
         _panel(
             f"every seeded pair must be adjudicated: sampled={sorted(sampled)} "
             f"adjudicated={sorted(adjudicated)}"
+        )
+    # R11-2 (CARDINALITY, P-A): re-enforce exactly-one-adjudication-per-sampled-pair on the certify
+    # path. A from-storage precision (model_construct) bypasses the constructor validator, so a
+    # duplicate-TP-inflated panel (tp/len driven toward 1.0 while coverage's SET is unchanged) would
+    # otherwise pass. Require the MULTISET of adjudicated pair_ids to equal the sampled draw exactly.
+    adjudicated_ids = [a.pair_id for a in precision.adjudications]
+    if sorted(adjudicated_ids) != sorted(precision.sampled_pairs):
+        _panel(
+            "exactly one adjudication per sampled pair is required (no duplicate/inflating "
+            f"adjudications): sampled={sorted(precision.sampled_pairs)} "
+            f"adjudicated={sorted(adjudicated_ids)}"
         )
     for adj in precision.adjudications:
         if adj.pair_id not in sampled:

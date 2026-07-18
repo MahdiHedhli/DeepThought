@@ -507,6 +507,31 @@ wired into `check`, enforcing:
   deployment commits the curator's real public key (private key external) and the real independent
   adjudicator roster.
 
+- **FR-24 — Round-11: the two pre-ship survivors (bind the guard to the STRUCTURE, not the label /
+  cardinality).** A final re-confirm audit — with the denominator, blind-freeze, and
+  attestation-forgery lenses all HOLDING — found two remaining code-closable holes, each an instance
+  of a guard that checked a NAME or a SET where it needed to check the STRUCTURAL transition or the
+  MULTISET. Both are closed before ship; the residual named in FR-23 is unchanged.
+  - **R11-1 (MEDIUM) — the guided_fix precondition binds to the STRUCTURAL role-downgrade, not the
+    ROLE_DOWNGRADE reason LABEL.** FR-4/R9-4 require a blind→regression role-downgrade (an entry that
+    LEAVES the blind denominator but is KEPT in the cohort) to have carried `guided_fix == True` in
+    its from_version — but R9-4 only inspected events LABELED `ROLE_DOWNGRADE`, so relabeling the
+    identical move as any other cohort-correction reason (`ALIAS_DUPE`, `TARGET_PATHS_NARROWING`,
+    `SEED_SWAP`, …) evaded it and laundered a hard blind MISS out of the authoritative denominator.
+    `_check_denominator_preservation` now enforces the guided_fix precondition on the structural
+    transition itself — an identity in `left_blind` that is still present in the head is legitimate
+    ONLY if it guided a fix, regardless of which cohort-correction reason authorizes it — else
+    `DENOMINATOR_SHRINK`. Full removals (the identity absent from the head) are unaffected: a genuine
+    alias/dup removal authorized by a matched event stays legitimate.
+  - **R11-2 (HIGH) — the precision denominator is duplicate-proof: exactly one adjudication per
+    sampled pair.** Coverage was checked as a SET (`{pair_ids} == {sampled}`) but `precision` divided
+    `tp` by `len(adjudications)`, so appending duplicate favorable (true-positive) adjudications for
+    already-covered pairs inflated `tp/len` toward 1.0 while the coverage set was unchanged (an honest
+    0.50 → 0.969). Both `AdjudicatedPrecision._panel_and_sample_are_valid` (constructor) and
+    `_check_precision_panel` (certify-path re-enforcement, P-A) now require the MULTISET of adjudicated
+    pair_ids to equal the sampled draw exactly (no duplicates) — else a constructor `ValueError` /
+    `PRECISION_PANEL_INVALID` — pinning the precision denominator to `|sample|`.
+
 ## Acceptance criteria
 
 1. An entry whose canonical fields change without a new identity hash fails `check`.
@@ -887,6 +912,20 @@ the committed-state form, never by weakening a check.
 78. **(R10-7/FR-23)** `merkle_root` domain-separates leaves (0x00) from internal nodes (0x01):
     `merkle_root([…,x]) != merkle_root([…,x,x])` (CVE-2012-2459), while staying order-independent
     over the same set and membership-sensitive.
+
+### Round-11 acceptance criteria (the two pre-ship survivors)
+
+79. **(R11-1/FR-24)** A non-guided blind entry moved blind→regression while KEPT in the head is a
+    `DENOMINATOR_SHRINK` under EVERY cohort-correction reason (`ROLE_DOWNGRADE`, `ALIAS_DUPE`,
+    `TARGET_PATHS_NARROWING`, `SEED_SWAP`, …), not only `ROLE_DOWNGRADE`; the same move of a
+    `guided_fix == True` entry stays legitimate under every reason; a full removal of a non-guided
+    blind entry under a matched event stays legitimate (the guided_fix rule binds to the
+    role-downgrade-that-keeps-the-entry, not to removals).
+80. **(R11-2/FR-24)** An `AdjudicatedPrecision` with duplicate adjudications for an already-covered
+    sampled pair fails the constructor validator (`ValueError`), and a from-storage
+    (`model_construct`) duplicate is `PRECISION_PANEL_INVALID` on the certify path; exactly one
+    adjudication per sampled pair is required, so `tp/len(adjudications)` cannot be inflated by
+    duplicating favorable verdicts. The honest one-per-pair panel certifies.
 
 ## Open questions
 

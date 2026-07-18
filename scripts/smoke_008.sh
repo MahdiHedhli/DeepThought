@@ -638,6 +638,47 @@ expect("from-storage precision panel trips PRECISION_PANEL_INVALID", ViolationRe
 print(f"        -> {rep19.summary()}")
 
 print()
+print("== guard 20: R11-1 a non-guided blind entry role-downgraded under a NON-ROLE_DOWNGRADE reason fails closed ==")
+# FR-4 legitimizes a blind->regression role-downgrade ONLY for an entry that guided a fix. Binding
+# that precondition to the ROLE_DOWNGRADE reason LABEL let the identical move relabel as
+# ALIAS_DUPE/TARGET_PATHS_NARROWING/etc. and launder a hard blind MISS out of the authoritative
+# denominator. R11-1 binds it to the STRUCTURAL role-downgrade (in left_blind AND kept in curr),
+# so the mislabel no longer passes.
+e_keep = entry("819a80836e991ca3f427b0e85faca159083d3d40", "client.get(url_spec.geturl()", Role.BLIND)
+e_drop = entry("8ab05d4c36b4720dc3f1f654564745f47c5034cd", "requests.get(url, stream=True)", Role.BLIND)
+tv1 = Cohort(version="v1", entries=[e_keep, e_drop], reason="two blind entries").sealed()
+e_drop_reg = e_drop.model_copy(update={"role": Role.REGRESSION}).sealed()  # role is NOT part of identity
+tv2 = Cohort(version="v2", entries=[e_keep, e_drop_reg], reason="relabel-launder e_drop", parent_version="v1").sealed()
+relabel = ExclusionLog(events=[ExclusionEvent(
+    reason=ExclusionReason.ALIAS_DUPE, entry_identity=e_drop.identity_hash, from_version="v1", to_version="v2")])
+rep20 = validate(history=CohortHistory(versions=[tv1, tv2]), exclusions=relabel)
+expect("relabeled non-guided blind role-downgrade trips DENOMINATOR_SHRINK", ViolationReason.DENOMINATOR_SHRINK in rep20.reasons())
+print(f"        -> {rep20.summary()}")
+
+print()
+print("== guard 21: R11-2 a from-storage precision with DUPLICATE adjudications fails closed ==")
+# Duplicating favorable (true-positive) adjudications inflates tp/len(adjudications) toward 1.0 while
+# the coverage SET of pair_ids is unchanged. R11-2 pins the precision denominator to |sample| (exactly
+# one adjudication per sampled pair), re-enforced on the certify path (P-A).
+honest_adjs = [
+    Adjudication(pair_id=p, verdicts=[
+        AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+        AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=True, decision="true-positive"),
+    ])
+    for p in sampled
+]
+dup_precision = AdjudicatedPrecision.model_construct(
+    seed=SAMPLE_SEED, sampled_pairs=sampled, pool=pool, k=COMMITTED_K,
+    adjudications=honest_adjs + [honest_adjs[0]],  # one duplicate copy of a covered TP pair
+)
+rep21 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    precision=dup_precision, prior_evaluations=evaluations, attestation=attestation, strict=True,
+)
+expect("duplicate-adjudication precision trips PRECISION_PANEL_INVALID", ViolationReason.PRECISION_PANEL_INVALID in rep21.reasons())
+print(f"        -> {rep21.summary()}")
+
+print()
 print("== report: blind recall is the headline, four labelled secondaries ==")
 rep = Report(
     blind_recall=RecallReport(rediscovered=3, total=4, patched_alert_density=1.2),
@@ -659,5 +700,5 @@ print()
 if failures:
     print(f"SMOKE FAILED: {len(failures)} check(s) failed: {failures}")
     sys.exit(1)
-print("SMOKE 008 OK: contract certifies the ed25519-signed run and every guard (anchoring + round-6/7/8/9 floor) trips with a typed reason.")
+print("SMOKE 008 OK: contract certifies the ed25519-signed run and every guard (anchoring + round-6..11 floor) trips with a typed reason.")
 PYEOF
