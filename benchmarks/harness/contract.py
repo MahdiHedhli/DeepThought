@@ -58,6 +58,10 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _content_hash(obj: Any) -> str:
     return _sha256(_canonical_json(obj))
 
@@ -103,20 +107,43 @@ def leaf_hash(obj: Any) -> str:
     return _content_hash(obj)
 
 
+# R10-7: domain-separation prefixes (CVE-2012-2459). A leaf is hashed under 0x00 and an
+# internal node under 0x01, so a leaf digest can never be mistaken for an internal-node
+# digest — the precondition for the classic duplicate-leaf second-preimage collision.
+_MERKLE_LEAF_PREFIX = b"\x00"
+_MERKLE_NODE_PREFIX = b"\x01"
+
+
+def _merkle_tree_hash(leaves: list[str]) -> str:
+    """R10-7 (RFC 6962-style, domain-separated) tree hash over an ORDERED leaf list.
+    Leaves are hashed under the 0x00 prefix and internal nodes under 0x01; an odd level is
+    split at the largest power of two BELOW the count (never duplicate-last), so no leaf set
+    can collide with a different one carrying a duplicated tail (CVE-2012-2459)."""
+    n = len(leaves)
+    if n == 1:
+        return _sha256_bytes(_MERKLE_LEAF_PREFIX + leaves[0].encode("utf-8"))
+    k = 1
+    while k * 2 < n:
+        k *= 2  # the largest power of two strictly less than n
+    left = _merkle_tree_hash(leaves[:k])
+    right = _merkle_tree_hash(leaves[k:])
+    return _sha256_bytes(_MERKLE_NODE_PREFIX + left.encode("utf-8") + right.encode("utf-8"))
+
+
 def merkle_root(hashes: list[str]) -> str:
-    """A deterministic sha256 Merkle root over ``sorted(hashes)`` (pairwise,
-    duplicate-last-on-odd). Order-independent by construction: the same *set* of
-    leaves always yields the same root, so callers need not agree on an order.
-    An empty list yields the domain-separated genesis (a well-defined "nothing"
-    root); a single leaf yields that leaf unchanged."""
+    """A deterministic, DOMAIN-SEPARATED sha256 Merkle root over ``sorted(hashes)`` (R10-7).
+    Order-independent by construction: the same *set* of leaves always yields the same root,
+    so callers need not agree on an order. An empty list yields the domain-separated genesis
+    (a well-defined "nothing" root).
+
+    R10-7 (CVE-2012-2459): leaves are hashed under a 0x00 prefix and internal nodes under a
+    0x01 prefix, and an odd level is split at the largest power of two below the count rather
+    than by duplicating the last node — so ``merkle_root([...,x]) != merkle_root([...,x,x])``:
+    a duplicate-leaf second preimage can no longer collide with a shorter honest set."""
     nodes = sorted(hashes)
     if not nodes:
         return _CHAIN_GENESIS
-    while len(nodes) > 1:
-        if len(nodes) % 2 == 1:
-            nodes.append(nodes[-1])  # duplicate the last node on an odd count
-        nodes = [_sha256(nodes[i] + nodes[i + 1]) for i in range(0, len(nodes), 2)]
-    return nodes[0]
+    return _merkle_tree_hash(nodes)
 
 
 def chain_root(entries: list[str]) -> str:
@@ -184,8 +211,19 @@ class CommittedGenesisState(BaseModel):
     latest_history_root: str
     latest_attestation_root: str
     latest_evaluation_root: str = _EMPTY_ROOT
+    # R10-2: the committed root of the append-only ExposureLedger. The presented ledger must
+    # reproduce + append-only-extend it, so a truncated exposure ledger (drop the incriminating
+    # curator record and re-sign) cannot certify — parity with history/evaluation. Its bootstrap
+    # value is the reproducible empty-ledger root (no committed exposure baseline yet).
+    latest_exposure_root: str = _EMPTY_ROOT
     evaluator_id: str
     verify_key: bytes
+    # R10-6: the committed adjudicator roster — ``{adjudicator_id: {is_builder, is_curator}}``. The
+    # certify path validates each verdict's self-asserted ``is_builder`` / ``is_curator`` against
+    # THIS (trust the committed roster, not the self-assertion) and requires the adjudicator to be
+    # independent of the scored subject. That the rostered adjudicators are genuinely independent
+    # people is the irreducible organizational remainder (documented, alongside key custody).
+    adjudicator_roster: dict[str, dict[str, bool]] = Field(default_factory=dict)
 
 
 def _read_committed_config(path: Optional[Path] = None) -> dict:
@@ -209,6 +247,9 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
     # F2: the committed EvaluationLedger root. An absent value means "no eval has certified
     # yet", i.e. the empty-ledger root — a well-defined, reproducible baseline.
     latest_evaluation = latest.get("evaluation_root") or _EMPTY_ROOT
+    # R10-2: the committed ExposureLedger root. An absent value means "no committed exposure
+    # baseline yet", i.e. the empty-ledger root (the same reproducible bootstrap sentinel).
+    latest_exposure = latest.get("exposure_root") or _EMPTY_ROOT
     # R8-6: fail closed on an INERT committed HISTORY root. ``_history_reproduces_committed``
     # anchors any prefix that reproduces the committed prior history root, so an inert root
     # (the empty ``chain_root([])`` genesis) would let a TRUNCATED cohort "anchor" against the
@@ -233,6 +274,8 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
         raise ValueError("latest.attestation_root must be a non-empty string")
     if not isinstance(latest_evaluation, str) or not latest_evaluation:
         raise ValueError("latest.evaluation_root must be a non-empty string")
+    if not isinstance(latest_exposure, str) or not latest_exposure:
+        raise ValueError("latest.exposure_root must be a non-empty string")
     evaluator = data.get("evaluator") or {}
     evaluator_id = evaluator.get("id")
     # F4: the committed value is the ed25519 PUBLIC key (verify_key_pub_hex). The private
@@ -242,13 +285,24 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
         raise ValueError("evaluator.id must be a non-empty string")
     if not isinstance(verify_key_pub_hex, str) or not verify_key_pub_hex:
         raise ValueError("evaluator.verify_key_pub_hex must be a non-empty hex string (the ed25519 PUBLIC key)")
+    # R10-6: normalise the committed adjudicator roster to ``{id: {is_builder, is_curator}}``.
+    raw_roster = data.get("adjudicators") or {}
+    roster: dict[str, dict[str, bool]] = {}
+    for name, flags in raw_roster.items():
+        flags = flags or {}
+        roster[name] = {
+            "is_builder": bool(flags.get("is_builder", False)),
+            "is_curator": bool(flags.get("is_curator", False)),
+        }
     return CommittedGenesisState(
         genesis_history_root=genesis,
         latest_history_root=latest_history,
         latest_attestation_root=latest_attestation,
         latest_evaluation_root=latest_evaluation,
+        latest_exposure_root=latest_exposure,
         evaluator_id=evaluator_id,
         verify_key=bytes.fromhex(verify_key_pub_hex),
+        adjudicator_roster=roster,
     )
 
 
@@ -282,19 +336,26 @@ def load_committed_evaluator_id(path: Optional[Path] = None) -> str:
 
 
 def advance_committed_root(
-    *, history_root: str, attestation_root: str, evaluation_root: str, path: Optional[Path] = None
+    *,
+    history_root: str,
+    attestation_root: str,
+    evaluation_root: str,
+    exposure_root: str,
+    path: Optional[Path] = None,
 ) -> None:
-    """Persist the new certified roots to the committed file (R5-2 + F2), advancing the chain.
-    The immutable ``genesis_history_root`` is preserved; only ``latest`` moves — including
-    ``evaluation_root`` (F2), so evaluate-once is COMMITTED monotonic state that advances only
-    through this git-reviewable file. Called by the harness AFTER a successful strict certify.
-    Written atomically (temp + replace)."""
+    """Persist the new certified roots to the committed file (R5-2 + F2 + R10-2/R10-4), advancing
+    the chain. The immutable ``genesis_history_root`` is preserved; only ``latest`` moves —
+    including ``evaluation_root`` (F2, evaluate-once) AND ``exposure_root`` (R10-2, curator-set) —
+    so BOTH ledgers are COMMITTED monotonic state that advances only through this git-reviewable
+    file, with no inert short-circuit left to dodge them. Called by the harness AFTER a successful
+    strict certify. Written atomically (temp + replace)."""
     p = path or _GENESIS_ROOT_PATH
     data = _read_committed_config(p)
     data["latest"] = {
         "history_root": history_root,
         "attestation_root": attestation_root,
         "evaluation_root": evaluation_root,
+        "exposure_root": exposure_root,
     }
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -320,14 +381,43 @@ def _history_reproduces_committed(history: "CohortHistory", committed_prior_root
 
 
 def _evaluation_reproduces_committed(ledger: "EvaluationLedger", committed_root: str) -> bool:
-    """F2: True iff some prefix of the presented ``prior_evaluations`` append-only chain
+    """F2 + R10-4: True iff some prefix of the presented ``prior_evaluations`` append-only chain
     reproduces the committed ``latest_evaluation_root`` — i.e. the presented ledger is exactly
     the committed prior ledger plus zero-or-more appended records. The ledger ``root`` is a
     prefix fold (:func:`chain_root`) over ``leaf_hash(record)``, so a prefix reproducing the
     committed root proves every committed prior evaluation is present, unchanged, and in order
     (omitting, rewriting, or reordering any changes the fold). An operator can therefore NOT
     present an empty ledger to dodge the blind-set re-roll check: the empty-ledger root only
-    reproduces a committed root that is itself empty (a genuine first evaluation)."""
+    reproduces a committed root that is itself empty (a genuine first evaluation).
+
+    R10-4 (fail closed on the inert short-circuit, matching R8-6 for history): the inert
+    empty-chain committed root is a legitimate baseline ONLY at bootstrap — an EMPTY presented
+    ledger. A NON-EMPTY ledger that "reproduces" the inert root via the empty prefix means the
+    committed chain never advanced to record those prior evals, so the genesis short-circuit is
+    honored only when there is genuinely nothing to reproduce (``not ledger.records``)."""
+    running = _CHAIN_GENESIS
+    if running == committed_root:
+        return not ledger.records
+    for record in ledger.records:
+        running = _sha256(running + leaf_hash(record.model_dump(mode="json")))
+        if running == committed_root:
+            return True
+    return False
+
+
+def _exposure_reproduces_committed(ledger: "ExposureLedger", committed_root: str) -> bool:
+    """R10-2: True iff some prefix of the presented ``ledger`` append-only chain reproduces the
+    committed ``latest_exposure_root`` — i.e. the presented exposure ledger is exactly the
+    committed prior ledger plus zero-or-more appended records. The ledger ``root`` is a prefix
+    fold (:func:`chain_root`) over ``leaf_hash(record)``, so a prefix reproducing the committed
+    root proves every committed prior curation/inspection record is present, unchanged, and in
+    order — dropping the incriminating curator record and re-signing changes the fold and no
+    longer reproduces the committed baseline (``EXPOSURE_LEDGER_TRUNCATED``).
+
+    Unlike evaluate-once, an exposure ledger is legitimately NON-EMPTY at its first certify
+    (curators curate before a cohort is scored), so the committed-empty baseline is a genuine
+    "no committed exposure baseline yet" bootstrap that any presented ledger extends — the
+    truncation protection engages once a real (non-empty) committed exposure baseline exists."""
     running = _CHAIN_GENESIS
     if running == committed_root:
         return True
@@ -509,6 +599,14 @@ class ViolationReason(str, Enum):
     # runs on the EXACT committed pinned bytes, and the precision sample is committed at freeze
     # time rather than derived from the grindable freeze_hash.
     INPUT_BYTES_UNVERIFIED = "recomputed-input-bytes-do-not-match-the-committed-per-target-blob-sha256"
+    # Round-10 comprehensive final seals (R10-1..R10-7): re-enforce every constructor invariant on
+    # the certify path, bind each ledger to a committed-monotonic root, and trust CODE HASHES not
+    # names.
+    DETECTOR_BUNDLE_UNVERIFIED = "loaded-detector-module-hash-does-not-match-the-frozen-bundle"
+    EXPOSURE_LEDGER_TRUNCATED = "presented-exposure-ledger-does-not-reproduce-the-committed-monotonic-root"
+    EVALUATION_RECORD_UNBOUND = "evaluation-record-blind-ids-not-bound-to-its-resolved-cohort"
+    PRECISION_PANEL_INVALID = "from-storage-precision-panel-or-coverage-invariant-violated"
+    ADJUDICATOR_INVALID = "adjudicator-not-independent-or-not-on-the-committed-roster"
 
 
 class ContractViolation(Exception):
@@ -2333,8 +2431,30 @@ def _check_evaluation_ledger(
     whenever the scored cohort's BLIND identities overlap ANY prior record's blind set
     for the SAME subject, regardless of ``freeze_hash``. A re-frozen detector must be
     scored on a cohort whose blind identities are disjoint from every prior blind eval
-    for that subject."""
-    if run.freeze_hash is None or prior_evaluations is None:
+    for that subject.
+
+    R10-3: a prior record's ``blind_ids`` is only trustworthy if it is BOUND to its cohort. When
+    the record's ``cohort_content_hash`` resolves in the presented history, require its
+    ``blind_ids`` to equal that cohort's actual BLIND identity set — else a record could advertise
+    a falsified (smaller/empty) blind set to dodge the A3 overlap check
+    (``EVALUATION_RECORD_UNBOUND``). Records whose cohort is unresolvable here are left unchecked
+    (they cannot be bound without the version)."""
+    if prior_evaluations is None:
+        return
+    # R10-3: bind every resolvable record's advertised blind_ids to its cohort's actual blind set,
+    # so a falsified (smaller/empty) blind set cannot silently dodge the A3 overlap check below.
+    if history is not None:
+        for record in prior_evaluations.records:
+            cohort = _cohort_by_content_hash(history, record.cohort_content_hash)
+            if cohort is None:
+                continue
+            if set(record.blind_ids) != _blind_identities(cohort):
+                report.add(
+                    ViolationReason.EVALUATION_RECORD_UNBOUND,
+                    f"evaluation record for cohort {record.cohort_content_hash[:12]} advertises "
+                    "blind_ids that are not the resolved cohort's actual blind identity set",
+                )
+    if run.freeze_hash is None:
         return
     if prior_evaluations.count(run.cohort_content_hash, run.freeze_hash, run.subject) > 0:
         report.add(
@@ -2594,6 +2714,77 @@ def _check_precision_binding(
             )
 
 
+def _check_precision_panel(
+    precision: AdjudicatedPrecision,
+    run: Optional[EvaluationRun],
+    committed: "CommittedGenesisState",
+    report: ContractReport,
+) -> None:
+    """R10-5 (P-A) + R10-6: RE-ENFORCE the AdjudicatedPrecision structural invariants on the
+    certify path. A from-storage precision rebuilt with ``model_construct`` bypasses the
+    ``_panel_and_sample_are_valid`` model-validator, so precision 1.0 could be presented with no
+    honest adjudication (partial coverage, a builder adjudicator, an under-sized panel). Recompute
+    the full invariants here and map any violation to ``PRECISION_PANEL_INVALID``: a non-empty
+    sample, a canonical (sorted, unique) pool, the k floor, FULL coverage (every sampled pair
+    adjudicated), the exact deterministic draw, and per-pair panel composition (>=2 verdicts, no
+    builder, >=1 non-curator).
+
+    R10-6: additionally bind each verdict's adjudicator to the committed roster — the adjudicator
+    must be INDEPENDENT of the scored subject, be on the committed roster, and carry the roster's
+    ``is_builder`` / ``is_curator`` rather than a self-asserted flag (``ADJUDICATOR_INVALID``)."""
+    subject = run.subject if run is not None else None
+    roster = committed.adjudicator_roster
+
+    def _panel(detail: str) -> None:
+        report.add(ViolationReason.PRECISION_PANEL_INVALID, detail)
+
+    if not precision.sampled_pairs:
+        _panel("precision requires a non-empty blind confusion-pair sample")
+        return
+    if list(precision.pool) != sorted(set(precision.pool)):
+        _panel("pool must be canonical: exactly sorted(set(pool)) (unique, sorted)")
+    if precision.k < min(len(precision.pool), _MIN_PRECISION_SAMPLE_K):
+        _panel(f"k ({precision.k}) is below the minimum min(|pool|, {_MIN_PRECISION_SAMPLE_K})")
+    sampled = set(precision.sampled_pairs)
+    adjudicated = {a.pair_id for a in precision.adjudications}
+    if adjudicated != sampled:
+        _panel(
+            f"every seeded pair must be adjudicated: sampled={sorted(sampled)} "
+            f"adjudicated={sorted(adjudicated)}"
+        )
+    for adj in precision.adjudications:
+        if adj.pair_id not in sampled:
+            _panel(f"adjudicated pair {adj.pair_id!r} is not in the seeded sample")
+        if len(adj.verdicts) < 2:
+            _panel("each pair needs at least two adjudicators")
+        if any(v.is_builder for v in adj.verdicts):
+            _panel("adjudicators must be non-builders")
+        if not any(not v.is_curator for v in adj.verdicts):
+            _panel("at least one adjudicator must be a non-curator")
+        # R10-6: bind every verdict's adjudicator identity + role to the committed roster.
+        for v in adj.verdicts:
+            if subject is not None and v.adjudicator == subject:
+                report.add(
+                    ViolationReason.ADJUDICATOR_INVALID,
+                    f"adjudicator {v.adjudicator!r} is the scored subject; the panel must be independent",
+                )
+            entry = roster.get(v.adjudicator)
+            if entry is None:
+                report.add(
+                    ViolationReason.ADJUDICATOR_INVALID,
+                    f"adjudicator {v.adjudicator!r} is not on the committed adjudicator roster",
+                )
+            elif entry["is_builder"] != v.is_builder or entry["is_curator"] != v.is_curator:
+                report.add(
+                    ViolationReason.ADJUDICATOR_INVALID,
+                    f"adjudicator {v.adjudicator!r} self-asserted is_builder/is_curator "
+                    f"({v.is_builder}/{v.is_curator}) does not match the committed roster",
+                )
+    expected_sample = sample_confusion_pairs(precision.pool, precision.k, precision.seed)
+    if list(precision.sampled_pairs) != list(expected_sample):
+        _panel("sampled_pairs is not the deterministic sample_confusion_pairs(pool, k, seed) draw")
+
+
 def _check_achievability(
     achievability: AchievabilityLog,
     prior: Optional[AchievabilityLog],
@@ -2663,7 +2854,17 @@ def _check_certification(
     (``CURATOR_IS_SUBJECT``); R5-6 a certified report must not carry a free
     ``achievable_recall`` (``ACHIEVABLE_UNBOUND``). Round-4 seals are retained: P1b one
     producing evaluation (``CERTIFY_WITHOUT_EVALUATION``); P1c a bound precision
-    (``PRECISION_UNBOUND``)."""
+    (``PRECISION_UNBOUND``).
+
+    Round-10 comprehensive final seals (all one recurring shape): R10-1 the detector is bound by
+    the CONTENT HASH of its loaded module (``DETECTOR_BUNDLE_UNVERIFIED``), not the mutable name;
+    R10-2 the exposure ledger must reproduce the committed-monotonic root
+    (``EXPOSURE_LEDGER_TRUNCATED``); R10-3 an evaluation record's ``blind_ids`` is bound to its
+    resolved cohort (``EVALUATION_RECORD_UNBOUND``); R10-4 the evaluation chain fails closed on the
+    inert short-circuit; R10-5 the AdjudicatedPrecision panel/coverage invariants are RE-ENFORCED
+    here (``PRECISION_PANEL_INVALID``); R10-6 every adjudicator is bound to the committed roster and
+    is independent of the subject (``ADJUDICATOR_INVALID``); R10-7 ``merkle_root`` domain-separates
+    leaves from internal nodes (CVE-2012-2459)."""
     # Certification requires a signed attestation. The verify-key is NOT a caller arg — it
     # is loaded from committed state below. Without an attestation there is nothing to
     # reproduce — fail closed rather than pass silently.
@@ -2728,6 +2929,44 @@ def _check_certification(
         result.add(ViolationReason.ATTESTATION_INCOMPLETE, "no Report presented for certification")
     elif attestation.report_hash != leaf_hash(report.model_dump(mode="json")):
         result.add(ViolationReason.ATTESTATION_MISMATCH, "presented report does not reproduce the attested report_hash")
+
+    # ----------------------------------------------------------------------- #
+    # R10-1 (P-C: trust CODE HASHES, not names) — bind the detector by the CONTENT HASH of its
+    # loaded module source, not by the mutable ``detector_id``. The freeze commits
+    # ``module_hashes``; nothing previously read them, so an operator could swap the detector CODE
+    # while keeping the name + freeze. RECOMPUTE the sha256 of the source file(s) of the module the
+    # committed registry resolves for ``freeze.bundle.detector_id`` and require it to EQUAL the
+    # frozen ``module_hashes``. A mismatch (swapped code) OR an inert (empty) commitment fails
+    # closed → ``DETECTOR_BUNDLE_UNVERIFIED``. SAFETY (Article III): the module source is read as
+    # TEXT and hashed; no fetched or target code is executed.
+    # ----------------------------------------------------------------------- #
+    if freeze is not None:
+        import verifier  # local import: verifier -> corpus_measure, no cycle back to contract
+
+        frozen_hashes = dict(freeze.bundle.module_hashes)
+        if not frozen_hashes:
+            result.add(
+                ViolationReason.DETECTOR_BUNDLE_UNVERIFIED,
+                "certification requires a non-empty committed freeze module_hashes (an inert code "
+                "commitment leaves the detector bound only by its mutable name)",
+            )
+        else:
+            try:
+                loaded_hashes = verifier.resolve_module_hashes(freeze.bundle.detector_id)
+            except Exception as exc:  # noqa: BLE001 — an un-resolvable module hash fails closed
+                result.add(
+                    ViolationReason.DETECTOR_BUNDLE_UNVERIFIED,
+                    f"certification could not recompute the loaded detector module hash for "
+                    f"detector_id={freeze.bundle.detector_id!r}: {exc}",
+                )
+            else:
+                if frozen_hashes != loaded_hashes:
+                    result.add(
+                        ViolationReason.DETECTOR_BUNDLE_UNVERIFIED,
+                        "the loaded detector module content hash does not match the frozen bundle "
+                        f"module_hashes (detector_id={freeze.bundle.detector_id!r}); the detector code "
+                        "was swapped under a preserved name/freeze",
+                    )
 
     # ----------------------------------------------------------------------- #
     # R5-3 — the mandatory certify bindings (no opt-in skips). Every completeness
@@ -2839,6 +3078,15 @@ def _check_certification(
                 f"AdjudicatedPrecision.precision ({precision.precision})",
             )
 
+    # R10-5 (P-A) + R10-6 — RE-ENFORCE the AdjudicatedPrecision panel + coverage invariants on the
+    # certify path (a from-storage ``model_construct`` object bypasses the constructor validator),
+    # and bind every adjudicator to the committed roster + subject-independence. A precision object
+    # with partial coverage, a builder adjudicator, or an under-composed panel is
+    # ``PRECISION_PANEL_INVALID``; a non-independent / unrostered adjudicator is
+    # ``ADJUDICATOR_INVALID``.
+    if precision is not None:
+        _check_precision_panel(precision, run, committed, result)
+
     # R5-6 — a certified report must not carry a free ``achievable_recall``. It is a
     # labelled DIAGNOSTIC for non-certified reports only; in the certified bundle it would
     # be an unbound headline number, so forbid it (bind-or-forbid; we forbid).
@@ -2896,6 +3144,21 @@ def _check_certification(
             ViolationReason.EVALUATED_MORE_THAN_ONCE,
             "presented prior_evaluations does not reproduce + append-only-extend the committed "
             "evaluation-ledger root (a truncated / re-anchored ledger cannot dodge evaluate-once)",
+        )
+
+    # R10-2 (P-B) — the presented ExposureLedger MUST reproduce + append-only-extend the committed
+    # exposure-ledger root, in parity with history (R5-2) and evaluation (F2). The exposure check
+    # previously verified only against the freshly-signed attestation's OWN exposure_root, so a
+    # truncated ledger (drop the incriminating curator record) could re-sign and pass. Binding it
+    # to the committed-monotonic root closes that: a truncated / re-anchored exposure ledger cannot
+    # certify (``EXPOSURE_LEDGER_TRUNCATED``).
+    if ledger is not None and not _exposure_reproduces_committed(
+        ledger, committed.latest_exposure_root
+    ):
+        result.add(
+            ViolationReason.EXPOSURE_LEDGER_TRUNCATED,
+            "presented exposure ledger does not reproduce + append-only-extend the committed "
+            "exposure-ledger root (a truncated / re-anchored curator ledger cannot certify)",
         )
 
     # R5-1 + PART 2 — the numerator VERIFIER, RUN from committed state. ``validate`` RUNS

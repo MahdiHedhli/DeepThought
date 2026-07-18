@@ -32,6 +32,7 @@ fetched text); no target code is run, so there is no Article III sandbox concern
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 from pathlib import Path
 from typing import Callable, Iterable
@@ -172,10 +173,45 @@ def _load_scan_source(module_name: str) -> ScanFn:
     return module.scan_source
 
 
+def _module_source_hashes(module_name: str) -> dict[str, str]:
+    """R10-1 (trust CODE HASHES, not names): recompute the CONTENT HASH of a committed detector
+    module's SOURCE FILE. Returns ``{basename: sha256(source_bytes)}`` for the resolved module.
+    SAFETY (Article III): the analyzer module's own source is read as TEXT and hashed — it is NOT
+    imported/executed here, and no fetched or target code is run."""
+    if _BENCHMARKS_DIR not in sys.path:
+        sys.path.insert(0, _BENCHMARKS_DIR)
+    spec = importlib.util.find_spec(module_name)
+    if spec is None or not spec.origin:
+        raise KeyError(f"detector module {module_name!r} has no resolvable source file to hash")
+    source = Path(spec.origin).read_text(encoding="utf-8")
+    return {Path(spec.origin).name: blob_sha256(source)}
+
+
 DETECTOR_REGISTRY: dict[str, Callable[[], ScanFn]] = {
     detector_id: (lambda module=module_name: _load_scan_source(module))
     for detector_id, module_name in _DETECTOR_MODULES.items()
 }
+
+# R10-1: the committed detector MODULE-HASH registry, mirroring DETECTOR_REGISTRY. Keyed by the
+# frozen ``detector_id`` -> a zero-arg loader recomputing the module source's content hash(es).
+# Module-level and MONKEYPATCHABLE (hermetic tests inject a canned hash without a real module
+# file); production hashes the real git-tracked detector source. NOT a caller argument.
+DETECTOR_MODULE_HASHES: dict[str, Callable[[], dict[str, str]]] = {
+    detector_id: (lambda module=module_name: _module_source_hashes(module))
+    for detector_id, module_name in _DETECTOR_MODULES.items()
+}
+
+
+def resolve_module_hashes(detector_id: str) -> dict[str, str]:
+    """R10-1: resolve the loaded detector's module content hash(es) from the COMMITTED
+    :data:`DETECTOR_MODULE_HASHES`, keyed by the freeze-committed ``detector_id``. NOT a caller
+    argument — the scored party cannot swap the detector CODE while keeping the name. Raises
+    ``KeyError`` for an unregistered id so the certify path fails closed
+    (``DETECTOR_BUNDLE_UNVERIFIED``)."""
+    loader = DETECTOR_MODULE_HASHES.get(detector_id)
+    if loader is None:
+        raise KeyError(f"no committed detector module registered for detector_id {detector_id!r}")
+    return loader()
 
 
 def resolve_scan_fn(detector_id: str) -> ScanFn:

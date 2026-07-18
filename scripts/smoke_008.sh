@@ -24,7 +24,11 @@
 # and the round-9 final per-cohort seals — an operator-CHERRY-PICKED precision sample that is not
 # the CANONICAL draw from committed state (R9-1, PRECISION_SAMPLE_UNBOUND) and a version-bumped
 # curator whose non-empty curated_entry_ids miss the head yet whose cohort shares entries with the
-# scored head (R9-2, CURATOR_IS_SUBJECT).
+# scored head (R9-2, CURATOR_IS_SUBJECT), and the round-10 comprehensive final seals — a detector
+# CODE swap under a preserved name/freeze (R10-1, DETECTOR_BUNDLE_UNVERIFIED), a truncated
+# committed-monotonic exposure ledger (R10-2, EXPOSURE_LEDGER_TRUNCATED), and a from-storage
+# precision panel with a builder adjudicator re-enforced on the certify path (R10-5,
+# PRECISION_PANEL_INVALID).
 # Finally prints the Report with blind recall as the headline plus the four labelled secondaries.
 # Exit 0 on success (all positives pass AND all guards trip with the expected reason).
 set -euo pipefail
@@ -228,8 +232,13 @@ def _fake_scan_blind(source, uri):
 
 # Install the committed detector + fetcher (module-level, monkeypatchable): validate()
 # resolves DT-SSRF-TAINT's scan_source from DETECTOR_REGISTRY and the fetcher from FETCH_FN.
+# R10-1: validate() ALSO recomputes the loaded detector module's CONTENT HASH from
+# DETECTOR_MODULE_HASHES (keyed by the frozen detector_id) and binds it to the frozen bundle's
+# module_hashes — trust the CODE HASH, not the name. The hermetic smoke installs a matching
+# committed hash (production hashes the real ssrf_detector.py source).
 verifier.FETCH_FN = _fake_fetch
 verifier.DETECTOR_REGISTRY["DT-SSRF-TAINT"] = lambda: _fake_scan
+verifier.DETECTOR_MODULE_HASHES["DT-SSRF-TAINT"] = lambda: {"ssrf_detector.py": "deadbeef"}
 
 # B5: bind every component root into one signed Attestation (chained to the committed genesis).
 attestation = build_attestation(
@@ -560,6 +569,73 @@ run_fallback = EvaluationRun(
 rep16 = validate(history=hist_bump, run=run_fallback, ledger=ledger_fallback)
 expect("version-bumped curated record trips CURATOR_IS_SUBJECT", ViolationReason.CURATOR_IS_SUBJECT in rep16.reasons())
 print(f"        -> {rep16.summary()}")
+
+print()
+print("== guard 17: R10-1 detector CODE-HASH binding — swapping the loaded module fails closed ==")
+# the certify path recomputes the loaded detector module's CONTENT HASH (from DETECTOR_MODULE_HASHES,
+# keyed by the frozen detector_id) and binds it to the frozen bundle's module_hashes — trust the CODE
+# HASH, not the mutable name. Swapping the detector CODE (a DIFFERENT loaded hash) under a preserved
+# name/freeze no longer matches -> DETECTOR_BUNDLE_UNVERIFIED. (SAFETY: the module source is read as
+# TEXT and hashed; nothing fetched or target is executed.)
+verifier.DETECTOR_MODULE_HASHES["DT-SSRF-TAINT"] = lambda: {"ssrf_detector.py": "5wapped-code-hash"}
+rep17 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    precision=precision_view, prior_evaluations=evaluations, attestation=attestation, strict=True,
+)
+expect("swapped detector module hash trips DETECTOR_BUNDLE_UNVERIFIED", ViolationReason.DETECTOR_BUNDLE_UNVERIFIED in rep17.reasons())
+print(f"        -> {rep17.summary()}")
+verifier.DETECTOR_MODULE_HASHES["DT-SSRF-TAINT"] = lambda: {"ssrf_detector.py": "deadbeef"}  # restore
+
+print()
+print("== guard 18: R10-2 committed-monotonic exposure ledger — a truncated curator ledger fails closed ==")
+# the exposure ledger is COMMITTED-monotonic state (parity with history/evaluation). Advance the
+# committed exposure baseline to the honest ledger root, then present a TRUNCATED ledger (the
+# incriminating curator record dropped) re-signed over its own root: it no longer reproduces the
+# committed baseline -> EXPOSURE_LEDGER_TRUNCATED.
+_orig_loader2 = contract.load_committed_genesis_state
+_committed_with_exposure = _orig_loader2().model_copy(update={"latest_exposure_root": ledger.root})
+contract.load_committed_genesis_state = lambda *a, **k: _committed_with_exposure
+try:
+    truncated_ledger = ExposureLedger()  # the incriminating curator record dropped
+    truncated_att = build_attestation(
+        history=history, freeze=freeze, run=run, report=report_view,
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=SIGNING_KEY,
+        prior_attestation_root=load_committed_genesis_root(),
+        exclusions=None, ledger=truncated_ledger, evaluation_ledger=evaluations, achievability=None,
+    )
+    rep18 = validate(
+        history=history, ledger=truncated_ledger, run=run, freeze=freeze, report=report_view,
+        precision=precision_view, prior_evaluations=evaluations, attestation=truncated_att, strict=True,
+    )
+finally:
+    contract.load_committed_genesis_state = _orig_loader2  # restore the real committed loader
+expect("truncated exposure ledger trips EXPOSURE_LEDGER_TRUNCATED", ViolationReason.EXPOSURE_LEDGER_TRUNCATED in rep18.reasons())
+print(f"        -> {rep18.summary()}")
+
+print()
+print("== guard 19: R10-5 precision panel re-enforced on certify — a from-storage panel fails closed ==")
+# a from-storage AdjudicatedPrecision (model_construct bypasses the constructor validator) with a
+# BUILDER adjudicator — precision 1.0 with no honest panel — is RE-ENFORCED on the certify path
+# (P-A: every constructor invariant is re-checked because from-storage objects bypass constructors).
+from_storage_precision = AdjudicatedPrecision.model_construct(
+    seed=SAMPLE_SEED, sampled_pairs=sampled, pool=pool, k=COMMITTED_K,
+    adjudications=[
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=True, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=True, decision="true-positive"),
+            ],
+        )
+        for p in sampled
+    ],
+)
+rep19 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    precision=from_storage_precision, prior_evaluations=evaluations, attestation=attestation, strict=True,
+)
+expect("from-storage precision panel trips PRECISION_PANEL_INVALID", ViolationReason.PRECISION_PANEL_INVALID in rep19.reasons())
+print(f"        -> {rep19.summary()}")
 
 print()
 print("== report: blind recall is the headline, four labelled secondaries ==")

@@ -298,6 +298,34 @@ genesis-commit completeness [git-reviewable, plus the feature-009 AGGREGATE clas
 per-cohort binding is a total function of committed state; nothing code-closable remains at the
 per-cohort level, and the aggregate class-manifest completeness is the sole follow-on (feature 009).
 
+## Tenth wave (round-10): comprehensive final hardening — one recurring shape
+
+A tenth audit found the last survivors were all ONE recurring shape and closed them comprehensively
+under a governing meta-principle applied throughout (not only to the listed items): (P-A) EVERY
+constructor/type-validator invariant is RE-ENFORCED on the certify path (from-storage objects bypass
+constructors); (P-B) EVERY ledger has a committed-monotonic root advanced by `advance_committed_root`
+and reproduced+extended on certify, with NO inert/empty short-circuit; (P-C) trust CODE HASHES, not
+names. (Regression tests `test_r10_1_*` … `test_r10_7_*`, the updated `test_r5_2_*` / `test_verifier`
+builders, and smoke guards 17–19.)
+
+| Hole | Bypass it left open | Now sealed by |
+|---|---|---|
+| R10-1 (HIGH) | the freeze hashed `module_hashes`/`interpreter_version`/`parser_versions` but nothing READ them; the detector was resolved by the mutable `detector_id`, so the operator could swap the detector CODE while keeping the name/freeze | on certify, `validate` recomputes the sha256 of the source file(s) of the module the committed registry resolves for `freeze.bundle.detector_id` (`verifier.resolve_module_hashes`) and requires it to EQUAL the frozen `module_hashes`; a mismatch (swapped code), an unregistered module, or an inert (empty) commitment is `DETECTOR_BUNDLE_UNVERIFIED`. Trust the CODE HASH, not the name (SAFETY: the analyzer source is read as TEXT and hashed; nothing fetched/target is executed) |
+| R10-2 (HIGH) | `_check_certification` verified exposure only against the freshly-signed attestation's OWN `exposure_root`, so a truncated ledger (drop the incriminating curator record), re-signed, passed | `CommittedGenesisState`/`genesis_root.json` carries `latest_exposure_root`, `advance_committed_root` advances it, and certify requires the presented `ExposureLedger` to reproduce + append-only-extend the committed root — else `EXPOSURE_LEDGER_TRUNCATED` (parity with history/evaluation) |
+| R10-3 (MEDIUM) | `_check_evaluation_ledger` read `record.blind_ids` verbatim, so a record could advertise a fake (smaller/empty) blind set to dodge the A3 blind-set overlap | when the record's `cohort_content_hash` resolves in history, its `blind_ids` must equal that cohort's actual BLIND identity set — else `EVALUATION_RECORD_UNBOUND` |
+| R10-4 (MEDIUM) | `_evaluation_reproduces_committed` returned True for the inert/empty committed root (short-circuit), and the eval chain never advanced, so a re-eval passed | `advance_committed_root` persists the new `evaluation_root` (and `exposure_root`) on a successful certify, and `_evaluation_reproduces_committed` rejects the inert `_CHAIN_GENESIS`/`_EMPTY_ROOT` once past bootstrap (a NON-EMPTY ledger cannot reproduce it via the empty prefix) — matching R8-6 for history; a re-eval under a truthful advanced committed root is `BLIND_REEVALUATED`/`EVALUATED_MORE_THAN_ONCE` |
+| R10-5 (HIGH) | a from-storage `AdjudicatedPrecision` (`model_construct`) bypassed `_panel_and_sample_are_valid` (coverage + panel composition), so precision 1.0 was presentable with no honest adjudication | `_check_precision_panel` RE-ENFORCES the full structural invariants on the certify path — non-empty sample, canonical pool, the k floor, FULL coverage, the deterministic draw, and per-pair panel composition (≥2 verdicts, no builder, ≥1 non-curator) — else `PRECISION_PANEL_INVALID` |
+| R10-6 (MEDIUM) | the panel trusted self-asserted `is_builder`/`is_curator` and never checked the adjudicator against the scored subject | every `AdjudicatorVerdict.adjudicator` must differ from `run.subject`, be on the committed roster (`genesis_root.json` → `adjudicators`), and carry the roster's `is_builder`/`is_curator` — else `ADJUDICATOR_INVALID`. That the rostered adjudicators are genuinely independent people is the irreducible organizational remainder |
+| R10-7 (LOW) | `merkle_root` duplicated the last node on an odd level with no leaf/node domain separation — the classic duplicate-leaf second-preimage collision (CVE-2012-2459): `merkle_root([…,x]) == merkle_root([…,x,x])` | leaves are hashed under a `0x00` prefix and internal nodes under `0x01`, and an odd level is split at the largest power of two below the count (RFC 6962-style, never duplicate-last), so a duplicate-leaf second preimage can no longer collide. The committed roots in `genesis_root.json` are chain/sha256 based, so only the dynamically-recomputed attestation/pool/sample roots change |
+
+**The FINAL residual after round-10 is exactly: (i) genesis-commit completeness [git-reviewable, plus
+the feature-009 AGGREGATE class-manifest]; (ii) ed25519 private-key custody [curator ≠ subject];
+(iii) adjudicator independence [the committed-rostered adjudicators are genuinely independent
+people]; and (iv) operator commit-honesty of the git-committed ledgers — all four organizational /
+git-reviewable, not validator-checkable.** After round-10 every per-cohort binding is a total
+function of committed state, every ledger is committed-monotonic, and the detector is bound by code
+hash; the aggregate class-manifest completeness is the sole code-closable follow-on (feature 009).
+
 ## Sealing note (for the later cross-model evaluator)
 
 The exposure ledger and freeze manifest are the in-contract guarantees. The OS-level

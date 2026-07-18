@@ -438,17 +438,74 @@ wired into `check`, enforcing:
     so the event's `entry_identity` matches either way; the flag is read from the from_version
     entry.)
 
-- **The FINAL per-cohort residual is exactly (i) genesis-commit completeness — that what the
+- **FR-23 — Round-10: the comprehensive final hardening (one recurring shape).** A tenth audit —
+  with every prior lens holding — found the last survivors were all ONE recurring shape: a
+  constructor/type invariant NOT re-enforced on the certify path, a ledger with no committed-
+  monotonic root, or a binding by NAME rather than by CODE HASH. Closing them comprehensively makes
+  008 shippable. The governing meta-principle is applied throughout, not only to the listed items:
+  (P-A) EVERY constructor/type-validator invariant is RE-ENFORCED inside the certify path (from-
+  storage objects bypass constructors); (P-B) EVERY ledger (history, evaluation, exposure) has a
+  committed-monotonic root advanced by `advance_committed_root` on a successful certify and
+  reproduced+extended on certify, with NO inert/empty short-circuit; (P-C) trust CODE HASHES, not
+  names.
+  - **R10-1 (HIGH) — bind the detector by CODE HASH, not `detector_id`.** The freeze commits
+    `module_hashes` but nothing read them, so the operator could swap the detector CODE while keeping
+    the name/freeze. Strict certification now RECOMPUTES the sha256 of the source file(s) of the
+    module the committed registry resolves for `freeze.bundle.detector_id`
+    (`verifier.resolve_module_hashes`) and requires it to EQUAL the frozen `module_hashes`; a
+    mismatch (swapped code) OR an inert (empty) commitment is `DETECTOR_BUNDLE_UNVERIFIED`. (SAFETY:
+    the analyzer source is read as TEXT and hashed; no fetched or target code is executed.)
+  - **R10-2 (HIGH) — the exposure ledger is COMMITTED-monotonic (parity with history/evaluation).**
+    `_check_certification` verified exposure only against the freshly-signed attestation's own
+    `exposure_root`, so a truncated ledger (drop the incriminating curator record) could re-sign and
+    pass. `CommittedGenesisState`/`genesis_root.json` now carries `latest_exposure_root`,
+    `advance_committed_root` advances it, and certify requires the presented `ExposureLedger` to
+    reproduce + append-only-extend it — else `EXPOSURE_LEDGER_TRUNCATED`.
+  - **R10-3 (MEDIUM) — `EvaluationRecord.blind_ids` bound to its cohort.** `_check_evaluation_ledger`
+    read `record.blind_ids` verbatim, so a record could advertise a falsified (smaller/empty) blind
+    set to dodge the A3 overlap check. When the record's `cohort_content_hash` resolves in history,
+    its `blind_ids` must equal that cohort's actual BLIND identity set — else
+    `EVALUATION_RECORD_UNBOUND`.
+  - **R10-4 (MEDIUM) — the evaluation chain ADVANCES and fails closed on the inert short-circuit.**
+    `advance_committed_root` now persists the new `evaluation_root` (and `exposure_root`) on a
+    successful certify, and `_evaluation_reproduces_committed` rejects the inert `_CHAIN_GENESIS`/
+    `_EMPTY_ROOT` once past bootstrap (a NON-EMPTY ledger cannot reproduce the inert root via the
+    empty prefix), matching R8-6 for history — a re-eval under a truthful advanced committed root is
+    `BLIND_REEVALUATED`/`EVALUATED_MORE_THAN_ONCE`.
+  - **R10-5 (HIGH) — re-enforce the `AdjudicatedPrecision` panel/coverage invariants on the certify
+    path (P-A).** A from-storage precision rebuilt with `model_construct` bypasses
+    `_panel_and_sample_are_valid`, so precision 1.0 was presentable with no honest adjudication.
+    `_check_precision_panel` re-enforces the full structural invariants — non-empty sample, canonical
+    pool, the k floor, FULL coverage, the deterministic draw, and per-pair panel composition (≥2
+    verdicts, no builder, ≥1 non-curator) — else `PRECISION_PANEL_INVALID`.
+  - **R10-6 (MEDIUM) — adjudicator identity bound to committed state.** The panel trusted self-
+    asserted `is_builder`/`is_curator`. Every `AdjudicatorVerdict.adjudicator` must now differ from
+    `run.subject`, be on the committed adjudicator roster (`genesis_root.json` → `adjudicators`), and
+    carry the roster's `is_builder`/`is_curator` rather than a self-assertion — else
+    `ADJUDICATOR_INVALID`. That the rostered adjudicators are genuinely independent people is the
+    irreducible organizational remainder.
+  - **R10-7 (LOW) — `merkle_root` domain separation (CVE-2012-2459).** Leaves are hashed under a
+    `0x00` prefix and internal nodes under `0x01`, and an odd level is split at the largest power of
+    two below the count (RFC 6962-style, never duplicate-last), so `merkle_root([…,x]) !=
+    merkle_root([…,x,x])`: a duplicate-leaf second preimage can no longer collide with a shorter
+    honest set. The committed roots in `genesis_root.json` are chain/sha256 based, so the scheme
+    change alters only the dynamically-recomputed attestation/pool/sample roots.
+
+- **The FINAL residual after Round-10 is exactly: (i) genesis-commit completeness — that what the
   curator committed at genesis is itself complete (and, from feature 009, the AGGREGATE
   class-manifest — that no whole class is silently omitted from the mean) — which is
-  git-reviewable, not validator-checkable; and (ii) ed25519 private-key custody — that the private
-  signing key is held by a party that is NOT the scored subject (curator ≠ subject) — which is
-  organizational.** After Round-9 every per-cohort binding is a total function of committed state.
-  Everything else a validator can run, it now runs from committed state on the
-  EXACT committed pinned bytes. In this repo the committed public key corresponds to a fixed
-  test/smoke signing seed held in the test/build helpers so the smoke and unit tests can produce
-  honest attestations; a production deployment commits the curator's real public key while the
-  real private key stays external.
+  git-reviewable, not validator-checkable; (ii) ed25519 private-key custody — that the private
+  signing key is held by a party that is NOT the scored subject (curator ≠ subject); (iii)
+  adjudicator independence — that the committed-rostered adjudicators are genuinely independent
+  people; and (iv) operator commit-honesty of the git-committed ledgers — all four are
+  organizational / git-reviewable, not validator-checkable.** After Round-10 every per-cohort
+  binding is a total function of committed state, every ledger is committed-monotonic, and the
+  detector is bound by code hash. Everything else a validator can run, it now runs from committed
+  state on the EXACT committed pinned bytes. In this repo the committed public key corresponds to a
+  fixed test/smoke signing seed held in the test/build helpers so the smoke and unit tests can
+  produce honest attestations, and A/B are the fixed test/smoke adjudicator identities; a production
+  deployment commits the curator's real public key (private key external) and the real independent
+  adjudicator roster.
 
 ## Acceptance criteria
 
@@ -801,6 +858,36 @@ the committed-state form, never by weakening a check.
     `guided_fix == False` blind entry (with a matched ROLE_DOWNGRADE event) is `DENOMINATOR_SHRINK`;
     the same downgrade of a `guided_fix == True` entry is allowed.
 
+### Round-10 acceptance criteria (comprehensive final hardening; one recurring shape)
+
+72. **(R10-1/FR-23)** The certified detector is bound by the CONTENT HASH of its loaded module, not
+    the mutable `detector_id`. A registered detector whose recomputed module hash != the frozen
+    `module_hashes` (a swapped-code detector under a preserved name/freeze), an unregistered module
+    hash, or an inert (empty) `module_hashes` is `DETECTOR_BUNDLE_UNVERIFIED`; a matching bundle
+    certifies.
+73. **(R10-2/FR-23)** The exposure ledger is committed-monotonic. Once the committed
+    `latest_exposure_root` is a real (non-empty) baseline, a truncated exposure ledger that drops the
+    incriminating curator record and re-signs does NOT reproduce it and is `EXPOSURE_LEDGER_TRUNCATED`;
+    the honest ledger reproduces it and certifies.
+74. **(R10-3/FR-23)** An `EvaluationRecord.blind_ids` that resolves to a cohort in the presented
+    history must equal that cohort's actual BLIND identity set. A record advertising a falsified
+    (smaller/empty) blind set is `EVALUATION_RECORD_UNBOUND`; the honest record passes; a record
+    whose cohort is unresolvable is left unchecked.
+75. **(R10-4/FR-23)** `advance_committed_root` advances the evaluation AND exposure roots, and the
+    evaluation chain fails closed on the inert short-circuit: a NON-EMPTY `prior_evaluations` that
+    would reproduce the inert empty committed root via the empty prefix is
+    `EVALUATED_MORE_THAN_ONCE`; the honest empty-ledger bootstrap still certifies.
+76. **(R10-5/FR-23)** The `AdjudicatedPrecision` panel/coverage invariants are re-enforced on the
+    certify path. A from-storage (`model_construct`) precision with a builder adjudicator or partial
+    coverage is `PRECISION_PANEL_INVALID`; the honest panel certifies.
+77. **(R10-6/FR-23)** Every adjudicator differs from `run.subject`, is on the committed roster, and
+    carries the roster's `is_builder`/`is_curator`. An adjudicator equal to the subject, an
+    unrostered adjudicator, or a self-asserted role that mismatches the roster is
+    `ADJUDICATOR_INVALID`.
+78. **(R10-7/FR-23)** `merkle_root` domain-separates leaves (0x00) from internal nodes (0x01):
+    `merkle_root([…,x]) != merkle_root([…,x,x])` (CVE-2012-2459), while staying order-independent
+    over the same set and membership-sensitive.
+
 ## Open questions
 
 - **Non-blocking.** Does the contract live in a new `benchmarks/harness/contract.py`
@@ -846,7 +933,11 @@ committed freeze `sample_root` (`PRECISION_SAMPLE_UNBOUND`, R8-2) — plus the r
 per-cohort seals: an operator-CHERRY-PICKED precision sample that is not the CANONICAL draw from
 committed state (`PRECISION_SAMPLE_UNBOUND`, R9-1) and a version-bumped curator whose non-empty
 `curated_entry_ids` miss the head yet whose recorded cohort shares an entry identity with the scored
-head (`CURATOR_IS_SUBJECT`, R9-2) — each fail
+head (`CURATOR_IS_SUBJECT`, R9-2) — plus the round-10 comprehensive final seals: a detector CODE
+swap under a preserved name/freeze (`DETECTOR_BUNDLE_UNVERIFIED`, R10-1), a truncated
+committed-monotonic exposure ledger (`EXPOSURE_LEDGER_TRUNCATED`, R10-2), and a from-storage
+precision panel with a builder adjudicator re-enforced on the certify path (`PRECISION_PANEL_INVALID`,
+R10-5) — each fail
 `check` with a typed reason. The blind entry now commits its per-target `vuln_blob_sha256` /
 `patched_blob_sha256` (so the numerator recompute runs on the exact committed pinned bytes) and the
 freeze commits the precision `sample_root` (now the canonical draw from committed state). The

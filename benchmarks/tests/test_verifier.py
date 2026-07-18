@@ -61,6 +61,8 @@ KEY = hashlib.sha256(b"deepthought-verifier-test-ed25519-seed/v1").digest()  # 3
 _TEST_PUB = ed25519_public_key(KEY)  # the committed ed25519 PUBLIC key
 EVALUATOR_ID = "curator-not-subject"
 CHAIN_BASE = "abad1dea" * 8  # a fixed committed latest-attestation root for the hermetic fixtures
+# R10-1: the fake detector's committed module-hash (bundle commits it; certify recomputes + binds).
+_MODULE_HASHES = {"d_detector.py": "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef"}
 
 
 def _reasons(report):
@@ -187,11 +189,17 @@ def _install_committed(monkeypatch, hist, *, detector_id="d", scan=fake_scan, re
         latest_attestation_root=CHAIN_BASE,
         evaluator_id=EVALUATOR_ID,
         verify_key=_TEST_PUB,
+        adjudicator_roster={  # R10-6: the committed roster matching the A/B panel below
+            "A": {"is_builder": False, "is_curator": False},
+            "B": {"is_builder": False, "is_curator": True},
+        },
     )
     monkeypatch.setattr(contract, "load_committed_genesis_state", lambda *a, **k: state)
     monkeypatch.setattr(verifier, "FETCH_FN", fake_fetch)
     if register:
         monkeypatch.setitem(verifier.DETECTOR_REGISTRY, detector_id, lambda: scan)
+        # R10-1: the committed loaded-module hash the certify path binds against the frozen bundle.
+        monkeypatch.setitem(verifier.DETECTOR_MODULE_HASHES, detector_id, lambda: dict(_MODULE_HASHES))
 
 
 def _certify_with_claim(monkeypatch, cohort, claimed_entries, *, detector_id="d", register=True):
@@ -209,7 +217,7 @@ def _certify_with_claim(monkeypatch, cohort, claimed_entries, *, detector_id="d"
     sampled = sample_confusion_pairs(pool, committed_k, sample_seed)
     bundle = DetectorBundle(
         detector_id=detector_id, lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k,
-        committed_sample_root=sample_root_of(sampled),
+        committed_sample_root=sample_root_of(sampled), module_hashes=dict(_MODULE_HASHES),  # R10-1
     )
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     rid = _canonical_run_id(cohort.content_hash, freeze.freeze_hash, "codex")

@@ -87,6 +87,19 @@ _TEST_PUB = ed25519_public_key(KEY)  # the committed ed25519 PUBLIC key
 EVALUATOR_ID = "curator-not-subject"
 ATT_CHAIN_BASE = "c0ffee00" * 8  # a fixed committed latest-attestation root for the fixtures
 
+# R10-1: the fake detector's committed module-hash. The freeze commits this in ``module_hashes``
+# and the certify path RECOMPUTES the loaded module's hash from the committed registry (hermetic
+# tests inject a matching canned value). A tamper (swap the loaded hash) trips DETECTOR_BUNDLE_UNVERIFIED.
+_FAKE_MODULE_HASHES = {"d_detector.py": "beefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef"}
+
+# R10-6: the committed adjudicator roster matching ``_good_panel`` (A is a non-curator, B is a
+# curator; neither is a builder). The certify path validates each verdict's self-asserted
+# is_builder/is_curator against THIS and requires independence from the scored subject.
+_ADJ_ROSTER = {
+    "A": {"is_builder": False, "is_curator": False},
+    "B": {"is_builder": False, "is_curator": True},
+}
+
 
 def _pool(n):
     """A canonical (sorted, unique) confusion-pair pool (A6)."""
@@ -1563,14 +1576,18 @@ def _install_committed(
     verify_key=_TEST_PUB,
     evaluator_id=EVALUATOR_ID,
     evaluation_root=None,
+    exposure_root=None,
+    adjudicator_roster=None,
+    module_hashes=None,
 ):
     """Install the COMMITTED anchor state + committed detector/fetcher so a strict certify
-    RUNS its verifications hermetically from committed state (R5-1..R5-4, F1, F2, F4).
+    RUNS its verifications hermetically from committed state (R5-1..R5-4, F1, F2, F4, R10-1/2/6).
     ``validate`` resolves the verify-key (ed25519 PUBLIC key), evaluator id, prior history
-    root, committed evaluation-ledger root, and chain root from
-    ``contract.load_committed_genesis_state`` and the detector/fetcher from ``verifier``; all
-    are monkeypatched here. ``prior_history_root`` defaults to the presented history's full
-    root (a valid append-only extension by zero); ``evaluation_root`` (F2) defaults to the
+    root, committed evaluation-ledger root, committed exposure-ledger root (R10-2), adjudicator
+    roster (R10-6), and chain root from ``contract.load_committed_genesis_state`` and the
+    detector / fetcher / module-hash from ``verifier``; all are monkeypatched here.
+    ``prior_history_root`` defaults to the presented history's full root (a valid append-only
+    extension by zero); ``evaluation_root`` (F2) and ``exposure_root`` (R10-2) default to the
     reproducible empty-ledger root."""
     phr = prior_history_root if prior_history_root is not None else presented_history.history_root
     state = contract.CommittedGenesisState(
@@ -1578,8 +1595,10 @@ def _install_committed(
         latest_history_root=phr,
         latest_attestation_root=chain_from,
         latest_evaluation_root=evaluation_root if evaluation_root is not None else contract._EMPTY_ROOT,
+        latest_exposure_root=exposure_root if exposure_root is not None else contract._EMPTY_ROOT,
         evaluator_id=evaluator_id,
         verify_key=verify_key,
+        adjudicator_roster=adjudicator_roster if adjudicator_roster is not None else dict(_ADJ_ROSTER),
     )
     monkeypatch.setattr(contract, "load_committed_genesis_state", lambda *a, **k: state)
 
@@ -1588,6 +1607,10 @@ def _install_committed(
 
     monkeypatch.setattr(verifier, "FETCH_FN", _fetch)
     monkeypatch.setitem(verifier.DETECTOR_REGISTRY, detector_id, lambda: (scan or _fake_scan))
+    # R10-1: the committed loaded-module hash the certify path recomputes and binds against the
+    # frozen ``module_hashes``. Defaults to the fake module hash the certify builders commit.
+    _mh = module_hashes if module_hashes is not None else dict(_FAKE_MODULE_HASHES)
+    monkeypatch.setitem(verifier.DETECTOR_MODULE_HASHES, detector_id, lambda: _mh)
 
 
 def _anchored(
@@ -1639,7 +1662,7 @@ def _anchored(
         sample_seed, sampled, committed_sample_root = _committed_sample(pool, committed_k, v1.content_hash)
     bundle = DetectorBundle(
         detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k,
-        committed_sample_root=committed_sample_root,
+        committed_sample_root=committed_sample_root, module_hashes=dict(_FAKE_MODULE_HASHES),  # R10-1
     )
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     run = _run("codex", v1.content_hash, freeze.freeze_hash)
@@ -1944,15 +1967,18 @@ def test_r5_2_advance_committed_root_persists(tmp_path):
     assert before.latest_history_root == "aa" * 32
     assert before.latest_attestation_root == contract._ATTESTATION_CHAIN_GENESIS
     assert before.latest_evaluation_root == contract._EMPTY_ROOT  # F2: empty-ledger baseline
+    assert before.latest_exposure_root == contract._EMPTY_ROOT  # R10-2: empty-ledger baseline
 
     contract.advance_committed_root(
-        history_root="bb" * 32, attestation_root="cc" * 32, evaluation_root="dd" * 32, path=p
+        history_root="bb" * 32, attestation_root="cc" * 32, evaluation_root="dd" * 32,
+        exposure_root="ee" * 32, path=p,
     )
     after = contract.load_committed_genesis_state(p)
     assert after.genesis_history_root == "aa" * 32  # immutable
     assert after.latest_history_root == "bb" * 32  # advanced
     assert after.latest_attestation_root == "cc" * 32
     assert after.latest_evaluation_root == "dd" * 32  # F2: the eval root advances too
+    assert after.latest_exposure_root == "ee" * 32  # R10-2: the exposure root advances too
 
 
 # --------------------------------------------------------------------------- #
@@ -1978,7 +2004,7 @@ def _chain_certify(
     sample_seed, sampled, committed_sample_root = _committed_sample(pool, committed_k, scored_cohort.content_hash)
     bundle = DetectorBundle(
         detector_id="d", lockfile_hash="L", pool_root=pool_root_of(pool), committed_k=committed_k,
-        committed_sample_root=committed_sample_root,
+        committed_sample_root=committed_sample_root, module_hashes=dict(_FAKE_MODULE_HASHES),  # R10-1
     )
     freeze = FreezeManifest(bundle=bundle, timestamp="2026-07-16T10:00:00Z")
     run = _run("codex", scored_cohort.content_hash, freeze.freeze_hash)
@@ -2777,3 +2803,222 @@ def test_r9_4_role_downgrade_requires_guided_fix_in_from_version():
         events=[ExclusionEvent(reason=ExclusionReason.ROLE_DOWNGRADE, entry_identity=cg.identity_hash, from_version="v1", to_version="v2")]
     )
     assert validate(history=CohortHistory(versions=[v1g, v2g]), exclusions=excl_g).ok
+
+
+# --------------------------------------------------------------------------- #
+# Round-10 comprehensive final seals (R10-1..R10-7). Every survivor is the SAME
+# recurring shape: re-enforce a constructor/type invariant ON the certify path,
+# bind each ledger to a committed-monotonic root, and trust CODE HASHES not names.
+# --------------------------------------------------------------------------- #
+
+
+# R10-1 — the detector is bound by the CONTENT HASH of its loaded module, not the mutable
+# detector_id. Swapping the detector CODE under a preserved name/freeze is DETECTOR_BUNDLE_UNVERIFIED.
+def test_r10_1_detector_bound_by_module_code_hash(monkeypatch):
+    a = _anchored(monkeypatch)
+    assert _certify(a).ok, _reasons(_certify(a))  # frozen module_hashes == loaded module hash
+
+    # the operator swaps the detector CODE (the loaded module hash changes) while keeping the
+    # name + freeze: the recompute no longer matches the frozen module_hashes
+    monkeypatch.setitem(
+        verifier.DETECTOR_MODULE_HASHES, "d", lambda: {"d_detector.py": "swapped" + "0" * 57}
+    )
+    rep = _certify(a)
+    assert not rep.ok and ViolationReason.DETECTOR_BUNDLE_UNVERIFIED in _reasons(rep)
+
+    # an UNREGISTERED module hash (no committed source to hash) fails closed
+    a2 = _anchored(monkeypatch)
+    monkeypatch.delitem(verifier.DETECTOR_MODULE_HASHES, "d")
+    rep2 = _certify(a2)
+    assert not rep2.ok and ViolationReason.DETECTOR_BUNDLE_UNVERIFIED in _reasons(rep2)
+
+    # an inert (empty) committed freeze module_hashes fails closed — the code is bound only by name
+    a3 = _anchored(monkeypatch)
+    inert_bundle = a3["freeze"].bundle.model_copy(update={"module_hashes": {}})
+    inert_freeze = FreezeManifest(bundle=inert_bundle, timestamp=a3["freeze"].timestamp)
+    rep3 = _certify(a3, freeze=inert_freeze)
+    assert not rep3.ok and ViolationReason.DETECTOR_BUNDLE_UNVERIFIED in _reasons(rep3)
+
+
+# R10-2 — the exposure ledger is COMMITTED-monotonic state (parity with history/evaluation): a
+# truncated ledger that drops the incriminating curator record and re-signs cannot reproduce the
+# committed exposure root -> EXPOSURE_LEDGER_TRUNCATED.
+def test_r10_2_exposure_ledger_is_committed_monotonic(monkeypatch):
+    a = _anchored(monkeypatch)
+    honest = a["ledger"]  # one curator record (claude curated the blind set)
+    # advance the committed exposure baseline to the honest ledger root (a real committed baseline)
+    base = contract.load_committed_genesis_state()
+    monkeypatch.setattr(
+        contract,
+        "load_committed_genesis_state",
+        lambda *x, **k: base.model_copy(update={"latest_exposure_root": honest.root}),
+    )
+    # the honest ledger reproduces the committed baseline -> passes
+    assert _certify(a).ok, _reasons(_certify(a))
+
+    # a truncated ledger (curator record dropped), re-signed over its own root, does NOT reproduce
+    # the committed exposure baseline -> EXPOSURE_LEDGER_TRUNCATED
+    truncated = ExposureLedger()
+    att = build_attestation(
+        history=a["hist"], freeze=a["freeze"], run=a["run"], report=a["report"],
+        evaluator_id=EVALUATOR_ID, attested_at="2026-07-16T12:00:00Z", key=KEY,
+        prior_attestation_root=ATT_CHAIN_BASE, exclusions=a["excl"], ledger=truncated,
+        evaluation_ledger=a["evln"], achievability=None,
+    )
+    rep = _certify(a, ledger=truncated, attestation=att)
+    assert not rep.ok and ViolationReason.EXPOSURE_LEDGER_TRUNCATED in _reasons(rep)
+
+
+# R10-3 — an EvaluationRecord's blind_ids must be BOUND to its resolved cohort: a record advertising
+# a falsified (smaller/empty) blind set to dodge the A3 overlap check is EVALUATION_RECORD_UNBOUND.
+def test_r10_3_evaluation_record_blind_ids_bound_to_cohort():
+    a = _entry(vuln=A40, role="blind")
+    b = _entry(vuln=B40, role="blind")
+    v1 = _cohort("v1", [a, b])
+    hist = CohortHistory(versions=[v1])
+    freeze = FreezeManifest(
+        bundle=DetectorBundle(detector_id="d", lockfile_hash="L"), timestamp="2026-07-16T10:00:00Z"
+    )
+    run = _run("s", v1.content_hash, freeze.freeze_hash)
+
+    # a prior record that FALSIFIES its blind set (advertises only 'a', dropping 'b') for a DIFFERENT
+    # subject (so A3's overlap does not fire) — the record's cohort resolves in history, so R10-3
+    # binds its blind_ids to the cohort's actual blind set and rejects the falsification
+    falsified = EvaluationLedger()
+    falsified.record(
+        cohort_content_hash=v1.content_hash, freeze_hash="earlier", subject="other",
+        blind_ids=[a.identity_hash],  # the cohort's ACTUAL blind set is {a, b}
+    )
+    rep = validate(history=hist, run=run, freeze=freeze, prior_evaluations=falsified)
+    assert not rep.ok and ViolationReason.EVALUATION_RECORD_UNBOUND in _reasons(rep)
+
+    # the honest record (blind_ids == the cohort's actual blind set) is accepted
+    honest = EvaluationLedger()
+    honest.record(
+        cohort_content_hash=v1.content_hash, freeze_hash="earlier", subject="other",
+        blind_ids=[a.identity_hash, b.identity_hash],
+    )
+    assert ViolationReason.EVALUATION_RECORD_UNBOUND not in _reasons(
+        validate(history=hist, run=run, freeze=freeze, prior_evaluations=honest)
+    )
+
+
+# R10-4 — the evaluation chain fails closed on the inert short-circuit (matching R8-6 for history):
+# a NON-EMPTY prior_evaluations that "reproduces" the inert empty committed root via the empty prefix
+# is rejected — the committed chain never advanced to record those evals.
+def test_r10_4_evaluation_chain_fails_closed_on_inert_short_circuit(monkeypatch):
+    # bootstrap: an EMPTY ledger + the inert empty committed eval root is the genuine first eval
+    assert _certify(_anchored(monkeypatch)).ok
+
+    # a NON-EMPTY prior_evaluations (referencing an unresolvable cohort + a different subject, so
+    # R10-3 and A3 both skip) presented while the committed eval root is STILL the inert empty root
+    # must NOT reproduce it -> EVALUATED_MORE_THAN_ONCE (no empty-prefix short-circuit past bootstrap)
+    stale = EvaluationLedger()
+    stale.record(
+        cohort_content_hash="an-unresolvable-cohort", freeze_hash="fz", subject="not-codex", blind_ids=[]
+    )
+    a = _anchored(monkeypatch, evln=stale)  # committed eval root defaults to the inert empty root
+    rep = _certify(a)
+    assert not rep.ok and ViolationReason.EVALUATED_MORE_THAN_ONCE in _reasons(rep)
+
+
+# R10-5 — the AdjudicatedPrecision panel + coverage invariants are RE-ENFORCED on the certify path,
+# so a from-storage (model_construct) precision that bypasses the constructor validator is caught.
+def test_r10_5_precision_panel_reenforced_on_certify(monkeypatch):
+    a = _anchored(monkeypatch)
+    assert _certify(a).ok
+    good = a["precision"]
+
+    # a from-storage precision with a BUILDER adjudicator (precision 1.0 with no honest panel)
+    builder_adj = [
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=True, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=True, decision="true-positive"),
+            ],
+        )
+        for p in good.sampled_pairs
+    ]
+    tampered = AdjudicatedPrecision.model_construct(
+        seed=good.seed, sampled_pairs=good.sampled_pairs, pool=good.pool, k=good.k, adjudications=builder_adj,
+    )
+    rep = _certify(a, precision=tampered)
+    assert not rep.ok and ViolationReason.PRECISION_PANEL_INVALID in _reasons(rep)
+
+    # a from-storage precision with PARTIAL coverage (one sampled pair unadjudicated)
+    partial = AdjudicatedPrecision.model_construct(
+        seed=good.seed, sampled_pairs=good.sampled_pairs, pool=good.pool, k=good.k,
+        adjudications=good.adjudications[:-1],
+    )
+    rep2 = _certify(a, precision=partial)
+    assert not rep2.ok and ViolationReason.PRECISION_PANEL_INVALID in _reasons(rep2)
+
+
+# R10-6 — every adjudicator is bound to the committed roster and is independent of the scored
+# subject; a self-asserted role or a non-independent/unrostered adjudicator is ADJUDICATOR_INVALID.
+def test_r10_6_adjudicator_independent_and_rostered(monkeypatch):
+    a = _anchored(monkeypatch)  # subject is "codex"
+    good = a["precision"]
+
+    # an adjudicator whose id equals the scored subject is not independent
+    subj_adj = [
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="codex", is_builder=False, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=True, decision="true-positive"),
+            ],
+        )
+        for p in good.sampled_pairs
+    ]
+    p_subj = AdjudicatedPrecision(
+        seed=good.seed, sampled_pairs=good.sampled_pairs, pool=good.pool, k=good.k, adjudications=subj_adj
+    )
+    rep = _certify(a, precision=p_subj)
+    assert not rep.ok and ViolationReason.ADJUDICATOR_INVALID in _reasons(rep)
+
+    # an UNROSTERED adjudicator (not on the committed roster) is rejected
+    unrostered = [
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="C", is_builder=False, is_curator=False, decision="true-positive"),
+            ],
+        )
+        for p in good.sampled_pairs
+    ]
+    p_unr = AdjudicatedPrecision(
+        seed=good.seed, sampled_pairs=good.sampled_pairs, pool=good.pool, k=good.k, adjudications=unrostered
+    )
+    rep2 = _certify(a, precision=p_unr)
+    assert not rep2.ok and ViolationReason.ADJUDICATOR_INVALID in _reasons(rep2)
+
+    # a self-asserted role that does NOT match the committed roster is rejected (B claims non-curator)
+    lying = [
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="B", is_builder=False, is_curator=False, decision="true-positive"),
+            ],
+        )
+        for p in good.sampled_pairs
+    ]
+    p_lie = AdjudicatedPrecision(
+        seed=good.seed, sampled_pairs=good.sampled_pairs, pool=good.pool, k=good.k, adjudications=lying
+    )
+    rep3 = _certify(a, precision=p_lie)
+    assert not rep3.ok and ViolationReason.ADJUDICATOR_INVALID in _reasons(rep3)
+
+
+# R10-7 — merkle_root domain-separates leaves (0x00) from internal nodes (0x01), so a duplicate-leaf
+# second preimage cannot collide with a shorter honest set (CVE-2012-2459).
+def test_r10_7_merkle_domain_separation_cve_2012_2459():
+    assert merkle_root(["a", "b"]) != merkle_root(["a", "b", "b"])
+    assert merkle_root(["a", "b", "c"]) != merkle_root(["a", "b", "c", "c"])
+    assert merkle_root(["x"]) != merkle_root(["x", "x"])
+    # still order-independent over the same set and membership-sensitive
+    assert merkle_root(["a", "b", "c"]) == merkle_root(["c", "b", "a"])
+    assert merkle_root(["a", "b", "c"]) != merkle_root(["a", "b"])
