@@ -146,10 +146,14 @@ wired into `check`, enforcing:
   decided only by the line-precise sink-probe rule already in `corpus_measure.py`.
   Patched-alert density (flags/KLOC on the fixed tree) is reported as operational
   context and never decides recall. Adjudicated precision requires a blind
-  confusion-pair sample seeded by `hash(cohort_hash, freeze_hash, run_id)`,
-  adjudicated by two non-builder adjudicators (at least one non-curator), blinded
-  to builder identity and expected outcome; **ambiguous counts against precision**;
-  disagreement gets human resolution (Constitution VII).
+  confusion-pair sample that is the CANONICAL deterministic draw from committed,
+  non-grindable state — `sample_confusion_pairs(pool, k, seed)` where the pool and
+  `k` are committed in the frozen bundle and `seed = f(cohort_content_hash,
+  pool_root, k)` — verified against the committed `sample_root` (R8-2/R9-1), so the
+  sample cannot be re-rolled or cherry-picked; each sampled pair is adjudicated
+  exactly once (R11-2) by two DISTINCT non-builder adjudicators (at least one
+  non-curator), blinded to builder identity and expected outcome; **ambiguous
+  counts against precision**; disagreement gets human resolution (Constitution VII).
 
 - **FR-10 — Real-other-finding re-gating.** A patched-tree flag adjudicated
   "real-other-finding" becomes a *local candidate* that must re-enter a fresh
@@ -926,6 +930,22 @@ the committed-state form, never by weakening a check.
     (`model_construct`) duplicate is `PRECISION_PANEL_INVALID` on the certify path; exactly one
     adjudication per sampled pair is required, so `tp/len(adjudications)` cannot be inflated by
     duplicating favorable verdicts. The honest one-per-pair panel certifies.
+81. **(R11-1b/FR-24)** A departure SPLIT across versions — remove a non-guided blind entry under a
+    matched correction event, then re-add the same pinned identity in a later version as a non-blind
+    role — is a `DENOMINATOR_SHRINK`. The guided_fix precondition holds against the TERMINAL head: any
+    identity that was ever blind, survives in the head as a non-blind role, and never carried
+    `guided_fix == True` while blind fails closed, regardless of how many versions the departure spans.
+    A genuine full removal (identity absent from the head) and a guided_fix downgrade stay legitimate.
+
+### Review-hardening acceptance criteria (dual-gate review)
+
+82. **(CR-1)** A precision panel needs at least two DISTINCT adjudicator identities per pair, not
+    merely two verdict entries — one identity double-voting is `ValueError` (constructor) /
+    `PRECISION_PANEL_INVALID` (certify path).
+83. **(CR-2)** An `EvaluationRun` attempt whose `phase` is neither `pre_freeze` nor `post_freeze`
+    (a from-storage `model_construct` bypassing `attempt_evaluation`'s record-time phase guard, which
+    would otherwise be omitted from both attempt lists and escape every blind-access check) is
+    `RUN_INVALID`.
 
 ## Open questions
 

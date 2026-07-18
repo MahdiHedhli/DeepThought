@@ -1450,6 +1450,10 @@ class AdjudicatedPrecision(BaseModel):
                 raise ValueError(f"adjudicated pair {adj.pair_id!r} is not in the seeded sample")
             if len(adj.verdicts) < 2:
                 raise ValueError("each pair needs at least two adjudicators")
+            # CR-1: two verdicts from the SAME adjudicator are one person double-voting, not an
+            # independent panel. Require at least two DISTINCT adjudicator identities per pair.
+            if len({v.adjudicator for v in adj.verdicts}) < 2:
+                raise ValueError("each pair needs at least two DISTINCT adjudicators (one identity cannot double-vote)")
             if any(v.is_builder for v in adj.verdicts):
                 raise ValueError("adjudicators must be non-builders")
             if not any(not v.is_curator for v in adj.verdicts):
@@ -2189,6 +2193,39 @@ def _check_denominator_preservation(
                     "legitimate only for a guided_fix entry (FR-4), regardless of the cohort-correction reason",
                 )
 
+    # R11-1b (SPLIT-TRANSITION / resurrection guard): the authoritative denominator is the HEAD, so
+    # the guided_fix precondition must hold against the TERMINAL head, not merely the adjacent
+    # successor. The adjacent-pair check above catches an IN-PLACE downgrade, but a departure can be
+    # SPLIT across versions to dodge it: remove a non-guided blind MISS under a matched correction
+    # event (a legitimate-looking full removal), then RE-ADD the same pinned identity in a later
+    # version as a softer non-blind role (adding entries is ungated). The entry then survives in the
+    # HEAD as a formerly-blind, non-guided fixture — exactly the state FR-4 forbids — while the head
+    # blind denominator has silently shrunk. Enforce it end-to-end: any identity that was EVER blind,
+    # is present in the head as a NON-blind role, and NEVER carried guided_fix==True while blind is a
+    # DENOMINATOR_SHRINK, no matter how many versions the departure was split across. Full removals
+    # (identity absent from the head) and guided_fix downgrades stay legitimate; a re-add colliding on
+    # identity means the SAME pinned target (identity is content-derived), so this never flags a
+    # genuinely distinct entry.
+    head = history.versions[-1] if history.versions else None
+    if head is not None:
+        ever_blind: set[str] = set()
+        ever_guided_blind: set[str] = set()
+        for cohort in history.versions:
+            for e in cohort.by_role(Role.BLIND):
+                ever_blind.add(e.computed_identity_hash)
+                if e.guided_fix:
+                    ever_guided_blind.add(e.computed_identity_hash)
+        head_blind = {e.computed_identity_hash for e in head.by_role(Role.BLIND)}
+        for identity in sorted(head.identities()):
+            if identity in ever_blind and identity not in head_blind and identity not in ever_guided_blind:
+                report.add(
+                    ViolationReason.DENOMINATOR_SHRINK,
+                    f"{head.version}: entry {identity[:12]} was blind in an earlier version and survives in "
+                    "the head as a non-blind role without ever having guided a fix (guided_fix=False); a "
+                    "blind entry may leave the denominator only via a guided_fix downgrade (FR-4) or a full "
+                    "removal, never by remove-then-readd-as-regression",
+                )
+
 
 def _history_extends(history: CohortHistory, prior: CohortHistory) -> bool:
     """P1a: True iff ``history`` is an APPEND-ONLY extension of ``prior`` — every prior
@@ -2263,6 +2300,16 @@ def _check_freeze_before_evaluation(run: EvaluationRun, report: ContractReport) 
 
 
 def _check_blind_access(run: EvaluationRun, report: ContractReport) -> None:
+    # CR-2: every attempt's phase must be a KNOWN phase. attempt_evaluation rejects an unknown phase
+    # at record time, but a from-storage run (model_construct bypasses it) with an unknown phase would
+    # be omitted from BOTH pre_freeze_attempts and post_freeze_attempts and silently escape every
+    # blind-access, ordering, and retry check. A malformed attempt makes the run unscoreable.
+    for attempt in run.attempts:
+        if attempt.phase not in ("pre_freeze", "post_freeze"):
+            report.add(
+                ViolationReason.RUN_INVALID,
+                f"run {run.run_id}: evaluation attempt has unknown phase {attempt.phase!r}",
+            )
     if run.pre_freeze_attempts:
         report.add(
             ViolationReason.BLIND_ACCESS_PRE_FREEZE,
@@ -2769,6 +2816,10 @@ def _check_precision_panel(
             _panel(f"adjudicated pair {adj.pair_id!r} is not in the seeded sample")
         if len(adj.verdicts) < 2:
             _panel("each pair needs at least two adjudicators")
+        # CR-1: re-enforce DISTINCT adjudicator identities on the certify path (from-storage
+        # model_construct bypasses the constructor) — one identity double-voting is not a panel.
+        if len({v.adjudicator for v in adj.verdicts}) < 2:
+            _panel("each pair needs at least two DISTINCT adjudicators (one identity cannot double-vote)")
         if any(v.is_builder for v in adj.verdicts):
             _panel("adjudicators must be non-builders")
         if not any(not v.is_curator for v in adj.verdicts):

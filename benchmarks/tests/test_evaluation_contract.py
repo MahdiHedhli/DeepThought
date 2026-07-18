@@ -3073,6 +3073,41 @@ def test_r11_1_guided_fix_bound_to_transition_not_reason_label(reason):
     assert validate(history=CohortHistory(versions=[v1g, v2g]), exclusions=excl_g).ok, reason
 
 
+def test_r11_1b_split_transition_readd_as_regression_is_shrink():
+    # SPLIT the departure across versions to dodge the adjacent-pair check: remove a non-guided blind
+    # MISS under a legit ALIAS_DUPE at v1->v2, then RE-ADD the same pinned identity as a regression at
+    # v2->v3 (adding entries is ungated). The entry then survives in the HEAD as a formerly-blind,
+    # non-guided regression while the blind denominator silently shrinks 2->1 — the terminal-head
+    # resurrection guard catches it.
+    a = _entry(vuln=A40, role="blind")
+    c = _entry(vuln=C40, role="blind", guided_fix=False)
+    v1 = _cohort("v1", [a, c])
+    v2 = _cohort("v2", [a], reason="remove c (claimed alias-dupe)", parent="v1")
+    c_reg = c.model_copy(update={"role": "regression"}).sealed()  # SAME pinned identity, softer role
+    v3 = _cohort("v3", [a, c_reg], reason="re-add c as a regression fixture", parent="v2")
+    excl = ExclusionLog(
+        events=[ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity=c.identity_hash, from_version="v1", to_version="v2")]
+    )
+    rep = validate(history=CohortHistory(versions=[v1, v2, v3]), exclusions=excl)
+    assert not rep.ok and ViolationReason.DENOMINATOR_SHRINK in _reasons(rep)
+
+    # a genuine full removal (c never re-added) stays legitimate under the same event.
+    ok = validate(history=CohortHistory(versions=[v1, v2]), exclusions=excl)
+    assert ok.ok, _reasons(ok)
+
+    # a GUIDED entry may take the same split path (FR-4): it carried guided_fix=True while blind, so
+    # its later survival as a regression is a legitimate post-fix downgrade.
+    cg = _entry(vuln=C40, role="blind", guided_fix=True)
+    v1g = _cohort("v1", [a, cg])
+    v2g = _cohort("v2", [a], reason="remove cg", parent="v1")
+    cg_reg = cg.model_copy(update={"role": "regression"}).sealed()
+    v3g = _cohort("v3", [a, cg_reg], reason="re-add cg as regression after it guided a fix", parent="v2")
+    excl_g = ExclusionLog(
+        events=[ExclusionEvent(reason=ExclusionReason.ALIAS_DUPE, entry_identity=cg.identity_hash, from_version="v1", to_version="v2")]
+    )
+    assert validate(history=CohortHistory(versions=[v1g, v2g, v3g]), exclusions=excl_g).ok
+
+
 def test_r11_1_full_removal_unaffected_by_guided_fix():
     # A FULL removal (entry leaves the cohort entirely) of a non-guided blind entry stays
     # legitimate under a matched cohort-correction event — the guided_fix rule is bound to
@@ -3128,3 +3163,61 @@ def test_r11_2_precision_duplicate_reenforced_on_certify(monkeypatch):
     )
     rep = _certify(a, precision=dup)
     assert not rep.ok and ViolationReason.PRECISION_PANEL_INVALID in _reasons(rep)
+
+
+# --------------------------------------------------------------------------- #
+# Review-hardening (CodeRabbit) — CR-1: a precision panel needs two DISTINCT adjudicator
+# identities, not merely two verdict entries (one identity double-voting is not a panel).
+# CR-2: a from-storage EvaluationRun attempt with an unknown phase escapes both attempt
+# lists and every blind-access check; reject it as RUN_INVALID.
+# --------------------------------------------------------------------------- #
+def test_cr1_precision_requires_two_distinct_adjudicators():
+    pool = _pool(4)
+    k = 3
+    seed = precision_sample_seed("h" * 64, pool_root_of(pool), str(k))
+    sampled = sample_confusion_pairs(pool, k, seed)
+    # a "panel" of two verdicts from the SAME adjudicator "A" is one person double-voting.
+    same_person = [
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=True, decision="true-positive"),
+            ],
+        )
+        for p in sampled
+    ]
+    with pytest.raises(ValidationError):
+        AdjudicatedPrecision(seed=seed, sampled_pairs=sampled, pool=pool, k=k, adjudications=same_person)
+
+
+def test_cr1_distinct_adjudicators_reenforced_on_certify(monkeypatch):
+    a = _anchored(monkeypatch)
+    good = a["precision"]
+    same_person = [
+        Adjudication(
+            pair_id=p,
+            verdicts=[
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+                AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=True, decision="true-positive"),
+            ],
+        )
+        for p in good.sampled_pairs
+    ]
+    one_voice = AdjudicatedPrecision.model_construct(
+        seed=good.seed, sampled_pairs=good.sampled_pairs, pool=good.pool, k=good.k, adjudications=same_person,
+    )
+    rep = _certify(a, precision=one_voice)
+    assert not rep.ok and ViolationReason.PRECISION_PANEL_INVALID in _reasons(rep)
+
+
+def test_cr2_unknown_attempt_phase_is_run_invalid():
+    # a from-storage run (model_construct bypasses attempt_evaluation's phase guard) whose attempt
+    # carries an unknown phase would be omitted from BOTH pre/post_freeze_attempts and silently escape
+    # every blind-access check; _check_blind_access rejects it as RUN_INVALID.
+    run = EvaluationRun.model_construct(
+        run_id="r", subject="codex", cohort_content_hash="h" * 64, freeze_hash="f" * 64,
+        attempts=[EvalAttempt.model_construct(phase="mid_freeze", produced_results=True, results_hash="R")],
+    )
+    rep = validate(run=run)
+    assert not rep.ok and ViolationReason.RUN_INVALID in _reasons(rep)

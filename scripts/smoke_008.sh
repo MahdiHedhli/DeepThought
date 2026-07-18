@@ -679,6 +679,44 @@ expect("duplicate-adjudication precision trips PRECISION_PANEL_INVALID", Violati
 print(f"        -> {rep21.summary()}")
 
 print()
+print("== guard 22: R11-1b a SPLIT-TRANSITION (remove-then-readd-as-regression) fails closed ==")
+# Split the departure across versions to dodge the adjacent-pair check: remove a non-guided blind
+# MISS under a legit ALIAS_DUPE at v1->v2, then RE-ADD the same pinned identity as a regression at
+# v2->v3. The entry survives in the HEAD as a formerly-blind, non-guided regression while the blind
+# denominator silently shrinks. The terminal-head resurrection guard catches it.
+s_keep = entry("819a80836e991ca3f427b0e85faca159083d3d40", "client.get(url_spec.geturl()", Role.BLIND)
+s_drop = entry("8ab05d4c36b4720dc3f1f654564745f47c5034cd", "requests.get(url, stream=True)", Role.BLIND)
+sv1 = Cohort(version="v1", entries=[s_keep, s_drop], reason="two blind").sealed()
+sv2 = Cohort(version="v2", entries=[s_keep], reason="remove s_drop (claimed alias-dupe)", parent_version="v1").sealed()
+s_drop_reg = s_drop.model_copy(update={"role": Role.REGRESSION}).sealed()
+sv3 = Cohort(version="v3", entries=[s_keep, s_drop_reg], reason="re-add s_drop as regression", parent_version="v2").sealed()
+split_excl = ExclusionLog(events=[ExclusionEvent(
+    reason=ExclusionReason.ALIAS_DUPE, entry_identity=s_drop.identity_hash, from_version="v1", to_version="v2")])
+rep22 = validate(history=CohortHistory(versions=[sv1, sv2, sv3]), exclusions=split_excl)
+expect("split-transition resurrection trips DENOMINATOR_SHRINK", ViolationReason.DENOMINATOR_SHRINK in rep22.reasons())
+print(f"        -> {rep22.summary()}")
+
+print()
+print("== guard 23: CR-1 a precision panel of one identity double-voting fails closed ==")
+# Two verdicts from the SAME adjudicator are one person double-voting, not an independent panel.
+one_voice_adjs = [
+    Adjudication(pair_id=p, verdicts=[
+        AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=False, decision="true-positive"),
+        AdjudicatorVerdict(adjudicator="A", is_builder=False, is_curator=True, decision="true-positive"),
+    ])
+    for p in sampled
+]
+one_voice = AdjudicatedPrecision.model_construct(
+    seed=SAMPLE_SEED, sampled_pairs=sampled, pool=pool, k=COMMITTED_K, adjudications=one_voice_adjs,
+)
+rep23 = validate(
+    history=history, ledger=ledger, run=run, freeze=freeze, report=report_view,
+    precision=one_voice, prior_evaluations=evaluations, attestation=attestation, strict=True,
+)
+expect("single-identity precision panel trips PRECISION_PANEL_INVALID", ViolationReason.PRECISION_PANEL_INVALID in rep23.reasons())
+print(f"        -> {rep23.summary()}")
+
+print()
 print("== report: blind recall is the headline, four labelled secondaries ==")
 rep = Report(
     blind_recall=RecallReport(rediscovered=3, total=4, patched_alert_density=1.2),
