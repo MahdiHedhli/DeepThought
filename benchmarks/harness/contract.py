@@ -216,6 +216,12 @@ class CommittedGenesisState(BaseModel):
     # curator record and re-sign) cannot certify — parity with history/evaluation. Its bootstrap
     # value is the reproducible empty-ledger root (no committed exposure baseline yet).
     latest_exposure_root: str = _EMPTY_ROOT
+    # Feature 009: the committed root of the append-only ClassManifest history — the SET of classes
+    # that feed the aggregate mean. Given the SAME committed-monotonic treatment as history/eval/
+    # exposure: a presented manifest must reproduce + append-only-extend it (else
+    # CLASS_MANIFEST_TRUNCATED), so a whole class cannot be silently dropped from the headline. Its
+    # bootstrap value is the reproducible empty-ledger root (no committed manifest baseline yet).
+    latest_class_manifest_root: str = _EMPTY_ROOT
     evaluator_id: str
     verify_key: bytes
     # R10-6: the committed adjudicator roster — ``{adjudicator_id: {is_builder, is_curator}}``. The
@@ -224,6 +230,12 @@ class CommittedGenesisState(BaseModel):
     # independent of the scored subject. That the rostered adjudicators are genuinely independent
     # people is the irreducible organizational remainder (documented, alongside key custody).
     adjudicator_roster: dict[str, dict[str, bool]] = Field(default_factory=dict)
+    # Feature 009 (AUDIT-009-2): the committed per-class registry ``{class_id: head_history_root}``.
+    # It fixes each aggregated class's 008 head history root in git-reviewable state so the aggregate
+    # certify binds a per-class attestation to its class INDEPENDENTLY of the operator-supplied
+    # manifest entry (which the operator controls). Empty by default (the genesis-completeness floor
+    # at bootstrap); a production deployment commits the real per-class roots.
+    class_registry: dict[str, str] = Field(default_factory=dict)
 
 
 def _read_committed_config(path: Optional[Path] = None) -> dict:
@@ -250,6 +262,10 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
     # R10-2: the committed ExposureLedger root. An absent value means "no committed exposure
     # baseline yet", i.e. the empty-ledger root (the same reproducible bootstrap sentinel).
     latest_exposure = latest.get("exposure_root") or _EMPTY_ROOT
+    # Feature 009: the committed ClassManifest root. Absent -> the empty-ledger bootstrap sentinel
+    # ("no committed manifest baseline yet"), which any presented manifest extends; truncation
+    # protection engages once a real (non-empty) committed manifest baseline exists.
+    latest_class_manifest = latest.get("class_manifest_root") or _EMPTY_ROOT
     # R8-6: fail closed on an INERT committed HISTORY root. ``_history_reproduces_committed``
     # anchors any prefix that reproduces the committed prior history root, so an inert root
     # (the empty ``chain_root([])`` genesis) would let a TRUNCATED cohort "anchor" against the
@@ -276,6 +292,8 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
         raise ValueError("latest.evaluation_root must be a non-empty string")
     if not isinstance(latest_exposure, str) or not latest_exposure:
         raise ValueError("latest.exposure_root must be a non-empty string")
+    if not isinstance(latest_class_manifest, str) or not latest_class_manifest:
+        raise ValueError("latest.class_manifest_root must be a non-empty string")
     evaluator = data.get("evaluator") or {}
     evaluator_id = evaluator.get("id")
     # F4: the committed value is the ed25519 PUBLIC key (verify_key_pub_hex). The private
@@ -294,15 +312,25 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
             "is_builder": bool(flags.get("is_builder", False)),
             "is_curator": bool(flags.get("is_curator", False)),
         }
+    # Feature 009: normalise the committed per-class registry to ``{class_id: head_history_root}``.
+    raw_registry = data.get("classes") or {}
+    class_registry: dict[str, str] = {}
+    for class_id, entry in raw_registry.items():
+        # accept either a bare root string or a {"head_history_root": ...} object for forward-compat.
+        root = entry.get("head_history_root") if isinstance(entry, dict) else entry
+        if isinstance(root, str) and root:
+            class_registry[class_id] = root
     return CommittedGenesisState(
         genesis_history_root=genesis,
         latest_history_root=latest_history,
         latest_attestation_root=latest_attestation,
         latest_evaluation_root=latest_evaluation,
         latest_exposure_root=latest_exposure,
+        latest_class_manifest_root=latest_class_manifest,
         evaluator_id=evaluator_id,
         verify_key=bytes.fromhex(verify_key_pub_hex),
         adjudicator_roster=roster,
+        class_registry=class_registry,
     )
 
 
@@ -335,12 +363,20 @@ def load_committed_evaluator_id(path: Optional[Path] = None) -> str:
     return load_committed_genesis_state(path).evaluator_id
 
 
+def load_committed_class_manifest_root(path: Optional[Path] = None) -> str:
+    """Feature 009: the committed ClassManifest root the presented manifest must reproduce +
+    append-only-extend. The SET of classes feeding the aggregate mean is thereby COMMITTED
+    monotonic state: an operator cannot present a smaller manifest to drop a weak class."""
+    return load_committed_genesis_state(path).latest_class_manifest_root
+
+
 def advance_committed_root(
     *,
-    history_root: str,
-    attestation_root: str,
-    evaluation_root: str,
-    exposure_root: str,
+    history_root: Optional[str] = None,
+    attestation_root: Optional[str] = None,
+    evaluation_root: Optional[str] = None,
+    exposure_root: Optional[str] = None,
+    class_manifest_root: Optional[str] = None,
     path: Optional[Path] = None,
 ) -> None:
     """Persist the new certified roots to the committed file (R5-2 + F2 + R10-2/R10-4), advancing
@@ -348,14 +384,21 @@ def advance_committed_root(
     including ``evaluation_root`` (F2, evaluate-once) AND ``exposure_root`` (R10-2, curator-set) —
     so BOTH ledgers are COMMITTED monotonic state that advances only through this git-reviewable
     file, with no inert short-circuit left to dodge them. Called by the harness AFTER a successful
-    strict certify. Written atomically (temp + replace)."""
+    strict certify. Written atomically (temp + replace).
+
+    Every root is PRESERVED when omitted (``None``), so a per-class 008 certify advances the four
+    008 roots while a feature-009 aggregate certify advances ``class_manifest_root`` alone — neither
+    disturbs the other's committed state. 008 callers that pass all four roots explicitly are
+    unaffected."""
     p = path or _GENESIS_ROOT_PATH
     data = _read_committed_config(p)
+    prior_latest = data.get("latest") or {}
     data["latest"] = {
-        "history_root": history_root,
-        "attestation_root": attestation_root,
-        "evaluation_root": evaluation_root,
-        "exposure_root": exposure_root,
+        "history_root": history_root if history_root is not None else prior_latest.get("history_root"),
+        "attestation_root": attestation_root if attestation_root is not None else prior_latest.get("attestation_root"),
+        "evaluation_root": evaluation_root if evaluation_root is not None else prior_latest.get("evaluation_root"),
+        "exposure_root": exposure_root if exposure_root is not None else prior_latest.get("exposure_root"),
+        "class_manifest_root": class_manifest_root if class_manifest_root is not None else prior_latest.get("class_manifest_root", _EMPTY_ROOT),
     }
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -607,6 +650,13 @@ class ViolationReason(str, Enum):
     EVALUATION_RECORD_UNBOUND = "evaluation-record-blind-ids-not-bound-to-its-resolved-cohort"
     PRECISION_PANEL_INVALID = "from-storage-precision-panel-or-coverage-invariant-violated"
     ADJUDICATOR_INVALID = "adjudicator-not-independent-or-not-on-the-committed-roster"
+    # Feature 009 — aggregate class-manifest seals: the SET of classes feeding the aggregate mean is
+    # a committed, monotonic manifest, so no whole class can be silently dropped from the headline.
+    CLASS_SILENTLY_DROPPED = "class-left-the-aggregate-manifest-with-no-matching-class-manifest-event"
+    CLASS_ATTESTATION_MISSING = "committed-manifest-class-has-no-present-per-class-attestation"
+    CLASS_ATTESTATION_INVALID = "per-class-attestation-signature-report-hash-or-evaluator-does-not-verify"
+    AGGREGATE_UNVERIFIED = "reported-aggregate-mean-does-not-match-the-recompute-over-the-committed-manifest"
+    CLASS_MANIFEST_TRUNCATED = "presented-class-manifest-does-not-reproduce-the-committed-monotonic-root"
 
 
 class ContractViolation(Exception):
