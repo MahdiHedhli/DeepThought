@@ -1,7 +1,9 @@
 # Feature 009 — Aggregate class-manifest (no class silently dropped from the mean)
 
-> Status: **planning spec** (tracked follow-on from feature 008). Build is test-first on this
-> branch; this document is the scope contract reviewed before the kernel lands.
+> Status: **built, test-first** (tracked follow-on from feature 008). Kernel:
+> `benchmarks/harness/aggregate.py` + the committed-state seam in `contract.py` /
+> `genesis_root.json`; tests: `benchmarks/tests/test_aggregate.py`; demo: `scripts/smoke_009.sh`;
+> threat model: [`threat-model.md`](threat-model.md).
 
 ## Why (the one code-closable residual from 008)
 
