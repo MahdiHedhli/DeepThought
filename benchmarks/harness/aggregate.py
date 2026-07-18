@@ -318,6 +318,22 @@ def certify_aggregate(
     # bootstrap (committed manifest root still empty AND no registry) — the genesis-completeness floor.
     baseline_committed = committed.latest_class_manifest_root != _EMPTY_ROOT
     require_pin = baseline_committed or bool(registry)
+
+    # CR: one signed attestation must not count for TWO classes. Distinct in-mean classes must have
+    # DISTINCT head_history_roots — otherwise a single strong per-class attestation (history_root=r)
+    # satisfies every slot pinned to r. A committed registry (or manifest) mapping two classes to the
+    # same root is malformed; reject it here rather than defer the collision to the org floor.
+    _seen_roots: dict[str, str] = {}
+    for class_id in sorted(head_active):
+        root = head_entries[class_id].head_history_root
+        if root in _seen_roots:
+            report.add(
+                ViolationReason.CLASS_ATTESTATION_INVALID,
+                f"in-mean classes {_seen_roots[root]!r} and {class_id!r} share head_history_root "
+                f"{root[:12]} (one attestation cannot count for two classes)",
+            )
+        else:
+            _seen_roots[root] = class_id
     for class_id in sorted(head_active):
         entry = head_entries[class_id]
         if require_pin:

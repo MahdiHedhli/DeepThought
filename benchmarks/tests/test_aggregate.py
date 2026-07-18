@@ -293,6 +293,18 @@ def test_repoint_swap_with_empty_registry_but_committed_baseline_fails(monkeypat
     assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
 
 
+def test_two_classes_sharing_a_head_history_root_is_invalid(monkeypatch):
+    # CR: one signed attestation must not count for two classes. Two in-mean classes pinned to the
+    # SAME head_history_root (a malformed registry) — the same A attestation would satisfy both — is
+    # rejected rather than counted twice.
+    _install(monkeypatch, class_registry={"A": HA, "B": HA})  # both pinned to HA (malformed)
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HA)])])
+    a_att = _result("A", HA, 2, 2)
+    b_att = CertifiedClassResult(class_id="B", attestation=a_att.attestation, report=_report(2, 2))
+    rep = certify_aggregate(manifest=manifest, results=[a_att, b_att], aggregate=AggregateReport(mean=1.0, n_classes=2))
+    assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
+
+
 def test_aggregate_mean_rejects_inf_nan():
     with pytest.raises(Exception):
         AggregateReport(mean=float("inf"), n_classes=1)
