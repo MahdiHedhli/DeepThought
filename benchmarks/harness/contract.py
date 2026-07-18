@@ -230,6 +230,12 @@ class CommittedGenesisState(BaseModel):
     # independent of the scored subject. That the rostered adjudicators are genuinely independent
     # people is the irreducible organizational remainder (documented, alongside key custody).
     adjudicator_roster: dict[str, dict[str, bool]] = Field(default_factory=dict)
+    # Feature 009 (AUDIT-009-2): the committed per-class registry ``{class_id: head_history_root}``.
+    # It fixes each aggregated class's 008 head history root in git-reviewable state so the aggregate
+    # certify binds a per-class attestation to its class INDEPENDENTLY of the operator-supplied
+    # manifest entry (which the operator controls). Empty by default (the genesis-completeness floor
+    # at bootstrap); a production deployment commits the real per-class roots.
+    class_registry: dict[str, str] = Field(default_factory=dict)
 
 
 def _read_committed_config(path: Optional[Path] = None) -> dict:
@@ -306,6 +312,14 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
             "is_builder": bool(flags.get("is_builder", False)),
             "is_curator": bool(flags.get("is_curator", False)),
         }
+    # Feature 009: normalise the committed per-class registry to ``{class_id: head_history_root}``.
+    raw_registry = data.get("classes") or {}
+    class_registry: dict[str, str] = {}
+    for class_id, entry in raw_registry.items():
+        # accept either a bare root string or a {"head_history_root": ...} object for forward-compat.
+        root = entry.get("head_history_root") if isinstance(entry, dict) else entry
+        if isinstance(root, str) and root:
+            class_registry[class_id] = root
     return CommittedGenesisState(
         genesis_history_root=genesis,
         latest_history_root=latest_history,
@@ -316,6 +330,7 @@ def load_committed_genesis_state(path: Optional[Path] = None) -> CommittedGenesi
         evaluator_id=evaluator_id,
         verify_key=bytes.fromhex(verify_key_pub_hex),
         adjudicator_roster=roster,
+        class_registry=class_registry,
     )
 
 

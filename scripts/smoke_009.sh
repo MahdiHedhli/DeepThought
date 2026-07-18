@@ -115,6 +115,25 @@ rep7 = certify_aggregate(manifest=presented, results=[result("A", ha, 1, 2)],
                          aggregate=AggregateReport(mean=0.5, n_classes=1), committed=committed(root=baseline.root))
 expect("truncated manifest trips CLASS_MANIFEST_TRUNCATED", ViolationReason.CLASS_MANIFEST_TRUNCATED in {v.reason for v in rep7.violations})
 
+print("== guard 8: a fabricated headline over ZERO in-mean classes fails closed (AUDIT-009-1) ==")
+# an all-na head has no in-mean classes; a fabricated mean/n_classes must NOT ride through the
+# recompute (the integrity check is unconditional, not gated on a non-empty in-mean set).
+m_na = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("B", hb, status=ClassStatus.NA)])])
+rep_na = certify_aggregate(manifest=m_na, results=[], aggregate=AggregateReport(mean=42.0, n_classes=999), committed=committed())
+expect("empty-in-mean fabricated headline trips AGGREGATE_UNVERIFIED", ViolationReason.AGGREGATE_UNVERIFIED in {v.reason for v in rep_na.violations})
+
+print("== guard 9: a cross-class swap pinned by the committed class registry fails closed (AUDIT-009-2) ==")
+# weak class B's entry points at strong A's root (ha) with A's genuine signed attestation; the
+# committed registry pins B -> hb, so the operator-controlled manifest binding cannot swap.
+swap = CertifiedClassResult(class_id="B", attestation=result("A", ha, 2, 2).attestation, report=report(2, 2))
+m_swap = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("B", ha)])])
+com_reg = CommittedGenesisState(
+    genesis_history_root="a"*64, latest_history_root="a"*64, latest_attestation_root="b"*64,
+    latest_evaluation_root=_EMPTY_ROOT, latest_exposure_root=_EMPTY_ROOT, latest_class_manifest_root=_EMPTY_ROOT,
+    evaluator_id=EVAL, verify_key=PUB, adjudicator_roster={}, class_registry={"B": hb})
+rep_swap = certify_aggregate(manifest=m_swap, results=[swap], aggregate=AggregateReport(mean=1.0, n_classes=1), committed=com_reg)
+expect("registry-pinned cross-class swap trips CLASS_ATTESTATION_INVALID", ViolationReason.CLASS_ATTESTATION_INVALID in {v.reason for v in rep_swap.violations})
+
 print("== positive: a LOGGED class retirement is allowed (the mean legitimately shrinks) ==")
 events = ClassManifestLog(events=[ClassManifestEvent(class_id="B", reason=ClassCorrectionReason.RETIRED, from_version="v1", to_version="v2")])
 rep8 = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[result("A", ha, 1, 2)], events=events,

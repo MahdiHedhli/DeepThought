@@ -29,6 +29,13 @@ each per-class number tamper-evident; 009 binds the SET of classes that feed the
 | Mean lie | report a mean the per-class rates do not support | the mean + `n_classes` are RECOMPUTED as an exact `Fraction` over the in-mean head classes — else `AGGREGATE_UNVERIFIED` |
 | Padding | add a result for a class not in the head mean | an out-of-mean result is `CLASS_ATTESTATION_INVALID`; the mean is computed only over the committed head active set |
 
+## Adversarial-audit fixes (3-lens red-team, before merge)
+
+| Finding | Bug | Seal |
+|---|---|---|
+| AUDIT-009-1 (empty in-mean, fail-open) | the mean + `n_classes` checks were nested under `if head_active`, so an all-retired / all-na / empty head skipped them and a fabricated `mean=42.0, n_classes=999` certified clean | the headline is validated UNCONDITIONALLY — `n_classes == len(head_active)` always, and an empty in-mean set forces the vacuous `mean == 0.0`; else `AGGREGATE_UNVERIFIED` |
+| AUDIT-009-2 (circular class binding, HIGH) | `att.history_root == entry.head_history_root` is CIRCULAR — the operator controls both sides (set a weak class's manifest `head_history_root` to a strong class's root, attach the strong class's genuine signed attestation), so a high number lands in a weak slot at the empty bootstrap | a committed per-class registry `committed.class_registry {class_id: head_history_root}` pins each class's root in git-reviewable state; when populated (production posture) the manifest entry MUST match it — else `CLASS_ATTESTATION_INVALID`. Post-bootstrap the committed manifest root also pins it via reproduction; the registry closes the bootstrap window. An empty registry is the genesis-completeness floor below |
+
 ## Residual (organizational / git-reviewable — a validator cannot reach these)
 
 Unchanged from 008: (i) genesis-commit completeness — that the FIRST committed manifest is itself

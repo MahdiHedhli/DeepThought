@@ -331,7 +331,22 @@ def certify_aggregate(
             continue
         entry = head_entries[class_id]
         att = r.attestation
-        # bind the attestation to THIS class's committed 008 head (no cross-class swap).
+        # AUDIT-009-2: pin the class -> head_history_root binding to COMMITTED state, not the
+        # operator-supplied manifest entry. Binding only ``att.history_root == entry.head_history_root``
+        # is CIRCULAR — the operator controls both sides (set the weak class's entry.head_history_root
+        # to the strong class's root, then attach the strong class's genuine signed attestation), so a
+        # high-scoring attestation lands in a weak class's slot. The committed per-class registry
+        # ``committed.class_registry`` fixes each class's head_history_root in git-reviewable state;
+        # when it is populated (production posture) the manifest entry MUST match it. (Post-bootstrap
+        # the committed manifest root also pins it via reproduction; the registry closes the bootstrap
+        # window too. An empty registry is the genesis-completeness org floor.)
+        committed_root_for_class = committed.class_registry.get(class_id)
+        if committed_root_for_class is not None and entry.head_history_root != committed_root_for_class:
+            report.add(
+                ViolationReason.CLASS_ATTESTATION_INVALID,
+                f"class {class_id!r}: manifest head_history_root is not the committed class-registry value",
+            )
+        # bind the attestation to THIS class's head (no cross-class swap within the presented set).
         if att.history_root != entry.head_history_root:
             report.add(
                 ViolationReason.CLASS_ATTESTATION_INVALID,
@@ -355,8 +370,24 @@ def certify_aggregate(
                 f"class {class_id!r}: attestation signature does not verify against the committed evaluator key",
             )
 
-    # 5. RECOMPUTE the mean over the in-mean head classes as an exact fraction; never trust it.
-    if head_active and all(c in results_by_class for c in head_active):
+    # 5. RECOMPUTE the headline UNCONDITIONALLY; never trust it. AUDIT-009-1: the n_classes and mean
+    # checks must fire even when the in-mean set is EMPTY — an integrity guard whose only firing path
+    # is the non-empty branch fails OPEN on an all-retired / all-na / empty head, letting a fabricated
+    # mean + n_classes certify clean.
+    if aggregate.n_classes != len(head_active):
+        report.add(
+            ViolationReason.AGGREGATE_UNVERIFIED,
+            f"reported n_classes {aggregate.n_classes} != in-mean head class count {len(head_active)}",
+        )
+    if not head_active:
+        # An aggregate over zero in-mean classes has no headline: the vacuous mean is 0.0. Any other
+        # value is a fabrication (there are no rates to average).
+        if abs(aggregate.mean - 0.0) > 1e-9:
+            report.add(
+                ViolationReason.AGGREGATE_UNVERIFIED,
+                f"reported mean {aggregate.mean} over ZERO in-mean classes must be 0.0 (no rates to average)",
+            )
+    elif all(c in results_by_class for c in head_active):
         rates = [
             Fraction(results_by_class[c].report.blind_recall.rediscovered, results_by_class[c].report.blind_recall.total)
             if results_by_class[c].report.blind_recall.total > 0
@@ -364,16 +395,13 @@ def certify_aggregate(
             for c in sorted(head_active)
         ]
         mean_frac = sum(rates, Fraction(0)) / len(rates)
-        if aggregate.n_classes != len(head_active):
-            report.add(
-                ViolationReason.AGGREGATE_UNVERIFIED,
-                f"reported n_classes {aggregate.n_classes} != in-mean head class count {len(head_active)}",
-            )
         if abs(float(mean_frac) - aggregate.mean) > 1e-9:
             report.add(
                 ViolationReason.AGGREGATE_UNVERIFIED,
                 f"reported mean {aggregate.mean} != recomputed mean {float(mean_frac):.12f} "
                 f"over {len(head_active)} in-mean classes",
             )
+    # else: an in-mean class is missing its result (CLASS_ATTESTATION_MISSING already fired); the
+    # mean cannot be recomputed and the report is already not ok.
 
     return report

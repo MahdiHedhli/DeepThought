@@ -50,7 +50,7 @@ def _reasons(report):
     return {v.reason for v in report.violations}
 
 
-def _committed(manifest_root=_EMPTY_ROOT):
+def _committed(manifest_root=_EMPTY_ROOT, class_registry=None):
     return CommittedGenesisState(
         genesis_history_root="a" * 64,
         latest_history_root="a" * 64,
@@ -61,6 +61,7 @@ def _committed(manifest_root=_EMPTY_ROOT):
         evaluator_id=EVAL,
         verify_key=PUB,
         adjudicator_roster={},
+        class_registry=class_registry or {},
     )
 
 
@@ -281,6 +282,75 @@ def test_honest_extension_of_committed_root_certifies():
     presented = ClassManifestHistory(versions=[v1, v2])
     rep = certify_aggregate(
         manifest=presented, results=[_result("A", ha, 1, 2), _result("B", hb, 1, 1)],
+        aggregate=AggregateReport(mean=0.75, n_classes=2), committed=committed,
+    )
+    assert rep.ok, _reasons(rep)
+
+
+# --------------------------------------------------------------------------- #
+# AUDIT-009-1: an empty in-mean set must NOT let a fabricated mean/n_classes ride through — the
+# headline recompute is validated UNCONDITIONALLY, not only on the non-empty branch.
+# --------------------------------------------------------------------------- #
+def test_empty_in_mean_fabricated_headline_is_unverified():
+    hb = "2" * 64
+    # a single-version manifest whose only class is NA (zero in-mean), fabricated headline
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", hb, status=ClassStatus.NA)])])
+    rep = certify_aggregate(
+        manifest=manifest, results=[], aggregate=AggregateReport(mean=42.0, n_classes=999), committed=_committed(),
+    )
+    assert not rep.ok and ViolationReason.AGGREGATE_UNVERIFIED in _reasons(rep)
+
+
+def test_empty_in_mean_head_via_logged_retirement_fabricated_headline_is_unverified():
+    ha, hb = "1" * 64, "2" * 64
+    v1 = ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])
+    v2 = ClassManifest(version="v2", entries=[_entry("A", ha, status=ClassStatus.NA), _entry("B", hb, status=ClassStatus.NA)], parent_version="v1")
+    events = ClassManifestLog(events=[
+        ClassManifestEvent(class_id="A", reason=ClassCorrectionReason.NA, from_version="v1", to_version="v2"),
+        ClassManifestEvent(class_id="B", reason=ClassCorrectionReason.NA, from_version="v1", to_version="v2"),
+    ])
+    rep = certify_aggregate(
+        manifest=ClassManifestHistory(versions=[v1, v2]), results=[], events=events,
+        aggregate=AggregateReport(mean=1.0, n_classes=2), committed=_committed(),  # both fabricated
+    )
+    assert not rep.ok and ViolationReason.AGGREGATE_UNVERIFIED in _reasons(rep)
+
+
+def test_empty_in_mean_honest_vacuous_headline_certifies():
+    hb = "2" * 64
+    # honest vacuous aggregate: zero in-mean classes -> n_classes 0, mean 0.0
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", hb, status=ClassStatus.NA)])])
+    rep = certify_aggregate(
+        manifest=manifest, results=[], aggregate=AggregateReport(mean=0.0, n_classes=0), committed=_committed(),
+    )
+    assert rep.ok, _reasons(rep)
+
+
+# --------------------------------------------------------------------------- #
+# AUDIT-009-2: the class -> head_history_root binding is pinned to the COMMITTED registry, so the
+# circular manifest-controlled binding cannot swap a strong class's attestation onto a weak slot.
+# --------------------------------------------------------------------------- #
+def test_cross_class_swap_via_matching_manifest_entry_is_pinned_by_registry():
+    ha, hb = "1" * 64, "2" * 64
+    # attacker sets weak class B's manifest entry.head_history_root = ha (strong A's root) and attaches
+    # A's genuine signed attestation+report (2/2). The history_root == entry check passes (both ha),
+    # but the committed registry pins B -> hb, so it fails closed.
+    a_result = _result("A", ha, 2, 2)
+    swapped = CertifiedClassResult(class_id="B", attestation=a_result.attestation, report=_report(2, 2))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", ha)])])  # B pointed at ha
+    committed = _committed(class_registry={"B": hb})  # committed truth: B -> hb
+    rep = certify_aggregate(
+        manifest=manifest, results=[swapped], aggregate=AggregateReport(mean=1.0, n_classes=1), committed=committed,
+    )
+    assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
+
+
+def test_registry_matching_honest_aggregate_certifies():
+    ha, hb = "1" * 64, "2" * 64
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])])
+    committed = _committed(class_registry={"A": ha, "B": hb})
+    rep = certify_aggregate(
+        manifest=manifest, results=[_result("A", ha, 1, 2), _result("B", hb, 1, 1)],
         aggregate=AggregateReport(mean=0.75, n_classes=2), committed=committed,
     )
     assert rep.ok, _reasons(rep)
