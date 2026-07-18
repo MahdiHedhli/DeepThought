@@ -79,7 +79,10 @@ self-graded benchmarks — **not a model leaderboard**. Caveats that swamp any r
 
 - The absolute numbers come from a small, caveated internal corpus.
 - Reasoning-effort settings differ per harness and are not comparable knobs.
-- One model declined the task on safety-policy grounds rather than engaging.
+- One model (Gemini 3.1 Pro) declined on safety-policy grounds, including after a
+  narrowly-scoped retry. Its outcome is recorded as a **policy refusal** — a
+  task-completion failure with detector score **N/A**, never a measured 0. A 0
+  would falsely imply a detector was built and evaluated; nothing was.
 - A scoring artifact (a stray module shadowing the standard library) briefly produced a wrong
   number before it was caught and corrected — a reminder that these harnesses need scrutiny.
 
