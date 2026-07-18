@@ -33,20 +33,27 @@ organizational (key custody, adjudicator independence, genesis completeness, led
 - **Committed-monotonic root (P-B parity with 008's ledgers)** — add `latest_class_manifest_root`
   to `genesis_root.json` / `CommittedGenesisState`, advanced by `advance_committed_root` on a
   successful aggregate certify, and reproduced + append-only-extended on certify (NO inert/empty
-  short-circuit). A class may leave the aggregate ONLY via a logged, versioned `ClassManifestEvent`
-  (a cohort-correction analogue: `RETIRED` / `MERGED` / `RECLASSED`), never by silent omission.
-- **`certify_aggregate(manifest, per_class_attestations, …)`** —
+  short-circuit). A class may leave the aggregate ONLY via a COMMITTED `ClassExit` (reason `RETIRED`
+  / `MERGED` / `RECLASSED` / `NA`) EMBEDDED in the manifest version that performs the departure —
+  folded into the version `content_hash` and thus the committed, reproduced manifest root, so it
+  cannot be a caller-supplied, unsigned event (which an operator could fabricate). Never a silent
+  omission.
+- **`certify_aggregate(manifest, results, aggregate)`** — the committed trust anchor is loaded
+  INTERNALLY (008 R5: never a caller argument, so the scored party cannot substitute the evaluator
+  key / manifest root / registry) —
   1. the presented manifest reproduces + append-only-extends the committed
-     `latest_class_manifest_root` (else `CLASS_MANIFEST_TRUNCATED` / `GENESIS_UNANCHORED`);
-  2. EVERY class in the committed manifest has a present, valid, signed per-class `Attestation`
-     bound to that class's committed head cohort (else `CLASS_ATTESTATION_MISSING`);
-  3. the reported aggregate mean is RECOMPUTED from the per-class certified blind
-     numerators/denominators over the FULL manifest set (else `AGGREGATE_UNVERIFIED`);
-  4. a class dropped from the presented set without a matched `ClassManifestEvent` →
-     `CLASS_SILENTLY_DROPPED`.
-- **N/A taxonomy for classes** — a class scored N/A (e.g., a genuine no-detector class) must be a
-  logged, versioned `ClassManifestEvent`, symmetric to 008 R8-4's per-class `POLICY_REFUSAL`, so
-  the aggregate denominator (# classes) cannot shrink silently either.
+     `latest_class_manifest_root` (else `CLASS_MANIFEST_TRUNCATED`);
+  2. EVERY in-mean head class has a present per-class result (else `CLASS_ATTESTATION_MISSING`), is
+     PINNED in the committed per-class registry `class_registry` and its manifest entry matches that
+     pin, and carries a signature verifying against the committed evaluator key + id + a `report_hash`
+     reproducing its report (else `CLASS_ATTESTATION_INVALID`);
+  3. the reported mean + class count are RECOMPUTED (exact `Fraction`) over the in-mean head classes,
+     UNCONDITIONALLY — an empty in-mean set forces the vacuous `mean == 0.0` (else `AGGREGATE_UNVERIFIED`);
+  4. a class that left the mean without a committed `ClassExit` → `CLASS_SILENTLY_DROPPED` (adjacent
+     pair + terminal head, so a split remove-then-readd cannot launder it).
+- **N/A taxonomy for classes** — a class scored N/A (e.g., a genuine no-detector class) must carry a
+  committed `ClassExit` (reason `NA`), symmetric to 008 R8-4's per-class `POLICY_REFUSAL`, so the
+  aggregate denominator (# classes) cannot shrink silently either.
 
 ## Non-goals / residual after 009
 
@@ -61,7 +68,7 @@ organizational (key custody, adjudicator independence, genesis completeness, led
 
 1. An honest aggregate over the full committed manifest with all per-class attestations present
    certifies, and the recomputed mean equals the reported mean.
-2. Dropping a class from the presented aggregate set with no `ClassManifestEvent` →
+2. Dropping a class from the presented aggregate set with no committed `ClassExit` →
    `CLASS_SILENTLY_DROPPED`.
 3. A class present in the committed manifest with a missing/invalid per-class attestation →
    `CLASS_ATTESTATION_MISSING`.
@@ -70,7 +77,7 @@ organizational (key custody, adjudicator independence, genesis completeness, led
 5. A presented manifest that does not reproduce + extend the committed `latest_class_manifest_root`
    → `CLASS_MANIFEST_TRUNCATED` / `GENESIS_UNANCHORED`; a successful certify advances the committed
    root.
-6. A class scored N/A without a matched, versioned `ClassManifestEvent` fails closed.
+6. A class scored N/A without a committed `ClassExit` fails closed.
 
 ## Discipline
 

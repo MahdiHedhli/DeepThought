@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Feature 009 — aggregate class-manifest smoke.
 #
-# Demonstrates one HONEST aggregate certify plus each guard failing closed with a typed reason:
-# the SET of classes feeding the headline mean is a committed, monotonic manifest, every in-mean
-# class carries a valid signed per-class attestation, and the reported mean is RECOMPUTED. So no
-# whole class can be silently dropped from the headline to inflate the mean.
+# One HONEST aggregate certify plus each guard failing closed with a typed reason. The SET of classes
+# feeding the headline mean is a committed, monotonic manifest; the trust anchor is loaded from
+# COMMITTED state (never a caller argument); every in-mean class is registry-pinned and signed; every
+# departure is authorized by a COMMITTED ClassExit; and the mean is RECOMPUTED. So no whole class can
+# be silently dropped from the headline to inflate the mean.
 #
 # SAFETY (Article III): nothing fetched or target-side is executed — the aggregate binds already
 # certified per-class attestations and the committed manifest; it re-runs no detector.
@@ -18,14 +19,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path("benchmarks/harness").resolve()))
 
+import aggregate
 from contract import (
     Attestation, CommittedGenesisState, Report, RecallReport, ViolationReason,
     _EMPTY_ROOT, ed25519_public_key, leaf_hash, sign,
 )
 from aggregate import (
-    AggregateReport, CertifiedClassResult, ClassManifest, ClassManifestEntry,
-    ClassManifestEvent, ClassManifestHistory, ClassManifestLog, ClassStatus,
-    ClassCorrectionReason, certify_aggregate,
+    AggregateReport, CertifiedClassResult, ClassCorrectionReason, ClassExit, ClassManifest,
+    ClassManifestEntry, ClassManifestHistory, ClassStatus, certify_aggregate,
 )
 
 KEY = hashlib.sha256(b"deepthought-aggregate-smoke-ed25519-seed/v1").digest()
@@ -34,6 +35,7 @@ WRONG = hashlib.sha256(b"attacker").digest()
 EVAL = "curator-not-subject"
 Z = "0" * 64
 TS = "2026-07-18T00:00:00Z"
+ha, hb = "1" * 64, "2" * 64
 
 failures = []
 def expect(label, ok):
@@ -41,12 +43,16 @@ def expect(label, ok):
     if not ok:
         failures.append(label)
 
-def committed(root=_EMPTY_ROOT):
-    return CommittedGenesisState(
+def install(manifest_root=_EMPTY_ROOT, registry=None):
+    """008 R5: certify_aggregate loads committed state INTERNALLY; the smoke reassigns the loader
+    with a hermetic state (a caller cannot pass the trust anchor in)."""
+    state = CommittedGenesisState(
         genesis_history_root="a"*64, latest_history_root="a"*64, latest_attestation_root="b"*64,
         latest_evaluation_root=_EMPTY_ROOT, latest_exposure_root=_EMPTY_ROOT,
-        latest_class_manifest_root=root, evaluator_id=EVAL, verify_key=PUB, adjudicator_roster={},
+        latest_class_manifest_root=manifest_root, evaluator_id=EVAL, verify_key=PUB,
+        adjudicator_roster={}, class_registry=registry or {},
     )
+    aggregate.load_committed_genesis_state = lambda path=None: state
 
 def report(red, tot):
     return Report(blind_recall=RecallReport(rediscovered=red, total=tot),
@@ -65,85 +71,66 @@ def result(cid, hroot, red, tot, *, key=KEY, ev=EVAL, rep=None):
 def entry(cid, hroot, status=ClassStatus.ACTIVE):
     return ClassManifestEntry(class_id=cid, cwe="CWE-1", detector_id="d", head_history_root=hroot, status=status)
 
-ha, hb = "1"*64, "2"*64
-
-print("== positive: honest aggregate over a committed manifest certifies ==")
+print("== positive: honest aggregate over a committed, registry-pinned manifest certifies ==")
+install(registry={"A": ha, "B": hb})
 manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("A", ha), entry("B", hb)])])
 results = [result("A", ha, 1, 2), result("B", hb, 1, 1)]  # 0.5 and 1.0 -> mean 0.75
-rep0 = certify_aggregate(manifest=manifest, results=results, aggregate=AggregateReport(mean=0.75, n_classes=2), committed=committed())
+rep0 = certify_aggregate(manifest=manifest, results=results, aggregate=AggregateReport(mean=0.75, n_classes=2))
 expect("honest aggregate certifies", rep0.ok)
 print(f"        -> ok={rep0.ok} reasons={sorted(v.reason.value for v in rep0.violations)}")
 
 print("== guard 1: an inflated reported mean fails closed ==")
-rep1 = certify_aggregate(manifest=manifest, results=results, aggregate=AggregateReport(mean=0.90, n_classes=2), committed=committed())
+rep1 = certify_aggregate(manifest=manifest, results=results, aggregate=AggregateReport(mean=0.9, n_classes=2))
 expect("inflated mean trips AGGREGATE_UNVERIFIED", ViolationReason.AGGREGATE_UNVERIFIED in {v.reason for v in rep1.violations})
 
-print("== guard 2: dropping a class with NO event fails closed ==")
+print("== guard 2: dropping a class with NO committed exit fails closed ==")
 v1 = ClassManifest(version="v1", entries=[entry("A", ha), entry("B", hb)])
 v2 = ClassManifest(version="v2", entries=[entry("A", ha)], parent_version="v1")
-rep2 = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[result("A", ha, 1, 2)],
-                         aggregate=AggregateReport(mean=0.5, n_classes=1), committed=committed())
+rep2 = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[result("A", ha, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=1))
 expect("silent class drop trips CLASS_SILENTLY_DROPPED", ViolationReason.CLASS_SILENTLY_DROPPED in {v.reason for v in rep2.violations})
 
-print("== guard 3: a status-downgrade out of the mean with NO event fails closed ==")
-v2d = ClassManifest(version="v2", entries=[entry("A", ha), entry("B", hb, status=ClassStatus.NA)], parent_version="v1")
-rep3 = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2d]), results=[result("A", ha, 1, 2)],
-                         aggregate=AggregateReport(mean=0.5, n_classes=1), committed=committed())
-expect("status-downgrade drop trips CLASS_SILENTLY_DROPPED", ViolationReason.CLASS_SILENTLY_DROPPED in {v.reason for v in rep3.violations})
-
-print("== guard 4: an in-mean class with a missing attestation fails closed ==")
-rep4 = certify_aggregate(manifest=manifest, results=[result("A", ha, 1, 2)],
-                         aggregate=AggregateReport(mean=0.75, n_classes=2), committed=committed())
-expect("missing per-class attestation trips CLASS_ATTESTATION_MISSING", ViolationReason.CLASS_ATTESTATION_MISSING in {v.reason for v in rep4.violations})
-
-print("== guard 5: a cross-class attestation swap fails closed ==")
-swapped = CertifiedClassResult(class_id="B", attestation=result("A", ha, 2, 2).attestation, report=report(2, 2))
-m_b = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("B", hb)])])
-rep5 = certify_aggregate(manifest=m_b, results=[swapped], aggregate=AggregateReport(mean=1.0, n_classes=1), committed=committed())
-expect("cross-class attestation swap trips CLASS_ATTESTATION_INVALID", ViolationReason.CLASS_ATTESTATION_INVALID in {v.reason for v in rep5.violations})
-
-print("== guard 6: a forged signature fails closed ==")
-m_a = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("A", ha)])])
-rep6 = certify_aggregate(manifest=m_a, results=[result("A", ha, 1, 2, key=WRONG)],
-                         aggregate=AggregateReport(mean=0.5, n_classes=1), committed=committed())
-expect("forged signature trips CLASS_ATTESTATION_INVALID", ViolationReason.CLASS_ATTESTATION_INVALID in {v.reason for v in rep6.violations})
-
-print("== guard 7: a truncated manifest vs a real committed root fails closed ==")
-baseline = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("A", ha), entry("B", hb)])])
-presented = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("A", ha)])])
-rep7 = certify_aggregate(manifest=presented, results=[result("A", ha, 1, 2)],
-                         aggregate=AggregateReport(mean=0.5, n_classes=1), committed=committed(root=baseline.root))
-expect("truncated manifest trips CLASS_MANIFEST_TRUNCATED", ViolationReason.CLASS_MANIFEST_TRUNCATED in {v.reason for v in rep7.violations})
-
-print("== guard 8: a fabricated headline over ZERO in-mean classes fails closed (AUDIT-009-1) ==")
-# an all-na head has no in-mean classes; a fabricated mean/n_classes must NOT ride through the
-# recompute (the integrity check is unconditional, not gated on a non-empty in-mean set).
-m_na = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("B", hb, status=ClassStatus.NA)])])
-rep_na = certify_aggregate(manifest=m_na, results=[], aggregate=AggregateReport(mean=42.0, n_classes=999), committed=committed())
-expect("empty-in-mean fabricated headline trips AGGREGATE_UNVERIFIED", ViolationReason.AGGREGATE_UNVERIFIED in {v.reason for v in rep_na.violations})
-
-print("== guard 9: a cross-class swap pinned by the committed class registry fails closed (AUDIT-009-2) ==")
-# weak class B's entry points at strong A's root (ha) with A's genuine signed attestation; the
-# committed registry pins B -> hb, so the operator-controlled manifest binding cannot swap.
+print("== guard 3: a cross-class swap re-pointed to a strong root, pinned by the registry, fails closed ==")
 swap = CertifiedClassResult(class_id="B", attestation=result("A", ha, 2, 2).attestation, report=report(2, 2))
 m_swap = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("B", ha)])])
-com_reg = CommittedGenesisState(
-    genesis_history_root="a"*64, latest_history_root="a"*64, latest_attestation_root="b"*64,
-    latest_evaluation_root=_EMPTY_ROOT, latest_exposure_root=_EMPTY_ROOT, latest_class_manifest_root=_EMPTY_ROOT,
-    evaluator_id=EVAL, verify_key=PUB, adjudicator_roster={}, class_registry={"B": hb})
-rep_swap = certify_aggregate(manifest=m_swap, results=[swap], aggregate=AggregateReport(mean=1.0, n_classes=1), committed=com_reg)
-expect("registry-pinned cross-class swap trips CLASS_ATTESTATION_INVALID", ViolationReason.CLASS_ATTESTATION_INVALID in {v.reason for v in rep_swap.violations})
+install(registry={"B": hb})
+rep3 = certify_aggregate(manifest=m_swap, results=[swap], aggregate=AggregateReport(mean=1.0, n_classes=1))
+expect("registry-pinned cross-class swap trips CLASS_ATTESTATION_INVALID", ViolationReason.CLASS_ATTESTATION_INVALID in {v.reason for v in rep3.violations})
 
-print("== positive: a LOGGED class retirement is allowed (the mean legitimately shrinks) ==")
-events = ClassManifestLog(events=[ClassManifestEvent(class_id="B", reason=ClassCorrectionReason.RETIRED, from_version="v1", to_version="v2")])
-rep8 = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[result("A", ha, 1, 2)], events=events,
-                         aggregate=AggregateReport(mean=0.5, n_classes=1), committed=committed())
-expect("logged retirement certifies", rep8.ok)
+print("== guard 4: an in-mean class absent from the registry fails closed ==")
+install(registry={"A": ha})  # B omitted
+m_ab = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("A", ha), entry("B", hb)])])
+rep4 = certify_aggregate(manifest=m_ab, results=[result("A", ha, 1, 2), result("B", hb, 1, 1)], aggregate=AggregateReport(mean=0.75, n_classes=2))
+expect("unpinned in-mean class trips CLASS_ATTESTATION_INVALID", ViolationReason.CLASS_ATTESTATION_INVALID in {v.reason for v in rep4.violations})
+
+print("== guard 5: a forged signature fails closed ==")
+install(registry={"A": ha})
+m_a = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("A", ha)])])
+rep5 = certify_aggregate(manifest=m_a, results=[result("A", ha, 1, 2, key=WRONG)], aggregate=AggregateReport(mean=0.5, n_classes=1))
+expect("forged signature trips CLASS_ATTESTATION_INVALID", ViolationReason.CLASS_ATTESTATION_INVALID in {v.reason for v in rep5.violations})
+
+print("== guard 6: a truncated manifest vs a real committed root fails closed ==")
+baseline = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("A", ha), entry("B", hb)])])
+install(manifest_root=baseline.root, registry={"A": ha, "B": hb})
+presented = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("A", ha)])])
+rep6 = certify_aggregate(manifest=presented, results=[result("A", ha, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=1))
+expect("truncated manifest trips CLASS_MANIFEST_TRUNCATED", ViolationReason.CLASS_MANIFEST_TRUNCATED in {v.reason for v in rep6.violations})
+
+print("== guard 7: a fabricated headline over ZERO in-mean classes fails closed ==")
+install()
+m_na = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[entry("B", hb, status=ClassStatus.NA)])])
+rep7 = certify_aggregate(manifest=m_na, results=[], aggregate=AggregateReport(mean=1.0, n_classes=999))
+expect("empty-in-mean fabricated headline trips AGGREGATE_UNVERIFIED", ViolationReason.AGGREGATE_UNVERIFIED in {v.reason for v in rep7.violations})
+
+print("== positive: a COMMITTED class retirement is allowed (the mean legitimately shrinks) ==")
+install(registry={"A": ha, "B": hb})
+v2e = ClassManifest(version="v2", entries=[entry("A", ha)], exits=[ClassExit(class_id="B", reason=ClassCorrectionReason.RETIRED)], parent_version="v1")
+rep8 = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2e]), results=[result("A", ha, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=1))
+expect("committed retirement certifies", rep8.ok)
 print(f"        -> ok={rep8.ok} reasons={sorted(v.reason.value for v in rep8.violations)}")
 
 print()
 if failures:
     print(f"SMOKE 009 FAILED: {len(failures)} check(s): {failures}")
     sys.exit(1)
-print("SMOKE 009 OK: the aggregate mean is a total function of the committed class set — no class can be silently dropped, every in-mean class is signed, and the mean is recomputed.")
+print("SMOKE 009 OK: the aggregate mean is a total function of the committed class set — trust anchor loaded from committed state, no class silently dropped, every in-mean class registry-pinned + signed, mean recomputed.")
 PYEOF

@@ -36,6 +36,18 @@ each per-class number tamper-evident; 009 binds the SET of classes that feed the
 | AUDIT-009-1 (empty in-mean, fail-open) | the mean + `n_classes` checks were nested under `if head_active`, so an all-retired / all-na / empty head skipped them and a fabricated `mean=42.0, n_classes=999` certified clean | the headline is validated UNCONDITIONALLY — `n_classes == len(head_active)` always, and an empty in-mean set forces the vacuous `mean == 0.0`; else `AGGREGATE_UNVERIFIED` |
 | AUDIT-009-2 (circular class binding, HIGH) | `att.history_root == entry.head_history_root` is CIRCULAR — the operator controls both sides (set a weak class's manifest `head_history_root` to a strong class's root, attach the strong class's genuine signed attestation), so a high number lands in a weak slot at the empty bootstrap | a committed per-class registry `committed.class_registry {class_id: head_history_root}` pins each class's root in git-reviewable state; when populated (production posture) the manifest entry MUST match it — else `CLASS_ATTESTATION_INVALID`. Post-bootstrap the committed manifest root also pins it via reproduction; the registry closes the bootstrap window. An empty registry is the genesis-completeness floor below |
 
+## Dual-gate review fixes (CodeRabbit — three Criticals the 3-lens audit missed)
+
+The adversarial audit passed `committed=` and trusted the event log, so it did not attack those
+surfaces. CodeRabbit did, and was right:
+
+| Finding | Bug | Seal |
+|---|---|---|
+| CR-A (Critical) | `certify_aggregate` took `committed` as a CALLER argument — a caller could pass their own evaluator key + manifest root and self-sign every result | the committed trust anchor is loaded INTERNALLY via `load_committed_genesis_state()` (008 R5: "verifications RUN from committed state, never passed in"); there is no `committed` parameter. Tests monkeypatch the loader |
+| CR-B (Critical) | manifest events were a caller-supplied, unsigned, uncommitted `ClassManifestLog` — an operator could fabricate a `(B, v1, v2)` retirement to drop any class | authorizations are now `ClassExit` entries EMBEDDED in the manifest version that performs the departure, folded into the version `content_hash` (and thus the committed, reproduced manifest root). There is no caller event log; a fabricated exit changes the manifest root |
+| CR-C (Critical) | the registry pin was applied only to classes the registry contained — a class ABSENT from the registry was waved through, reopening the swap | every in-mean class MUST be pinned in the committed registry (when a registry exists); an unpinned in-mean class is `CLASS_ATTESTATION_INVALID`. An entirely empty registry is the documented bootstrap floor |
+| CR-D (Major) | `AggregateReport.mean` allowed inf/nan and out-of-range values | `mean` is `Field(ge=0.0, le=1.0, allow_inf_nan=False)` |
+
 ## Residual (organizational / git-reviewable — a validator cannot reach these)
 
 Unchanged from 008: (i) genesis-commit completeness — that the FIRST committed manifest is itself

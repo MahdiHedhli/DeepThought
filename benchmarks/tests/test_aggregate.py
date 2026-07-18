@@ -1,9 +1,11 @@
 """Tests for feature 009 — the aggregate class-manifest.
 
 The aggregate certify binds the SET of classes feeding the headline mean to a committed, monotonic
-manifest, requires every in-mean class to carry a valid signed per-class attestation, and RECOMPUTES
-the mean. These tests assert the honest aggregate certifies and every guard fails closed with a typed
-reason. Hermetic: a fixed test ed25519 key + a directly-constructed committed state; no network.
+manifest, loads its trust anchor from COMMITTED state (never a caller argument), requires every
+in-mean class to be registry-pinned and to carry a valid signed per-class attestation, authorizes
+every departure via a COMMITTED ClassExit embedded in the manifest, and RECOMPUTES the mean. These
+tests assert the honest aggregate certifies and every guard fails closed. Hermetic: a fixed test
+ed25519 key + a monkeypatched committed-state loader; no network.
 """
 
 import hashlib
@@ -14,6 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "harness"))
 
+import aggregate  # noqa: E402  (module handle for monkeypatching the committed-state loader)
 from contract import (  # noqa: E402
     Attestation,
     CommittedGenesisState,
@@ -28,13 +31,12 @@ from contract import (  # noqa: E402
 from aggregate import (  # noqa: E402
     AggregateReport,
     CertifiedClassResult,
+    ClassCorrectionReason,
+    ClassExit,
     ClassManifest,
     ClassManifestEntry,
-    ClassManifestEvent,
     ClassManifestHistory,
-    ClassManifestLog,
     ClassStatus,
-    ClassCorrectionReason,
     certify_aggregate,
 )
 
@@ -44,14 +46,17 @@ WRONG_KEY = hashlib.sha256(b"attacker-aggregate-seed").digest()
 EVAL = "curator-not-subject"
 Z = "0" * 64
 TS = "2026-07-18T00:00:00Z"
+HA, HB = "1" * 64, "2" * 64
 
 
 def _reasons(report):
     return {v.reason for v in report.violations}
 
 
-def _committed(manifest_root=_EMPTY_ROOT, class_registry=None):
-    return CommittedGenesisState(
+def _install(monkeypatch, manifest_root=_EMPTY_ROOT, class_registry=None):
+    """008 R5: certify_aggregate loads committed state INTERNALLY. Tests monkeypatch the loader with
+    a hermetic state, so a caller can NEVER substitute the trust anchor."""
+    state = CommittedGenesisState(
         genesis_history_root="a" * 64,
         latest_history_root="a" * 64,
         latest_attestation_root="b" * 64,
@@ -63,6 +68,8 @@ def _committed(manifest_root=_EMPTY_ROOT, class_registry=None):
         adjudicator_roster={},
         class_registry=class_registry or {},
     )
+    monkeypatch.setattr(aggregate, "load_committed_genesis_state", lambda path=None: state)
+    return state
 
 
 def _report(rediscovered, total):
@@ -75,8 +82,6 @@ def _report(rediscovered, total):
 
 
 def _result(class_id, head_history_root, rediscovered, total, *, sign_key=KEY, evaluator_id=EVAL, report=None):
-    """A per-class certified result whose attestation binds ``head_history_root`` + the report and
-    verifies against ``PUB`` (unless a wrong ``sign_key`` / ``report`` is injected to break a bind)."""
     rep = report if report is not None else _report(rediscovered, total)
     att = Attestation(
         history_root=head_history_root, exclusion_root=Z, exposure_root=Z, evaluation_root=Z,
@@ -85,7 +90,6 @@ def _result(class_id, head_history_root, rediscovered, total, *, sign_key=KEY, e
         attested_at=TS, prior_attestation_root=Z, signature="",
     )
     att = att.model_copy(update={"signature": sign(att.attestation_root, sign_key)})
-    # the result carries `rep` for the mean; pass a DIFFERENT report to break the report_hash bind.
     return CertifiedClassResult(class_id=class_id, attestation=att, report=rep)
 
 
@@ -93,264 +97,183 @@ def _entry(class_id, head_history_root, status=ClassStatus.ACTIVE):
     return ClassManifestEntry(class_id=class_id, cwe="CWE-1", detector_id="d", head_history_root=head_history_root, status=status)
 
 
+def _reg(**kw):
+    return dict(kw)
+
+
 # --------------------------------------------------------------------------- #
-# Honest path
+# Honest path + committed-state loading (008 R5)
 # --------------------------------------------------------------------------- #
-def test_honest_aggregate_certifies():
-    ha, hb = "1" * 64, "2" * 64
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])])
-    results = [_result("A", ha, 1, 2), _result("B", hb, 1, 1)]  # rates 0.5 and 1.0 -> mean 0.75
-    agg = AggregateReport(mean=0.75, n_classes=2)
-    rep = certify_aggregate(manifest=manifest, results=results, aggregate=agg, committed=_committed())
+def test_honest_aggregate_certifies(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA, B=HB))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])])
+    results = [_result("A", HA, 1, 2), _result("B", HB, 1, 1)]  # 0.5 and 1.0 -> 0.75
+    rep = certify_aggregate(manifest=manifest, results=results, aggregate=AggregateReport(mean=0.75, n_classes=2))
     assert rep.ok, _reasons(rep)
 
 
-def test_wrong_reported_mean_unverified():
-    ha, hb = "1" * 64, "2" * 64
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])])
-    results = [_result("A", ha, 1, 2), _result("B", hb, 1, 1)]  # true mean 0.75
-    agg = AggregateReport(mean=0.90, n_classes=2)  # inflated
-    rep = certify_aggregate(manifest=manifest, results=results, aggregate=agg, committed=_committed())
+def test_certify_loads_committed_state_internally_no_caller_anchor(monkeypatch):
+    # a caller CANNOT substitute the trust anchor — certify_aggregate takes no `committed`/`events`
+    # argument. Even with a self-minted key, the attestation must verify against the COMMITTED key.
+    _install(monkeypatch, class_registry=_reg(A=HA))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA)])])
+    self_signed = _result("A", HA, 2, 2, sign_key=WRONG_KEY)  # signed with a non-committed key
+    rep = certify_aggregate(manifest=manifest, results=[self_signed], aggregate=AggregateReport(mean=1.0, n_classes=1))
+    assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
+
+
+def test_wrong_reported_mean_unverified(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA, B=HB))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])])
+    results = [_result("A", HA, 1, 2), _result("B", HB, 1, 1)]
+    rep = certify_aggregate(manifest=manifest, results=results, aggregate=AggregateReport(mean=0.9, n_classes=2))
     assert not rep.ok and ViolationReason.AGGREGATE_UNVERIFIED in _reasons(rep)
 
 
-def test_wrong_n_classes_unverified():
-    ha = "1" * 64
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha)])])
-    rep = certify_aggregate(
-        manifest=manifest, results=[_result("A", ha, 1, 2)],
-        aggregate=AggregateReport(mean=0.5, n_classes=2), committed=_committed(),
-    )
+def test_wrong_n_classes_unverified(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA)])])
+    rep = certify_aggregate(manifest=manifest, results=[_result("A", HA, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=2))
     assert not rep.ok and ViolationReason.AGGREGATE_UNVERIFIED in _reasons(rep)
 
 
 # --------------------------------------------------------------------------- #
-# The core guarantee: no class silently dropped from the mean
+# No class silently dropped from the mean — authorized only by a COMMITTED exit
 # --------------------------------------------------------------------------- #
-def test_drop_class_without_event_is_silently_dropped():
-    ha, hb = "1" * 64, "2" * 64
-    v1 = ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])
-    v2 = ClassManifest(version="v2", entries=[_entry("A", ha)], parent_version="v1")  # B dropped, NO event
-    manifest = ClassManifestHistory(versions=[v1, v2])
-    rep = certify_aggregate(
-        manifest=manifest, results=[_result("A", ha, 1, 2)],
-        aggregate=AggregateReport(mean=0.5, n_classes=1), committed=_committed(),
-    )
+def test_drop_class_without_exit_is_silently_dropped(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA, B=HB))
+    v1 = ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])
+    v2 = ClassManifest(version="v2", entries=[_entry("A", HA)], parent_version="v1")  # B dropped, NO exit
+    rep = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[_result("A", HA, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=1))
     assert not rep.ok and ViolationReason.CLASS_SILENTLY_DROPPED in _reasons(rep)
 
 
-def test_drop_class_with_matching_event_is_allowed():
-    ha, hb = "1" * 64, "2" * 64
-    v1 = ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])
-    v2 = ClassManifest(version="v2", entries=[_entry("A", ha)], parent_version="v1")
-    manifest = ClassManifestHistory(versions=[v1, v2])
-    events = ClassManifestLog(events=[ClassManifestEvent(class_id="B", reason=ClassCorrectionReason.RETIRED, from_version="v1", to_version="v2")])
-    rep = certify_aggregate(
-        manifest=manifest, results=[_result("A", ha, 1, 2)], events=events,
-        aggregate=AggregateReport(mean=0.5, n_classes=1), committed=_committed(),
-    )
+def test_drop_class_with_committed_exit_is_allowed(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA, B=HB))
+    v1 = ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])
+    v2 = ClassManifest(version="v2", entries=[_entry("A", HA)], exits=[ClassExit(class_id="B", reason=ClassCorrectionReason.RETIRED)], parent_version="v1")
+    rep = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[_result("A", HA, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=1))
     assert rep.ok, _reasons(rep)
 
 
-def test_status_downgrade_without_event_is_silently_dropped():
-    ha, hb = "1" * 64, "2" * 64
-    v1 = ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])
-    # B kept but moved out of the mean (active -> na) with NO event
-    v2 = ClassManifest(version="v2", entries=[_entry("A", ha), _entry("B", hb, status=ClassStatus.NA)], parent_version="v1")
-    rep = certify_aggregate(
-        manifest=ClassManifestHistory(versions=[v1, v2]), results=[_result("A", ha, 1, 2)],
-        aggregate=AggregateReport(mean=0.5, n_classes=1), committed=_committed(),
-    )
+def test_status_downgrade_without_exit_is_silently_dropped(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA, B=HB))
+    v1 = ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])
+    v2 = ClassManifest(version="v2", entries=[_entry("A", HA), _entry("B", HB, status=ClassStatus.NA)], parent_version="v1")
+    rep = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[_result("A", HA, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=1))
     assert not rep.ok and ViolationReason.CLASS_SILENTLY_DROPPED in _reasons(rep)
 
 
-def test_split_transition_readd_as_retired_is_silently_dropped():
-    # remove B (with a RETIRED event), then re-add B as retired a version later (ungated add) — B
-    # leaves the mean; the terminal-head guard catches the split even though a per-pair event exists
-    # only for the removal, not for the resurrection.
-    ha, hb = "1" * 64, "2" * 64
-    v1 = ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])
-    v2 = ClassManifest(version="v2", entries=[_entry("A", ha)], parent_version="v1")
-    v3 = ClassManifest(version="v3", entries=[_entry("A", ha), _entry("B", hb, status=ClassStatus.RETIRED)], parent_version="v2")
-    events = ClassManifestLog(events=[ClassManifestEvent(class_id="B", reason=ClassCorrectionReason.RETIRED, from_version="v1", to_version="v2")])
-    rep = certify_aggregate(
-        manifest=ClassManifestHistory(versions=[v1, v2, v3]), results=[_result("A", ha, 1, 2)], events=events,
-        aggregate=AggregateReport(mean=0.5, n_classes=1), committed=_committed(),
-    )
-    # B is present in head as retired (out of mean) but has a logged event, so per-pair passes; the
-    # terminal-head guard still requires an event for B (it has one) — this asserts the HONEST
-    # split (event present) is allowed, and the next test asserts the un-eventful split fails.
-    assert rep.ok, _reasons(rep)
-
-
-def test_split_transition_without_any_event_is_silently_dropped():
-    ha, hb = "1" * 64, "2" * 64
-    v1 = ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])
-    v2 = ClassManifest(version="v2", entries=[_entry("A", ha), _entry("B", hb, status=ClassStatus.RETIRED)], parent_version="v1")
-    # B moved out of the mean with NO event anywhere
-    rep = certify_aggregate(
-        manifest=ClassManifestHistory(versions=[v1, v2]), results=[_result("A", ha, 1, 2)],
-        aggregate=AggregateReport(mean=0.5, n_classes=1), committed=_committed(),
-    )
+def test_split_readd_out_of_mean_without_any_exit_is_silently_dropped(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA, B=HB))
+    v1 = ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])
+    v2 = ClassManifest(version="v2", entries=[_entry("A", HA), _entry("B", HB, status=ClassStatus.RETIRED)], parent_version="v1")
+    rep = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[_result("A", HA, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=1))
     assert not rep.ok and ViolationReason.CLASS_SILENTLY_DROPPED in _reasons(rep)
 
 
 # --------------------------------------------------------------------------- #
-# Per-class attestation integrity
+# Per-class attestation integrity + registry pin
 # --------------------------------------------------------------------------- #
-def test_missing_per_class_attestation():
-    ha, hb = "1" * 64, "2" * 64
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])])
-    rep = certify_aggregate(  # B has no result
-        manifest=manifest, results=[_result("A", ha, 1, 2)],
-        aggregate=AggregateReport(mean=0.75, n_classes=2), committed=_committed(),
-    )
+def test_missing_per_class_attestation(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA, B=HB))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])])
+    rep = certify_aggregate(manifest=manifest, results=[_result("A", HA, 1, 2)], aggregate=AggregateReport(mean=0.75, n_classes=2))
     assert not rep.ok and ViolationReason.CLASS_ATTESTATION_MISSING in _reasons(rep)
 
 
-def test_tampered_report_breaks_report_hash():
-    ha = "1" * 64
-    good = _result("A", ha, 1, 2)
-    # swap in a HIGHER-recall report the attestation never committed
+def test_tampered_report_breaks_report_hash(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA))
+    good = _result("A", HA, 1, 2)
     tampered = CertifiedClassResult(class_id="A", attestation=good.attestation, report=_report(2, 2))
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha)])])
-    rep = certify_aggregate(
-        manifest=manifest, results=[tampered],
-        aggregate=AggregateReport(mean=1.0, n_classes=1), committed=_committed(),
-    )
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA)])])
+    rep = certify_aggregate(manifest=manifest, results=[tampered], aggregate=AggregateReport(mean=1.0, n_classes=1))
     assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
 
 
-def test_cross_class_attestation_swap():
-    ha, hb = "1" * 64, "2" * 64
-    # class B's slot presented with class A's attestation (history_root ha != entry hb)
-    a_att = _result("A", ha, 2, 2).attestation
-    a_report = _report(2, 2)
-    swapped = CertifiedClassResult(class_id="B", attestation=a_att, report=a_report)
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", hb)])])
-    rep = certify_aggregate(
-        manifest=manifest, results=[swapped],
-        aggregate=AggregateReport(mean=1.0, n_classes=1), committed=_committed(),
-    )
+def test_forged_signature(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA)])])
+    rep = certify_aggregate(manifest=manifest, results=[_result("A", HA, 1, 2, sign_key=WRONG_KEY)], aggregate=AggregateReport(mean=0.5, n_classes=1))
     assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
 
 
-def test_forged_signature():
-    ha = "1" * 64
-    forged = _result("A", ha, 1, 2, sign_key=WRONG_KEY)
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha)])])
-    rep = certify_aggregate(
-        manifest=manifest, results=[forged],
-        aggregate=AggregateReport(mean=0.5, n_classes=1), committed=_committed(),
-    )
+def test_wrong_evaluator_id(monkeypatch):
+    _install(monkeypatch, class_registry=_reg(A=HA))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA)])])
+    rep = certify_aggregate(manifest=manifest, results=[_result("A", HA, 1, 2, evaluator_id="the-subject")], aggregate=AggregateReport(mean=0.5, n_classes=1))
     assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
 
 
-def test_wrong_evaluator_id():
-    ha = "1" * 64
-    bad = _result("A", ha, 1, 2, evaluator_id="the-subject")
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha)])])
-    rep = certify_aggregate(
-        manifest=manifest, results=[bad],
-        aggregate=AggregateReport(mean=0.5, n_classes=1), committed=_committed(),
-    )
+def test_cross_class_swap_pinned_by_registry(monkeypatch):
+    # weak class B's entry re-pointed at strong A's root (HA) with A's genuine signed attestation.
+    # att.history_root == entry.head_history_root would pass, but the committed registry pins B -> HB.
+    _install(monkeypatch, class_registry=_reg(B=HB))
+    swapped = CertifiedClassResult(class_id="B", attestation=_result("A", HA, 2, 2).attestation, report=_report(2, 2))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", HA)])])
+    rep = certify_aggregate(manifest=manifest, results=[swapped], aggregate=AggregateReport(mean=1.0, n_classes=1))
+    assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
+
+
+def test_in_mean_class_absent_from_registry_is_invalid(monkeypatch):
+    # a partial registry (A pinned, B omitted) must NOT wave B through — an unpinned in-mean class
+    # reopens the swap, so it fails closed.
+    _install(monkeypatch, class_registry=_reg(A=HA))
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])])
+    rep = certify_aggregate(manifest=manifest, results=[_result("A", HA, 1, 2), _result("B", HB, 1, 1)], aggregate=AggregateReport(mean=0.75, n_classes=2))
+    assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
+
+
+def test_appended_version_repointing_a_class_is_pinned(monkeypatch):
+    # AUDIT/CR: an APPENDED version tries to re-point B.head_history_root to A's root and submit A's
+    # attestation under B. The committed registry pins B -> HB, so the appended re-point fails closed.
+    _install(monkeypatch, class_registry=_reg(A=HA, B=HB))
+    v1 = ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])
+    v2 = ClassManifest(version="v2", entries=[_entry("A", HA), _entry("B", HA)], parent_version="v1")  # B re-pointed to HA
+    swapped_b = CertifiedClassResult(class_id="B", attestation=_result("A", HA, 2, 2).attestation, report=_report(2, 2))
+    rep = certify_aggregate(manifest=ClassManifestHistory(versions=[v1, v2]), results=[_result("A", HA, 2, 2), swapped_b], aggregate=AggregateReport(mean=1.0, n_classes=2))
     assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
 
 
 # --------------------------------------------------------------------------- #
 # Committed-monotonic manifest root
 # --------------------------------------------------------------------------- #
-def test_manifest_truncation_against_a_real_committed_root():
-    ha, hb = "1" * 64, "2" * 64
-    # committed baseline had {A, B}; present a fresh single-version manifest with only A
-    committed_baseline = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])])
-    committed = _committed(manifest_root=committed_baseline.root)
-    presented = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha)])])  # drops B, wrong root
-    rep = certify_aggregate(
-        manifest=presented, results=[_result("A", ha, 1, 2)],
-        aggregate=AggregateReport(mean=0.5, n_classes=1), committed=committed,
-    )
+def test_manifest_truncation_against_a_real_committed_root(monkeypatch):
+    baseline = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])])
+    _install(monkeypatch, manifest_root=baseline.root, class_registry=_reg(A=HA, B=HB))
+    presented = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", HA)])])  # drops B, wrong root
+    rep = certify_aggregate(manifest=presented, results=[_result("A", HA, 1, 2)], aggregate=AggregateReport(mean=0.5, n_classes=1))
     assert not rep.ok and ViolationReason.CLASS_MANIFEST_TRUNCATED in _reasons(rep)
 
 
-def test_honest_extension_of_committed_root_certifies():
-    ha, hb = "1" * 64, "2" * 64
-    v1 = ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])
-    committed = _committed(manifest_root=ClassManifestHistory(versions=[v1]).root)
-    # extend with an appended version that keeps both classes in the mean
-    v2 = ClassManifest(version="v2", entries=[_entry("A", ha), _entry("B", hb)], parent_version="v1")
+def test_honest_extension_of_committed_root_certifies(monkeypatch):
+    v1 = ClassManifest(version="v1", entries=[_entry("A", HA), _entry("B", HB)])
+    _install(monkeypatch, manifest_root=ClassManifestHistory(versions=[v1]).root, class_registry=_reg(A=HA, B=HB))
+    v2 = ClassManifest(version="v2", entries=[_entry("A", HA), _entry("B", HB)], parent_version="v1")
     presented = ClassManifestHistory(versions=[v1, v2])
-    rep = certify_aggregate(
-        manifest=presented, results=[_result("A", ha, 1, 2), _result("B", hb, 1, 1)],
-        aggregate=AggregateReport(mean=0.75, n_classes=2), committed=committed,
-    )
+    rep = certify_aggregate(manifest=presented, results=[_result("A", HA, 1, 2), _result("B", HB, 1, 1)], aggregate=AggregateReport(mean=0.75, n_classes=2))
     assert rep.ok, _reasons(rep)
 
 
 # --------------------------------------------------------------------------- #
-# AUDIT-009-1: an empty in-mean set must NOT let a fabricated mean/n_classes ride through — the
-# headline recompute is validated UNCONDITIONALLY, not only on the non-empty branch.
+# Empty in-mean set: the headline is validated UNCONDITIONALLY
 # --------------------------------------------------------------------------- #
-def test_empty_in_mean_fabricated_headline_is_unverified():
-    hb = "2" * 64
-    # a single-version manifest whose only class is NA (zero in-mean), fabricated headline
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", hb, status=ClassStatus.NA)])])
-    rep = certify_aggregate(
-        manifest=manifest, results=[], aggregate=AggregateReport(mean=42.0, n_classes=999), committed=_committed(),
-    )
+def test_empty_in_mean_fabricated_headline_is_unverified(monkeypatch):
+    _install(monkeypatch)
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", HB, status=ClassStatus.NA)])])
+    rep = certify_aggregate(manifest=manifest, results=[], aggregate=AggregateReport(mean=1.0, n_classes=999))
     assert not rep.ok and ViolationReason.AGGREGATE_UNVERIFIED in _reasons(rep)
 
 
-def test_empty_in_mean_head_via_logged_retirement_fabricated_headline_is_unverified():
-    ha, hb = "1" * 64, "2" * 64
-    v1 = ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])
-    v2 = ClassManifest(version="v2", entries=[_entry("A", ha, status=ClassStatus.NA), _entry("B", hb, status=ClassStatus.NA)], parent_version="v1")
-    events = ClassManifestLog(events=[
-        ClassManifestEvent(class_id="A", reason=ClassCorrectionReason.NA, from_version="v1", to_version="v2"),
-        ClassManifestEvent(class_id="B", reason=ClassCorrectionReason.NA, from_version="v1", to_version="v2"),
-    ])
-    rep = certify_aggregate(
-        manifest=ClassManifestHistory(versions=[v1, v2]), results=[], events=events,
-        aggregate=AggregateReport(mean=1.0, n_classes=2), committed=_committed(),  # both fabricated
-    )
-    assert not rep.ok and ViolationReason.AGGREGATE_UNVERIFIED in _reasons(rep)
-
-
-def test_empty_in_mean_honest_vacuous_headline_certifies():
-    hb = "2" * 64
-    # honest vacuous aggregate: zero in-mean classes -> n_classes 0, mean 0.0
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", hb, status=ClassStatus.NA)])])
-    rep = certify_aggregate(
-        manifest=manifest, results=[], aggregate=AggregateReport(mean=0.0, n_classes=0), committed=_committed(),
-    )
+def test_empty_in_mean_honest_vacuous_headline_certifies(monkeypatch):
+    _install(monkeypatch)
+    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", HB, status=ClassStatus.NA)])])
+    rep = certify_aggregate(manifest=manifest, results=[], aggregate=AggregateReport(mean=0.0, n_classes=0))
     assert rep.ok, _reasons(rep)
 
 
-# --------------------------------------------------------------------------- #
-# AUDIT-009-2: the class -> head_history_root binding is pinned to the COMMITTED registry, so the
-# circular manifest-controlled binding cannot swap a strong class's attestation onto a weak slot.
-# --------------------------------------------------------------------------- #
-def test_cross_class_swap_via_matching_manifest_entry_is_pinned_by_registry():
-    ha, hb = "1" * 64, "2" * 64
-    # attacker sets weak class B's manifest entry.head_history_root = ha (strong A's root) and attaches
-    # A's genuine signed attestation+report (2/2). The history_root == entry check passes (both ha),
-    # but the committed registry pins B -> hb, so it fails closed.
-    a_result = _result("A", ha, 2, 2)
-    swapped = CertifiedClassResult(class_id="B", attestation=a_result.attestation, report=_report(2, 2))
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("B", ha)])])  # B pointed at ha
-    committed = _committed(class_registry={"B": hb})  # committed truth: B -> hb
-    rep = certify_aggregate(
-        manifest=manifest, results=[swapped], aggregate=AggregateReport(mean=1.0, n_classes=1), committed=committed,
-    )
-    assert not rep.ok and ViolationReason.CLASS_ATTESTATION_INVALID in _reasons(rep)
-
-
-def test_registry_matching_honest_aggregate_certifies():
-    ha, hb = "1" * 64, "2" * 64
-    manifest = ClassManifestHistory(versions=[ClassManifest(version="v1", entries=[_entry("A", ha), _entry("B", hb)])])
-    committed = _committed(class_registry={"A": ha, "B": hb})
-    rep = certify_aggregate(
-        manifest=manifest, results=[_result("A", ha, 1, 2), _result("B", hb, 1, 1)],
-        aggregate=AggregateReport(mean=0.75, n_classes=2), committed=committed,
-    )
-    assert rep.ok, _reasons(rep)
+def test_aggregate_mean_rejects_inf_nan():
+    with pytest.raises(Exception):
+        AggregateReport(mean=float("inf"), n_classes=1)
+    with pytest.raises(Exception):
+        AggregateReport(mean=2.0, n_classes=1)  # out of [0,1]
