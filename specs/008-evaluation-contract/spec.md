@@ -946,6 +946,12 @@ the committed-state form, never by weakening a check.
     (a from-storage `model_construct` bypassing `attempt_evaluation`'s record-time phase guard, which
     would otherwise be omitted from both attempt lists and escape every blind-access check) is
     `RUN_INVALID`.
+84. **(CR-3, R10-1 hardening)** `verifier._module_source_hashes` hashes the WHOLE detector bundle: a
+    single-module detector yields one `{basename: sha256}` entry (behaviour preserved), while a
+    PACKAGE detector yields the hash of every `.py` file in the package tree keyed by package-relative
+    path — so a swapped non-`__init__` submodule changes the bundle hash and is
+    `DETECTOR_BUNDLE_UNVERIFIED`. Every resolved source path must reside within the benchmarks root
+    (a symlink/crafted origin escaping it fails closed).
 
 ## Open questions
 

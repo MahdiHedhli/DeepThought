@@ -374,3 +374,58 @@ def test_recompute_matches_manifest_on_one_real_pinned_pair():
 
     recomputed = recompute_rediscovered([entry], fetch_fn=corpus_measure.fetch, scan_fn=scan_source)
     assert recomputed == {entry.computed_identity_hash}
+
+
+# --------------------------------------------------------------------------- #
+# R10-1 hardening (gemini review): _module_source_hashes must hash the WHOLE detector
+# bundle. A single-module detector -> one entry (behaviour preserved); a PACKAGE detector
+# -> every .py in the tree (so a swapped non-__init__ submodule cannot slip past the freeze
+# binding); any resolved source path outside the benchmarks root fails closed.
+# --------------------------------------------------------------------------- #
+def _mk_module(tmp_path, monkeypatch, rel, body="scan_source = None\n"):
+    """Create a source file under a monkeypatched benchmarks root, importable by name."""
+    monkeypatch.setattr(verifier, "_BENCHMARKS_DIR", str(tmp_path))
+    if str(tmp_path) not in sys.path:
+        sys.path.insert(0, str(tmp_path))
+    p = tmp_path / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    import importlib
+    importlib.invalidate_caches()
+
+
+def test_module_source_hashes_single_module_one_entry(tmp_path, monkeypatch):
+    _mk_module(tmp_path, monkeypatch, "solodet_x.py")
+    hashes = verifier._module_source_hashes("solodet_x")
+    assert list(hashes) == ["solodet_x.py"] and len(hashes) == 1
+
+
+def test_module_source_hashes_package_hashes_whole_tree(tmp_path, monkeypatch):
+    # a package detector: __init__.py + a helper submodule. BOTH must be hashed, keyed by
+    # package-relative path — a swap of the helper alone must change the bundle hash.
+    _mk_module(tmp_path, monkeypatch, "pkgdet_x/__init__.py", "from .helper import scan_source\n")
+    (tmp_path / "pkgdet_x" / "helper.py").write_text("def scan_source(*a, **k):\n    return set()\n", encoding="utf-8")
+    import importlib
+    importlib.invalidate_caches()
+    hashes = verifier._module_source_hashes("pkgdet_x")
+    assert set(hashes) == {"pkgdet_x/__init__.py", "pkgdet_x/helper.py"}
+    before = dict(hashes)
+    (tmp_path / "pkgdet_x" / "helper.py").write_text("def scan_source(*a, **k):\n    return {'x'}\n", encoding="utf-8")
+    after = verifier._module_source_hashes("pkgdet_x")
+    assert after["pkgdet_x/helper.py"] != before["pkgdet_x/helper.py"]  # swapped submodule caught
+    assert after["pkgdet_x/__init__.py"] == before["pkgdet_x/__init__.py"]
+
+
+def test_module_source_hashes_rejects_source_outside_benchmarks_root(tmp_path, monkeypatch):
+    # module lives in tmp_path but the benchmarks root is a SUBDIR that does not contain it ->
+    # the resolved source escapes the root and fails closed.
+    (tmp_path / "escapee.py").write_text("scan_source = None\n", encoding="utf-8")
+    sub = tmp_path / "root_sub"
+    sub.mkdir()
+    monkeypatch.setattr(verifier, "_BENCHMARKS_DIR", str(sub))
+    if str(tmp_path) not in sys.path:
+        sys.path.insert(0, str(tmp_path))
+    import importlib
+    importlib.invalidate_caches()
+    with pytest.raises(KeyError):
+        verifier._module_source_hashes("escapee")

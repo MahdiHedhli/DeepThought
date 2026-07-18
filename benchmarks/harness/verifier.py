@@ -174,17 +174,42 @@ def _load_scan_source(module_name: str) -> ScanFn:
 
 
 def _module_source_hashes(module_name: str) -> dict[str, str]:
-    """R10-1 (trust CODE HASHES, not names): recompute the CONTENT HASH of a committed detector
-    module's SOURCE FILE. Returns ``{basename: sha256(source_bytes)}`` for the resolved module.
-    SAFETY (Article III): the analyzer module's own source is read as TEXT and hashed — it is NOT
+    """R10-1 (trust CODE HASHES, not names): recompute the CONTENT HASH of a committed detector's
+    SOURCE. For a single-module detector this is ``{basename: sha256(source_bytes)}``. For a PACKAGE
+    detector (a directory with ``__init__.py``) it is the hash of EVERY ``.py`` file in the package
+    tree, keyed by package-relative POSIX path (sorted) — so a swapped NON-``__init__`` submodule
+    cannot slip past the freeze binding: the whole executable bundle is hashed, not just the entry
+    file. Every resolved source path is asserted to reside within the benchmarks root, so a symlink
+    or crafted origin cannot make the hash read code outside the reviewed tree (no traversal).
+    SAFETY (Article III): the analyzer's own source is read as TEXT and hashed — it is NOT
     imported/executed here, and no fetched or target code is run."""
     if _BENCHMARKS_DIR not in sys.path:
         sys.path.insert(0, _BENCHMARKS_DIR)
     spec = importlib.util.find_spec(module_name)
     if spec is None or not spec.origin:
         raise KeyError(f"detector module {module_name!r} has no resolvable source file to hash")
-    source = Path(spec.origin).read_text(encoding="utf-8")
-    return {Path(spec.origin).name: blob_sha256(source)}
+    root = Path(_BENCHMARKS_DIR).resolve()
+
+    def _contained(p: Path) -> Path:
+        """Resolve ``p`` and require it to live under the benchmarks root (else fail closed)."""
+        rp = p.resolve()
+        if rp != root and not rp.is_relative_to(root):
+            raise KeyError(f"detector source {rp} escapes the benchmarks root {root}")
+        return rp
+
+    # A package exposes submodule search locations; hash its WHOLE .py tree, not just __init__.py.
+    if spec.submodule_search_locations:
+        pkg_dir = _contained(Path(next(iter(spec.submodule_search_locations))))
+        hashes: dict[str, str] = {}
+        for py in sorted(pkg_dir.rglob("*.py")):
+            cp = _contained(py)
+            rel = cp.relative_to(pkg_dir.parent).as_posix()  # package-relative, stable across machines
+            hashes[rel] = blob_sha256(cp.read_text(encoding="utf-8"))
+        if not hashes:
+            raise KeyError(f"detector package {module_name!r} has no .py source to hash")
+        return hashes
+    origin = _contained(Path(spec.origin))
+    return {origin.name: blob_sha256(origin.read_text(encoding="utf-8"))}
 
 
 DETECTOR_REGISTRY: dict[str, Callable[[], ScanFn]] = {
