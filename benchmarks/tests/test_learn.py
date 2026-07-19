@@ -88,6 +88,27 @@ def test_scan_path_reads_source_never_executes_it(tmp_path):
     assert not marker.exists(), "learn must not execute scanned source"
 
 
+def test_scan_path_prunes_excluded_directories(tmp_path):
+    # a vuln file inside an excluded dir (node_modules) must NOT be scanned — pruned during traversal.
+    (tmp_path / "app.py").write_text(_TARVULN)
+    nm = tmp_path / "node_modules" / "pkg"
+    nm.mkdir(parents=True)
+    (nm / "also_vuln.py").write_text(_TARVULN)
+    detectors, _ = learn.load_detectors()
+    findings, coverage = learn.scan_path(tmp_path, detectors)
+    files = {f["file"] for f in findings}
+    assert any("app.py" in f for f in files)
+    assert not any("node_modules" in f for f in files)  # pruned
+    assert coverage["scanned"] == 1  # only app.py
+
+
+def test_coverage_reports_detector_errors_key(tmp_path):
+    (tmp_path / "ok.py").write_text(_BENIGN)
+    detectors, _ = learn.load_detectors()
+    _findings, coverage = learn.scan_path(tmp_path, detectors)
+    assert coverage["detector_errors"] == 0  # clean run, no swallowed detector failures
+
+
 def test_render_includes_teaching_and_methodology_and_coverage():
     out = io.StringIO()
     finding = {"rule": "DT-SSRF-TAINT", "cwe": "CWE-918", "file": "a.py", "line": 3, "col": 5,

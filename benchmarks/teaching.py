@@ -106,16 +106,20 @@ CWE_TEACHING: dict[str, dict[str, Any]] = {
                "escape to read/write outside the intended directory (or tar/zip slip on extract).",
         "confirm": [
             "the path/name is untrusted (upload filename, request param, archive entry name)",
-            "no containment (realpath-under-base / basename / normalize+prefix-check) guards it",
+            "no REAL-PATH containment guards it — i.e. it does NOT resolve the final path (Path.resolve()"
+            " / os.path.realpath, which also collapses symlinks) and assert it is under the base",
             "the exact tainted path is the one passed to open/join/extract",
         ],
         "refute": [
-            "the resolved path is checked to stay under a fixed base before use",
-            "only a basename is used, or entries are validated on extract",
+            "the RESOLVED real path is checked to be under a fixed base before use (realpath, then a "
+            "true is-relative-to / commonpath check — not a raw string check)",
+            "only a basename is used, or archive entries are validated on extract",
         ],
-        "learn": "The escape is ../../. The fix is to resolve the final path and assert it stays under a "
-                 "trusted base BEFORE touching the filesystem. tarfile.extractall on untrusted archives "
-                 "is the classic 'zip slip' variant.",
+        "learn": "The escape is ../../. Containment means: resolve the FINAL real path (Path.resolve() "
+                 "/ os.path.realpath — this also follows symlinks) and assert it stays under a trusted "
+                 "base, BEFORE touching the filesystem. A naive string prefix check is NOT safe: it is "
+                 "fooled by symlinks and by sibling prefixes (base '/srv/data' 'contains' "
+                 "'/srv/data-evil'). tarfile.extractall on untrusted archives is the classic 'zip slip'.",
     },
     "CWE-113": {
         "name": "CRLF injection / HTTP response splitting",

@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json as _json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Callable, Optional, TextIO
@@ -29,30 +30,41 @@ for _p in (str(HERE), str(HERE / "harness")):
 
 import teaching  # noqa: E402
 
-# The public detector modules (the local-only Solidity ones are NOT part of the public build).
-_DETECTOR_MODULES = [
-    "pp_detector", "ssrf_detector", "xxe_detector", "cmdinj_detector", "deserial_detector",
-    "pathtrav_detector", "tarfile_detector", "crlf_detector", "ldapinj_detector", "nosql_detector",
-    "openredirect_detector", "sqli_detector", "ssti_detector",
+# The public detector modules (the local-only Solidity ones are NOT part of the public build), each
+# with the file extensions it actually handles. A detector runs ONLY on files it handles, so a raised
+# exception is a REAL detector failure worth surfacing — not an expected wrong-language parse error.
+_JS = {".js", ".mjs", ".cjs", ".jsx"}
+_DETECTORS_SPEC = [
+    ("pp_detector", _JS),
+    ("ssrf_detector", {".py"}),
+    ("ssti_detector", {".py"}),
+    ("crlf_detector", {".py"}),
+    ("openredirect_detector", {".py"}),
+    ("tarfile_detector", {".py"}),
+    ("cmdinj_detector", {".py"} | _JS),
+    ("deserial_detector", {".py", ".java"} | _JS),
+    ("pathtrav_detector", {".py"} | _JS),
+    ("xxe_detector", {".py", ".java"}),
+    ("ldapinj_detector", {".py", ".java", ".php"}),
+    ("nosql_detector", _JS | {".ts", ".tsx"}),
+    ("sqli_detector", {".py", ".php"}),
 ]
-# Source extensions worth feeding to the detectors (wrong-language input safely yields nothing, so
-# the mapping need not be exact — a detector self-filters by returning no matches / raising, caught).
-_CODE_EXTS = {".py", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".java", ".php"}
+_CODE_EXTS = set().union(*(exts for _m, exts in _DETECTORS_SPEC))
 _SKIP_DIRS = {"node_modules", ".git", "vendor", "dist", "build", ".venv", "site-packages", "__pycache__"}
 _MAX_BYTES = 512 * 1024  # skip very large files (a teaching tool works on human-sized source)
 
 Answerer = Callable[[str, dict], str]
 
 
-def load_detectors() -> tuple[list[tuple[str, Any]], list[str]]:
+def load_detectors() -> tuple[list[tuple[str, Any, set]], list[str]]:
     """Import the public detectors. Returns ``(detectors, skipped)`` where each detector is
-    ``(rule_id, module)``; a module that fails to import is named in ``skipped``."""
-    out: list[tuple[str, Any]] = []
+    ``(rule_id, module, extensions)``; a module that fails to import is named in ``skipped``."""
+    out: list[tuple[str, Any, set]] = []
     skipped: list[str] = []
-    for mod in _DETECTOR_MODULES:
+    for mod, exts in _DETECTORS_SPEC:
         try:
             m = importlib.import_module(mod)
-            out.append((getattr(m, "RULE_ID", mod), m))
+            out.append((getattr(m, "RULE_ID", mod), m, exts))
         except Exception as e:  # a detector whose grammar isn't installed is skipped, not fatal
             skipped.append(f"{mod} ({e})")
     return out, skipped
@@ -71,15 +83,29 @@ def _finding_from(result: dict, rule_fallback: str, uri: str) -> Optional[dict]:
         return None
 
 
-def scan_path(path: Path, detectors: list[tuple[str, Any]]) -> tuple[list[dict], dict]:
-    """Run the detectors over a file or directory (static; reads source as text). Returns
-    ``(findings, coverage)``; coverage records files scanned vs. skipped so blind spots are visible."""
-    coverage = {"scanned": 0, "skipped": 0}
-    files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
+def _iter_source_files(path: Path):
+    """Yield files under ``path``, pruning excluded directories DURING traversal (never descending
+    into node_modules/.git/.venv/… on a large tree)."""
+    if path.is_file():
+        yield path
+        return
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]  # prune in place → don't descend
+        for fn in filenames:
+            yield Path(dirpath) / fn
+
+
+def scan_path(path: Path, detectors: list[tuple[str, Any, set]]) -> tuple[list[dict], dict]:
+    """Run the detectors over a file or directory (static; reads source as text). Each detector runs
+    only on files it handles. Returns ``(findings, coverage)``; coverage records files scanned vs.
+    skipped and any REAL detector errors (a detector raising on an applicable file) so nothing is
+    silently swallowed — 'not scanned is not clean'."""
+    coverage = {"scanned": 0, "skipped": 0, "detector_errors": 0}
     findings: list[dict] = []
     base = path if path.is_dir() else path.parent
-    for p in files:
-        if any(part in _SKIP_DIRS for part in p.parts) or p.suffix.lower() not in _CODE_EXTS:
+    for p in _iter_source_files(path):
+        ext = p.suffix.lower()
+        if ext not in _CODE_EXTS:
             coverage["skipped"] += 1
             continue
         try:
@@ -92,14 +118,16 @@ def scan_path(path: Path, detectors: list[tuple[str, Any]]) -> tuple[list[dict],
             continue
         coverage["scanned"] += 1
         uri = str(p.relative_to(base)) if p != path else p.name
-        for rid, m in detectors:
+        for rid, m, exts in detectors:
+            if ext not in exts:
+                continue  # this detector does not handle this language
             try:
                 for r in m.scan_source(src, uri):
                     f = _finding_from(r, rid, uri)
                     if f:
                         findings.append(f)
             except Exception:
-                continue  # wrong-language input / parse error — this detector simply doesn't apply
+                coverage["detector_errors"] += 1  # a genuine failure on an applicable file — surfaced
     findings.sort(key=lambda f: (f["file"], f["line"], f["rule"]))
     return findings, coverage
 
@@ -137,8 +165,10 @@ def render(findings: list[dict], coverage: dict, *, out: TextIO, skipped_detecto
               "learn from and verify:", file=out)
         for i, f in enumerate(findings, 1):
             render_finding(f, index=i, total=len(findings), out=out)
+    errs = coverage.get("detector_errors", 0)
+    err_note = f"; {errs} detector error(s) — a detector failed on a file it handles" if errs else ""
     print(f"\n[coverage] scanned {coverage['scanned']} source file(s); skipped "
-          f"{coverage['skipped']}. Not scanned is not clean.", file=out)
+          f"{coverage['skipped']}{err_note}. Not scanned is not clean.", file=out)
     print("\nHow DeepThought thinks (carry these away):", file=out)
     for note in teaching.methodology_notes():
         print(f"  • {note}", file=out)
