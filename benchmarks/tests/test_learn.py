@@ -102,11 +102,33 @@ def test_scan_path_prunes_excluded_directories(tmp_path):
     assert coverage["scanned"] == 1  # only app.py
 
 
-def test_coverage_reports_detector_errors_key(tmp_path):
+def test_coverage_reports_error_keys(tmp_path):
     (tmp_path / "ok.py").write_text(_BENIGN)
     detectors, _ = learn.load_detectors()
     _findings, coverage = learn.scan_path(tmp_path, detectors)
-    assert coverage["detector_errors"] == 0  # clean run, no swallowed detector failures
+    assert coverage["detector_errors"] == 0 and coverage["walk_errors"] == 0  # nothing swallowed
+
+
+def test_scan_path_skips_symlinks_in_tree(tmp_path):
+    (tmp_path / "real.py").write_text(_TARVULN)
+    try:
+        (tmp_path / "link.py").symlink_to(tmp_path / "real.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    detectors, _ = learn.load_detectors()
+    findings, coverage = learn.scan_path(tmp_path, detectors)
+    assert coverage["scanned"] == 1  # only real.py — the symlink is not followed
+    assert not any("link.py" in f["file"] for f in findings)
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "mkfifo"), reason="no mkfifo on this platform")
+def test_scan_path_skips_fifo_without_hanging(tmp_path):
+    import os as _os
+    _os.mkfifo(tmp_path / "pipe.py")  # a named pipe matching a code extension would hang read_text
+    (tmp_path / "real.py").write_text(_BENIGN)
+    detectors, _ = learn.load_detectors()
+    _findings, coverage = learn.scan_path(tmp_path, detectors)  # must return, not block
+    assert coverage["scanned"] == 1  # only the regular file; the FIFO is skipped
 
 
 def test_render_includes_teaching_and_methodology_and_coverage():

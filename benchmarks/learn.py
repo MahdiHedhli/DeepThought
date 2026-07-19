@@ -83,27 +83,43 @@ def _finding_from(result: dict, rule_fallback: str, uri: str) -> Optional[dict]:
         return None
 
 
-def _iter_source_files(path: Path):
-    """Yield files under ``path``, pruning excluded directories DURING traversal (never descending
-    into node_modules/.git/.venv/… on a large tree)."""
-    if path.is_file():
+def _iter_source_files(path: Path, on_error: Optional[Callable[[Any], None]] = None):
+    """Yield source files under ``path``, pruning excluded directories DURING traversal (never
+    descending into node_modules/.git/.venv/… on a large tree).
+
+    Symlink/irregular-file policy is explicit: during directory traversal we yield ONLY regular,
+    NON-symlink files — so a symlink is never followed out of the tree, and a FIFO/socket can never
+    reach ``read_text`` and hang the scan. A directly-named file is honored as the user's explicit
+    choice. Traversal ``OSError``s (e.g. an unreadable subtree) are reported via ``on_error`` rather
+    than silently dropped, so an incomplete scan cannot look clean."""
+    if path.is_file():  # is_file() follows symlinks: honor an explicitly-named (regular) target
         yield path
         return
-    for dirpath, dirnames, filenames in os.walk(path):
+    for dirpath, dirnames, filenames in os.walk(path, onerror=on_error, followlinks=False):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]  # prune in place → don't descend
         for fn in filenames:
-            yield Path(dirpath) / fn
+            p = Path(dirpath) / fn
+            try:
+                if p.is_file() and not p.is_symlink():  # regular files only; don't follow symlinks
+                    yield p
+            except OSError as e:
+                if on_error is not None:
+                    on_error(e)
 
 
 def scan_path(path: Path, detectors: list[tuple[str, Any, set]]) -> tuple[list[dict], dict]:
     """Run the detectors over a file or directory (static; reads source as text). Each detector runs
     only on files it handles. Returns ``(findings, coverage)``; coverage records files scanned vs.
-    skipped and any REAL detector errors (a detector raising on an applicable file) so nothing is
-    silently swallowed — 'not scanned is not clean'."""
-    coverage = {"scanned": 0, "skipped": 0, "detector_errors": 0}
+    skipped, plus any REAL detector errors (a detector raising on an applicable file) and traversal
+    errors (an unreadable subtree) so nothing is silently swallowed — 'not scanned is not clean'."""
+    coverage = {"scanned": 0, "skipped": 0, "detector_errors": 0, "walk_errors": 0}
     findings: list[dict] = []
     base = path if path.is_dir() else path.parent
-    for p in _iter_source_files(path):
+
+    def _on_walk_error(_err: Any) -> None:
+        coverage["walk_errors"] += 1
+
+    for p in _iter_source_files(path, on_error=_on_walk_error):
         ext = p.suffix.lower()
         if ext not in _CODE_EXTS:
             coverage["skipped"] += 1
@@ -166,9 +182,14 @@ def render(findings: list[dict], coverage: dict, *, out: TextIO, skipped_detecto
         for i, f in enumerate(findings, 1):
             render_finding(f, index=i, total=len(findings), out=out)
     errs = coverage.get("detector_errors", 0)
-    err_note = f"; {errs} detector error(s) — a detector failed on a file it handles" if errs else ""
+    walk = coverage.get("walk_errors", 0)
+    notes = ""
+    if errs:
+        notes += f"; {errs} detector error(s) — a detector failed on a file it handles"
+    if walk:
+        notes += f"; {walk} unreadable subtree(s) — the scan is INCOMPLETE"
     print(f"\n[coverage] scanned {coverage['scanned']} source file(s); skipped "
-          f"{coverage['skipped']}{err_note}. Not scanned is not clean.", file=out)
+          f"{coverage['skipped']}{notes}. Not scanned is not clean.", file=out)
     print("\nHow DeepThought thinks (carry these away):", file=out)
     for note in teaching.methodology_notes():
         print(f"  • {note}", file=out)
