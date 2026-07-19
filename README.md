@@ -200,6 +200,22 @@ Each detector is calibrated against a **seed CVE** and evaluated against **held-
 
 > **Early experiments.** The generalization numbers, the honest curve, and a rough cross-model field note are **preliminary** — they live in **[docs/experiments.md](docs/experiments.md)** and should be read as directional signals, not settled benchmarks. Twelve classes are measured today at a preliminary mean of **~79% held-out generalization**, versioned under a regression bar (no class rate may drop when a new one lands). XXE sits at an honest 1/3 and that ceiling is reported, not hidden; unresolvable CVEs are dropped with a reason; misses become regression fixtures.
 
+### Learn mode — follow along
+
+A static, local **teaching switch** explains how the detectors think, on your own code:
+
+```bash
+python benchmarks/learn.py path/to/file_or_dir           # explain every candidate
+python benchmarks/learn.py app.py --ask "why is this exploitable?"
+```
+
+For each candidate it shows what the CWE class is, **why** it matters, a **disprove-first** triage
+checklist (rule these out before believing it), the false-positive shapes, and the fix intuition —
+plus the DeepThought methodology (*a candidate is not a finding; source is data, never code;
+rediscovery ≠ discovery*). It reads your source as **data** and never executes it (Article III).
+`--ask` opens a small offline Q&A over a finding, with a pluggable hook for an LLM subagent. The
+pedagogy is one module, [`benchmarks/teaching.py`](benchmarks/teaching.py).
+
 ## Research memory
 
 DeepThought carries its own portable research memory. Knowledge compounds across sessions and across Codex, Claude Code, Cursor, or a plain script without requiring an MCP server or external service.
