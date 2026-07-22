@@ -88,3 +88,46 @@ self-graded benchmarks — **not a model leaderboard**. Caveats that swamp any r
 
 The durable takeaway is only this: **a fixed corpus with hidden held-out is the honest way to
 measure**, and it is how the rediscovery numbers above are produced.
+
+---
+
+## 3. Direct rediscovery eval — find-the-bug on the fixed corpus (preliminary)
+
+Section 2 measured a model *building a detector*. A lighter, complementary instrument asks the
+sharper question directly: given the real vulnerable source of a held-out CVE, can a model find the
+sink **line-precise** and name the class? [`benchmarks/model_rediscovery_eval.py`](../benchmarks/model_rediscovery_eval.py)
+feeds each held-out CVE's pinned vulnerable file(s) to a model and scores its answer against the
+corpus `sink_probe` — the exact rule the deterministic detectors are graded on (a located line's own
+text must contain the sink probe, and must actually appear in the source, to guard against a
+hallucinated line). Honest by construction: fixed/blind corpus the model never curated, **refusal →
+N/A (never a measured 0)**, pin-or-drop, exact fractions, **single-sample**.
+
+A panel over the 39 held-out CVEs (reasoning effort held at `-high`, read-only, answer-only):
+
+| Model | Located (line-precise) | CWE classified | Refused | Dropped |
+|---|---|---|---|---|
+| `gemini-3.5-flash-high` | 14/32 (44%) | 25/32 | 5/39 | 2 |
+| `gemini-3.6-flash-high` | 6/17 (35%) | 12/17 | **20/39** | 2 |
+| `gpt-oss-120b-medium` (contrast) | 16/37 (43%) | 26/37 | 0/39 | 2 |
+
+**The notable result is a refusal regression, and it was verified.** `gemini-3.6-flash-high`
+declined ~half the corpus (20/39, across 11 classes) — even to *identify* a **known, already-patched,
+public** vulnerability in read-only source. Sampled raw replies were genuine policy declines
+("Sorry, I cannot fulfill your request to analyze or find vulnerabilities in the provided code…"),
+reproduced on re-run and distinguished by the harness from *tooling* failures (a headless
+tool-permission denial or timeout is retried and dropped, never scored as a refusal or a miss —
+conflating the two was a real bug caught and fixed before these numbers were taken). The *newer*
+Gemini flash refuses defensive analysis far more than 3.5-flash (5) and than the open contrast model
+(0), echoing and worsening the Gemini-3.1-Pro refusal noted above. On the subset each model *did*
+answer, the three cluster (~35–44%): no model is clearly better at find-the-bug, and the hard classes
+are hard for everyone (XXE 0 across all, SSTI / NoSQL / prototype-pollution mostly 0) — the walls are
+**task-structural, not model-specific**.
+
+**Read this as narrowly as the note above.** It is **single-sample** (model non-determinism is real
+— one case flipped refuse↔answer between runs); it is a **different task** from the section-2
+detector-build numbers, so it is **not comparable** to them; it is **not a leaderboard**. In
+particular `gemini-3.6-flash`'s rate is computed only over the subset it *chose* to answer — refusals
+are not missing-at-random, so its 6/17 is not apples-to-apples with a model that answered everything.
+Two CVEs whose single source file exceeds the single-prompt cap are dropped (never truncated, which
+could hide the sink). Raw per-entry results:
+[`benchmarks/data/model-rediscovery-eval.json`](../benchmarks/data/model-rediscovery-eval.json).
