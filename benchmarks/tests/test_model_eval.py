@@ -41,6 +41,45 @@ def test_build_prompt_numbers_source_and_asks_for_json():
     assert "app.py" in p and "requests.get(url, stream=True)" in p and "    3  " in p  # numbered src
 
 
+def test_extract_json_is_brace_aware_not_greedy():
+    # a chatty reply: prose, the echoed schema TEMPLATE (invalid JSON: <int> is unquoted), THEN the
+    # real answer. A greedy first-{ to last-} would span it all and fail to parse; the brace-aware
+    # scan skips the malformed template and recovers the real answer object.
+    reply = ('Sure, the format is {"vulnerable_line": "<verbatim>", "line_number": <int>, "cwe": '
+             '"CWE-XXX"} and here is my answer:\n'
+             '{"vulnerable_line": "y", "line_number": 3, "cwe": "CWE-918"}\nHope that helps!')
+    obj = mre._extract_json(reply)
+    assert obj is not None and obj["cwe"] == "CWE-918" and obj["line_number"] == 3
+
+
+def test_extract_json_prefers_the_answer_shaped_object():
+    # a non-answer JSON object (no vulnerable_line) precedes the real answer; prefer the answer-shaped
+    # one so a model that emits a status/thought blob before answering is scored on its answer.
+    reply = '{"note": "analyzing the request handler"} then {"vulnerable_line": "z", "cwe": "CWE-22"}'
+    obj = mre._extract_json(reply)
+    assert obj is not None and obj["cwe"] == "CWE-22"
+
+
+def test_extract_json_handles_braces_inside_strings():
+    # a brace inside a JSON string value must not confuse the balanced scan
+    obj = mre._extract_json('noise {"vulnerable_line": "a = obj[\'{\'] + 1", "cwe": "CWE-89"} tail')
+    assert obj is not None and obj["cwe"] == "CWE-89"
+
+
+def test_extract_json_skips_a_malformed_first_object():
+    # first {...} is not valid JSON (bare ...); extractor must fall through to the next candidate
+    obj = mre._extract_json('{not: valid, ...} then {"vulnerable_line": "z", "cwe": "CWE-22"}')
+    assert obj is not None and obj["cwe"] == "CWE-22"
+
+
+def test_agy_launch_failure_string_classifies_as_tooling():
+    # the string agy_answerer returns on an OSError (e.g. agy not installed) must be a TOOLING failure,
+    # so run_eval retries then drops it — never a crash, a model refusal, or a miss.
+    launch_fail = "no output produced — agy launch failed (FileNotFoundError: [Errno 2] no such file: 'agy')"
+    s = mre.score(launch_fail, _ENTRY, _TARGETS)
+    assert s["outcome"] == "tooling" and s["refused"] is False and s["located"] is None
+
+
 def test_score_located_on_correct_line():
     s = mre.score(_ans("return requests.get(url, stream=True)  # the vulnerable sink"), _ENTRY, _TARGETS)
     assert s["located"] is True and s["cwe_match"] is True and s["refused"] is False

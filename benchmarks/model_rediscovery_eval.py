@@ -109,18 +109,53 @@ def build_prompt(entry: dict, targets: dict[str, str]) -> str:
     return _PROMPT_HEAD + "\n\n".join(blocks) + "\n"
 
 
+_ANSWER_KEY = "vulnerable_line"  # the field that distinguishes a real answer from an echoed schema
+
+
 def _extract_json(text: str) -> Optional[dict]:
-    """Pull the first JSON object out of a model's (possibly chatty) reply."""
+    """Pull the model's answer JSON object out of a (possibly chatty) reply.
+
+    Brace-aware: scans every balanced ``{...}`` span (respecting quoted strings + escapes) instead of
+    a greedy first-``{``-to-last-``}`` regex, which would span an echoed schema example AND the real
+    answer (or prose braces) into one unparseable blob and wrongly drop a valid answer as tooling.
+    Among the parseable objects it PREFERS an answer-shaped one (carrying ``vulnerable_line``), so a
+    model that echoes the schema template before answering is scored on its answer, not the template.
+    Falls back to the first parseable object when none is answer-shaped."""
     if not text:
         return None
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-        return obj if isinstance(obj, dict) else None
-    except json.JSONDecodeError:
-        return None
+    first: Optional[dict] = None
+    for start, ch0 in enumerate(text):
+        if ch0 != "{":
+            continue
+        depth = 0
+        in_str = esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:  # this candidate object is balanced — try to parse it
+                    try:
+                        obj = json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        break  # not valid JSON; fall through to the next opening brace
+                    if isinstance(obj, dict):
+                        if _ANSWER_KEY in obj:
+                            return obj
+                        first = first if first is not None else obj
+                    break
+    return first
 
 
 def _cwe_norm(s: str) -> str:
@@ -248,6 +283,9 @@ def agy_answerer(model: str, *, timeout: int = 300) -> Answerer:
                                    cwd=td, capture_output=True, text=True, timeout=timeout)
             except subprocess.TimeoutExpired:
                 return "TIMEOUT"
+            except OSError as e:  # agy missing/not launchable (FileNotFoundError et al.) -> a TOOLING
+                return f"no output produced — agy launch failed ({type(e).__name__}: {e})"  # failure,
+                # retried and dropped, NEVER crashing the run or scored as a model refusal/miss.
             return r.stdout or r.stderr
     return _call
 
