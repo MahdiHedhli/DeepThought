@@ -104,4 +104,4 @@ lifecycle transition.
 - **Hard stops remain (require Mahdi's sign-off, never autonomous):** any
   transmission/send/publish-externally of a disclosure, any auto-transition to
   `disclosed`, and any fabrication of a CVE or advisory reference. Each → URGENT
-  NTFY to `Mahdi-Dev` + wait.
+  NTFY to `<private-notification-topic>` + wait.

@@ -82,7 +82,7 @@ code**. `execution_enabled` ships `False`; no test, smoke, or CLI path flips it.
 Wiring VERIFY to execute a real repro against a real backend is a **distinct,
 later change** that must not land until Mahdi signs off on the sandbox (Phase 0
 §0.3: ephemeral microVM primary, default-deny egress; hardened container
-fallback). An NTFY HARD-STOP alert to `Mahdi-Dev` precedes that change; it waits
+fallback). An NTFY HARD-STOP alert to `<private-notification-topic>` precedes that change; it waits
 on sign-off.
 
 ## Review status & advance decision

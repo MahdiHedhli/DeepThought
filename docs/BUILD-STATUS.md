@@ -163,7 +163,7 @@ call termination rather than wait for silence.
   findings, squash-merge (`gh pr merge <n> --squash --delete-branch`, author
   MahdiHedhli) and proceed. Only stop for: reviewers can't reach consensus, a real
   design decision, or a constitution hard stop.
-- **NTFY** to `ntfy.sh/Mahdi-Dev` on every hard stop (urgent) and every merge.
+- **NTFY** to `<private-notification-endpoint>` on every hard stop (urgent) and every merge.
 
 ## What needs a decision next
 The numbered roadmap is complete and **both benchmark tiers are merged**, so there is
